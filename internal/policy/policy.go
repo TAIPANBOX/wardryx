@@ -3,9 +3,10 @@
 //
 // A policy is a small YAML or JSON document that targets a set of agents by
 // an agent:// glob and constrains what those agents may do: which tools are
-// denied outright, whether the agent must carry a live attestation, and the
-// spend level above which a human must approve the action. Loading and
-// compiling is entirely deterministic: no LLM, no network call, and no
+// denied outright, which domains its declared tools may reach, how many
+// steps a run may take, whether the agent must carry a live attestation,
+// and the spend level above which a human must approve the action. Loading
+// and compiling is entirely deterministic: no LLM, no network call, and no
 // randomness anywhere in this package, matching Idryx's rule that the
 // decision path stays deterministic and auditable.
 package policy
@@ -36,20 +37,25 @@ type Policy struct {
 	Target string `yaml:"target" json:"target"`
 	// DenyTool lists tool names this policy refuses outright.
 	DenyTool []string `yaml:"deny_tool,omitempty" json:"deny_tool,omitempty"`
-	// AllowDomains lists network destinations the agent may reach. Carried
-	// through compilation for a future egress-enforcement point; the
-	// decision engine's DecideRequest has no domain field to check it
-	// against today, so Decide never reads it (see internal/pdp doc
-	// comment).
+	// AllowDomains lists network destinations the agent may reach. Enforced
+	// by internal/pdp's Decide against the request's declared Domains: any
+	// entry in Domains that is absent from AllowDomains denies the request.
+	// A request that declares no Domains is not restricted by this field --
+	// AllowDomains only ever restricts domains the caller actually declared
+	// (see internal/pdp doc comment). Full runtime tool-egress enforcement
+	// (stopping a tool from actually reaching an undeclared domain) is an
+	// enforcement point's job, not this field's: AllowDomains only governs
+	// what the caller declares up front.
 	AllowDomains []string `yaml:"allow_domains,omitempty" json:"allow_domains,omitempty"`
 	// RequireHumanAboveUSD is the estimated-cost threshold above which a
 	// human must approve the action. Zero (the default) means "no
 	// threshold": Decide never holds solely because this field is unset.
 	RequireHumanAboveUSD float64 `yaml:"require_human_above_usd,omitempty" json:"require_human_above_usd,omitempty"`
-	// MaxSteps caps how many steps a run may take. Carried through
-	// compilation for a future step-counting enforcement point; like
-	// AllowDomains, DecideRequest carries no step count today, so Decide
-	// never reads it.
+	// MaxSteps caps how many steps a run may take. Enforced by
+	// internal/pdp's Decide against the request's declared Steps: once
+	// Steps reaches or exceeds MaxSteps, the request denies. Zero (the
+	// default) means "no cap": Decide never denies solely because this
+	// field is unset.
 	MaxSteps int `yaml:"max_steps,omitempty" json:"max_steps,omitempty"`
 	// DenyIfUnattested denies any request from an agent with no live
 	// attestation (attestation method "" or "none").

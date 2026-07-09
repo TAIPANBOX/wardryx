@@ -162,12 +162,13 @@ type checkResult struct {
 // checkAgents loads every passport under passportDir and the policy set at
 // policyPath, and evaluates each passport's current attestation posture
 // against it via the same pdp.Engine.Decide used by the live API. A
-// Passport carries no tool list or cost estimate (it is static identity
-// metadata, not an in-flight action), so ToolNames and EstCostUSD are left
-// at their zero values: only deny_if_unattested (and, trivially, whether
-// any policy targets the agent at all) is meaningfully exercised by a
-// dry-run over passports alone. deny_tool/require_human_above_usd rules
-// only ever fire against a real, in-flight DecideRequest from /v1/decide.
+// Passport carries no tool list, cost estimate, step count, or domain list
+// (it is static identity metadata, not an in-flight action), so ToolNames,
+// EstCostUSD, Steps, and Domains are left at their zero values: only
+// deny_if_unattested (and, trivially, whether any policy targets the agent
+// at all) is meaningfully exercised by a dry-run over passports alone.
+// deny_tool/require_human_above_usd/max_steps/allow_domains rules only
+// ever fire against a real, in-flight DecideRequest from /v1/decide.
 func checkAgents(passportDir, policyPath string) ([]checkResult, passports.Report, string, error) {
 	ids, rep, err := passports.Load(passportDir)
 	if err != nil {

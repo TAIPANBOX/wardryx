@@ -62,11 +62,21 @@ answer.
 2. **Decision engine** (`internal/pdp`): `Engine.Decide` matches policies
    for the requesting agent and applies, in order: an invalid delegation
    chain denies outright; a requested tool in `deny_tool` denies; a matched
-   `deny_if_unattested` policy with no live attestation denies; an estimated
-   cost over a matched `require_human_above_usd` threshold holds, unless a
-   valid `approval_token` is presented (then it allows) or an *invalid*
-   token is presented (then it denies, rather than being quietly treated the
-   same as no token at all); otherwise it allows.
+   `deny_if_unattested` policy with no live attestation denies; a run's
+   accumulated step count at or over a matched `max_steps` denies; a
+   declared domain absent from a matched `allow_domains` denies; an
+   estimated cost over a matched `require_human_above_usd` threshold holds,
+   unless a valid `approval_token` is presented (then it allows) or an
+   *invalid* token is presented (then it denies, rather than being quietly
+   treated the same as no token at all); otherwise it allows. A deny from
+   any rule wins outright and short-circuits the rest.
+   `allow_domains` is enforced over the domains the caller declares in the
+   request (its tools' or MCP servers' declared destinations), not over
+   what a tool actually reaches at runtime -- an empty declared-domains list
+   is a no-op, never a denial, and full runtime tool-egress enforcement is
+   the job of whatever proxies the tool call (an MCP broker), not Wardryx.
+   `max_steps` is enforced over the run's accumulated step count, supplied
+   by the enforcement point on every `/v1/decide` call.
 3. **Stateless human-in-the-loop** (`internal/approval`): a hold creates a
    pending row (`internal/store`) and returns immediately; nothing blocks
    waiting for a human. An admin decision later mints a short-lived
@@ -106,12 +116,20 @@ Content-Type: application/json
   "run_id": "run-42",
   "on_behalf_of": ["user://acme.example/alice"],
   "tool_names": ["send_wire_transfer"],
+  "domains": ["payments.acme.example"],
+  "steps": 3,
   "model": "claude-sonnet-5",
   "est_cost_usd": 1200.00,
   "attestation_method": "spiffe-svid",
   "approval_token": ""
 }
 ```
+
+`domains` and `steps` are both optional and both default to "impose no
+restriction" when omitted: an empty/absent `domains` means the caller
+declared no network destinations to check against `allow_domains`, and a
+zero/absent `steps` never trips `max_steps` on its own (a matched policy's
+`max_steps` still has to be positive for the rule to fire at all).
 
 Response (a hold, in this example, because `send_wire_transfer`'s cost is
 above the matched policy's `require_human_above_usd`):
@@ -129,6 +147,12 @@ above the matched policy's `require_human_above_usd`):
 `decision` is always one of `allow`, `deny`, or `hold`. `approval_id` is only
 set on a hold. `approval_token_required` is true whenever the estimated cost
 crossed a threshold at all, whether or not a token ultimately satisfied it.
+A denied `max_steps` or `allow_domains` check reports its own `reason`
+(e.g. `"policy \"finance-guardrail\" step budget exhausted: 5 >= max_steps
+5"` or `"domain \"evil.example.com\" is not allowed by policy
+\"finance-guardrail\" (target agent://acme.example/finance/*)"`) with
+`decision: "deny"` and `approval_token_required: false`, since a deny from
+an earlier rule short-circuits before the cost threshold is ever reached.
 
 ---
 
@@ -236,7 +260,10 @@ target: "agent://acme.example/finance/*"
 deny_tool:
   - send_wire_transfer
   - delete_account
+allow_domains:
+  - payments.acme.example
 require_human_above_usd: 500
+max_steps: 40
 deny_if_unattested: true
 ```
 

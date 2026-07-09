@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/TAIPANBOX/wardryx/internal/pdp"
@@ -26,7 +27,9 @@ func newTestServer(t *testing.T) *Server {
 			Name:                 "finance-guardrail",
 			Target:               "agent://acme.example/finance/*",
 			DenyTool:             []string{"send_wire_transfer"},
+			AllowDomains:         []string{"good.example.com"},
 			RequireHumanAboveUSD: 500,
+			MaxSteps:             5,
 		},
 	})
 	if err != nil {
@@ -281,5 +284,67 @@ func TestDecideDenyDeniedTool(t *testing.T) {
 	got := decodeBody[decideResponseDTO](t, rec)
 	if got.Decision != pdp.Deny {
 		t.Fatalf("Decision = %q, want deny", got.Decision)
+	}
+}
+
+// TestDecideDenyMaxStepsOverWire proves the "steps" JSON field actually
+// reaches pdp.Decide over the full HTTP path, not just in-process: this is
+// the wire contract the TokenFuse gateway's PEP hook posts against.
+func TestDecideDenyMaxStepsOverWire(t *testing.T) {
+	srv := newTestServer(t)
+	rec := doRequest(t, srv.Handler(), http.MethodPost, "/v1/decide", adminKey, decideRequestDTO{
+		AgentID: "agent://acme.example/finance/bot1", RunID: "r1", ToolNames: []string{"generate_report"}, Steps: 5,
+	})
+	got := decodeBody[decideResponseDTO](t, rec)
+	if got.Decision != pdp.Deny {
+		t.Fatalf("Decision = %q (%s), want deny: steps=5 reached the fixture policy's max_steps=5", got.Decision, got.Reason)
+	}
+	if !strings.Contains(got.Reason, "max_steps") {
+		t.Errorf("Reason = %q, want it to mention max_steps", got.Reason)
+	}
+
+	// One step under the cap still allows.
+	underRec := doRequest(t, srv.Handler(), http.MethodPost, "/v1/decide", adminKey, decideRequestDTO{
+		AgentID: "agent://acme.example/finance/bot1", RunID: "r1", ToolNames: []string{"generate_report"}, Steps: 4,
+	})
+	under := decodeBody[decideResponseDTO](t, underRec)
+	if under.Decision != pdp.Allow {
+		t.Fatalf("Decision = %q (%s), want allow: steps=4 is under the fixture policy's max_steps=5", under.Decision, under.Reason)
+	}
+}
+
+// TestDecideDenyDisallowedDomainOverWire proves the "domains" JSON field
+// actually reaches pdp.Decide over the full HTTP path. An empty domains
+// list is a no-op even though the fixture policy sets allow_domains.
+func TestDecideDenyDisallowedDomainOverWire(t *testing.T) {
+	srv := newTestServer(t)
+	rec := doRequest(t, srv.Handler(), http.MethodPost, "/v1/decide", adminKey, decideRequestDTO{
+		AgentID: "agent://acme.example/finance/bot1", RunID: "r1", ToolNames: []string{"generate_report"}, Domains: []string{"evil.example.com"},
+	})
+	got := decodeBody[decideResponseDTO](t, rec)
+	if got.Decision != pdp.Deny {
+		t.Fatalf("Decision = %q (%s), want deny: evil.example.com is outside the fixture policy's allow_domains", got.Decision, got.Reason)
+	}
+	if !strings.Contains(got.Reason, "evil.example.com") {
+		t.Errorf("Reason = %q, want it to name the offending domain", got.Reason)
+	}
+
+	// A declared, allowed domain still allows.
+	allowedRec := doRequest(t, srv.Handler(), http.MethodPost, "/v1/decide", adminKey, decideRequestDTO{
+		AgentID: "agent://acme.example/finance/bot1", RunID: "r1", ToolNames: []string{"generate_report"}, Domains: []string{"good.example.com"},
+	})
+	allowed := decodeBody[decideResponseDTO](t, allowedRec)
+	if allowed.Decision != pdp.Allow {
+		t.Fatalf("Decision = %q (%s), want allow: good.example.com is in the fixture policy's allow_domains", allowed.Decision, allowed.Reason)
+	}
+
+	// No declared domains at all is a no-op, even though the policy sets
+	// allow_domains.
+	noneRec := doRequest(t, srv.Handler(), http.MethodPost, "/v1/decide", adminKey, decideRequestDTO{
+		AgentID: "agent://acme.example/finance/bot1", RunID: "r1", ToolNames: []string{"generate_report"},
+	})
+	none := decodeBody[decideResponseDTO](t, noneRec)
+	if none.Decision != pdp.Allow {
+		t.Fatalf("Decision = %q (%s), want allow: no domains declared means nothing to restrict", none.Decision, none.Reason)
 	}
 }

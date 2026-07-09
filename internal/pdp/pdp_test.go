@@ -18,7 +18,9 @@ func testEngine(t *testing.T) *Engine {
 			Name:                 "finance-guardrail",
 			Target:               "agent://acme.example/finance/*",
 			DenyTool:             []string{"send_wire_transfer", "delete_account"},
+			AllowDomains:         []string{"good.example.com", "reports.acme.example"},
 			RequireHumanAboveUSD: 500,
+			MaxSteps:             5,
 			DenyIfUnattested:     true,
 		},
 		{
@@ -35,8 +37,10 @@ func testEngine(t *testing.T) *Engine {
 	return New(set, []byte(testSecret))
 }
 
-// TestDecideTable covers the six required cases: allow; deny (denied
-// tool); deny (unattested); hold (over threshold); allow with a valid
+// TestDecideTable covers the decision table: allow; deny (denied tool);
+// deny (unattested); deny (max_steps at/over the cap, allow under it);
+// deny (domain outside allow_domains, allow inside it, no-op when the
+// request declares no domains); hold (over threshold); allow with a valid
 // approval token; deny with an expired-or-wrong token.
 func TestDecideTable(t *testing.T) {
 	engine := testEngine(t)
@@ -105,6 +109,84 @@ func TestDecideTable(t *testing.T) {
 			},
 			wantDecision:  Deny,
 			wantReasonHas: "requires a live attestation",
+		},
+		{
+			name: "allow (steps under the cap)",
+			req: DecideRequest{
+				AgentID:           "agent://acme.example/finance/bot1",
+				RunID:             "run-1",
+				ToolNames:         []string{"generate_report"},
+				Steps:             4,
+				EstCostUSD:        10,
+				AttestationMethod: "spiffe-svid",
+			},
+			wantDecision:  Allow,
+			wantReasonHas: "allowed",
+		},
+		{
+			name: "deny (max_steps at the cap)",
+			req: DecideRequest{
+				AgentID:           "agent://acme.example/finance/bot1",
+				RunID:             "run-1",
+				ToolNames:         []string{"generate_report"},
+				Steps:             5,
+				EstCostUSD:        10,
+				AttestationMethod: "spiffe-svid",
+			},
+			wantDecision:  Deny,
+			wantReasonHas: "step budget exhausted: 5 >= max_steps 5",
+		},
+		{
+			name: "deny (max_steps over the cap)",
+			req: DecideRequest{
+				AgentID:           "agent://acme.example/finance/bot1",
+				RunID:             "run-1",
+				ToolNames:         []string{"generate_report"},
+				Steps:             9,
+				EstCostUSD:        10,
+				AttestationMethod: "spiffe-svid",
+			},
+			wantDecision:  Deny,
+			wantReasonHas: "step budget exhausted: 9 >= max_steps 5",
+		},
+		{
+			name: "allow (domain present in allow_domains)",
+			req: DecideRequest{
+				AgentID:           "agent://acme.example/finance/bot1",
+				RunID:             "run-1",
+				ToolNames:         []string{"generate_report"},
+				Domains:           []string{"good.example.com"},
+				EstCostUSD:        10,
+				AttestationMethod: "spiffe-svid",
+			},
+			wantDecision:  Allow,
+			wantReasonHas: "allowed",
+		},
+		{
+			name: "deny (domain absent from allow_domains)",
+			req: DecideRequest{
+				AgentID:           "agent://acme.example/finance/bot1",
+				RunID:             "run-1",
+				ToolNames:         []string{"generate_report"},
+				Domains:           []string{"evil.example.com"},
+				EstCostUSD:        10,
+				AttestationMethod: "spiffe-svid",
+			},
+			wantDecision:  Deny,
+			wantReasonHas: `domain "evil.example.com" is not allowed`,
+		},
+		{
+			name: "allow (empty domains is a no-op even though allow_domains is configured)",
+			req: DecideRequest{
+				AgentID:           "agent://acme.example/finance/bot1",
+				RunID:             "run-1",
+				ToolNames:         []string{"generate_report"},
+				Domains:           []string{},
+				EstCostUSD:        10,
+				AttestationMethod: "spiffe-svid",
+			},
+			wantDecision:  Allow,
+			wantReasonHas: "allowed",
 		},
 		{
 			name: "hold (over threshold)",
@@ -248,6 +330,66 @@ func TestDecidePicksStrictestExceededThreshold(t *testing.T) {
 	}
 	if !strings.Contains(resp.Reason, `"strict"`) {
 		t.Errorf("Reason = %q, want it to cite the strict policy (lowest exceeded threshold)", resp.Reason)
+	}
+}
+
+func TestDecidePicksStrictestExceededMaxSteps(t *testing.T) {
+	set, err := policy.Compile([]policy.Policy{
+		{Name: "loose", Target: "agent://x/*", MaxSteps: 20},
+		{Name: "strict", Target: "agent://x/*", MaxSteps: 10},
+	})
+	if err != nil {
+		t.Fatalf("policy.Compile: %v", err)
+	}
+	engine := New(set, nil)
+	resp := engine.Decide(DecideRequest{AgentID: "agent://x/bot", Steps: 15})
+	if resp.Decision != Deny {
+		t.Fatalf("Decision = %q, want %q", resp.Decision, Deny)
+	}
+	if !strings.Contains(resp.Reason, `"strict"`) {
+		t.Errorf("Reason = %q, want it to cite the strict policy (lowest exceeded max_steps)", resp.Reason)
+	}
+}
+
+func TestDecideMaxStepsZeroNeverDenies(t *testing.T) {
+	// max_steps's zero value means "no cap configured," not "deny any step
+	// count," mirroring require_human_above_usd's zero value.
+	set, err := policy.Compile([]policy.Policy{{Target: "agent://x/*"}})
+	if err != nil {
+		t.Fatalf("policy.Compile: %v", err)
+	}
+	engine := New(set, nil)
+	resp := engine.Decide(DecideRequest{AgentID: "agent://x/bot", Steps: 999999})
+	if resp.Decision != Allow {
+		t.Errorf("Decision = %q, want %q: no policy on this agent sets a positive max_steps", resp.Decision, Allow)
+	}
+}
+
+func TestDecideAllowDomainsComposeByIntersectionAcrossMatchedPolicies(t *testing.T) {
+	// Two matched policies each declare their own non-empty allow_domains.
+	// A domain allowed by one but not the other must still deny: allow-list
+	// policies compose by intersection, the most restrictive matched policy
+	// governs (see deniedDomain's doc comment).
+	set, err := policy.Compile([]policy.Policy{
+		{Name: "broad", Target: "agent://x/*", AllowDomains: []string{"a.example", "b.example"}},
+		{Name: "narrow", Target: "agent://x/*", AllowDomains: []string{"b.example"}},
+	})
+	if err != nil {
+		t.Fatalf("policy.Compile: %v", err)
+	}
+	engine := New(set, nil)
+
+	resp := engine.Decide(DecideRequest{AgentID: "agent://x/bot", Domains: []string{"a.example"}})
+	if resp.Decision != Deny {
+		t.Fatalf("Decision = %q, want %q: a.example is outside the narrow policy's allow_domains", resp.Decision, Deny)
+	}
+	if !strings.Contains(resp.Reason, `"narrow"`) {
+		t.Errorf("Reason = %q, want it to cite the narrow policy", resp.Reason)
+	}
+
+	resp = engine.Decide(DecideRequest{AgentID: "agent://x/bot", Domains: []string{"b.example"}})
+	if resp.Decision != Allow {
+		t.Fatalf("Decision = %q, want %q: b.example satisfies both matched policies' allow_domains", resp.Decision, Allow)
 	}
 }
 

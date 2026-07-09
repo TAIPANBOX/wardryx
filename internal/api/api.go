@@ -122,6 +122,8 @@ type decideRequestDTO struct {
 	RunID             string   `json:"run_id"`
 	OnBehalfOf        []string `json:"on_behalf_of,omitempty"`
 	ToolNames         []string `json:"tool_names,omitempty"`
+	Domains           []string `json:"domains,omitempty"`
+	Steps             int      `json:"steps,omitempty"`
 	Model             string   `json:"model,omitempty"`
 	EstCostUSD        float64  `json:"est_cost_usd,omitempty"`
 	AttestationMethod string   `json:"attestation_method,omitempty"`
@@ -152,6 +154,8 @@ func (s *Server) handleDecide(w http.ResponseWriter, r *http.Request, principal 
 		RunID:             dto.RunID,
 		OnBehalfOf:        dto.OnBehalfOf,
 		ToolNames:         dto.ToolNames,
+		Domains:           dto.Domains,
+		Steps:             dto.Steps,
 		Model:             dto.Model,
 		EstCostUSD:        dto.EstCostUSD,
 		AttestationMethod: dto.AttestationMethod,

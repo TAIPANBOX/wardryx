@@ -58,6 +58,17 @@ type DecideRequest struct {
 	// ToolNames are the tools this action would invoke. Checked against
 	// every matched policy's DenyTool.
 	ToolNames []string
+	// Domains are the network destinations this action's declared tools
+	// would reach (already-extracted hostnames, e.g. "api.example.com").
+	// Checked against every matched policy's AllowDomains. Empty means the
+	// caller declared no domains for this action, which imposes no
+	// restriction: Decide only restricts domains the caller actually
+	// declares, it never invents one to check.
+	Domains []string
+	// Steps is the run's accumulated step count so far, including the
+	// action this request is deciding. Checked against every matched
+	// policy's MaxSteps.
+	Steps int
 	// Model is the model the agent is running, carried through for
 	// logging/events; Decide does not branch on it.
 	Model string
@@ -121,12 +132,30 @@ func New(policies *policy.Set, approvalSecret []byte) *Engine {
 // PolicyVersion returns the Engine's loaded policy set's PolicyVersion.
 func (e *Engine) PolicyVersion() string { return e.policies.Version() }
 
-// Decide evaluates req against the Engine's policy set. See the package
-// doc comment for the exact rule order: an invalid delegation chain denies
-// first, then deny_tool, then deny_if_unattested, then the cost threshold
-// (which resolves to Hold unless a valid ApprovalToken was presented, in
-// which case it resolves to Allow); a request that trips none of those
-// rules is Allow.
+// Decide evaluates req against the Engine's policy set, in this order:
+//  1. an invalid on_behalf_of delegation chain denies, independent of any
+//     policy;
+//  2. a requested tool in a matched policy's deny_tool denies;
+//  3. a matched policy's deny_if_unattested with no live attestation
+//     denies;
+//  4. a matched policy's max_steps, reached or exceeded by req.Steps,
+//     denies;
+//  5. a matched policy's allow_domains, missing an entry from req.Domains,
+//     denies;
+//  6. a matched policy's require_human_above_usd, exceeded by EstCostUSD,
+//     resolves to Hold, unless a valid ApprovalToken was presented (then
+//     Allow) or an *invalid* one was presented (then Deny);
+//  7. otherwise, Allow.
+//
+// A deny from any rule wins outright: it short-circuits every later rule
+// and Decide never has to reconcile a deny against a later hold or allow.
+// Rules 1-5 are all deny-or-continue and carry no state, so their relative
+// order only changes which single Reason string is reported when a request
+// happens to violate more than one of them at once -- it never changes
+// whether the final Decision is Deny. Rule 6 is ordered last because it is
+// the only rule that can resolve to something other than Deny or
+// fall-through (Hold, or Allow via a redeemed token), so every unconditional
+// deny check runs first.
 func (e *Engine) Decide(req DecideRequest) DecideResponse {
 	resp := DecideResponse{PolicyVersion: e.policies.Version()}
 
@@ -156,6 +185,18 @@ func (e *Engine) Decide(req DecideRequest) DecideResponse {
 	if pol, ok := unattestedDenied(matched, req.AttestationMethod); ok {
 		resp.Decision = Deny
 		resp.Reason = fmt.Sprintf("policy %q requires a live attestation; agent attestation is %q", pol.Name, attestationLabel(req.AttestationMethod))
+		return resp
+	}
+
+	if pol, ok := exceededMaxSteps(matched, req.Steps); ok {
+		resp.Decision = Deny
+		resp.Reason = fmt.Sprintf("policy %q step budget exhausted: %d >= max_steps %d", pol.Name, req.Steps, pol.MaxSteps)
+		return resp
+	}
+
+	if domain, pol, ok := deniedDomain(matched, req.Domains); ok {
+		resp.Decision = Deny
+		resp.Reason = fmt.Sprintf("domain %q is not allowed by policy %q (target %s)", domain, pol.Name, pol.Target)
 		return resp
 	}
 
@@ -231,6 +272,54 @@ func overThreshold(policies []policy.Policy, cost float64) (policy.Policy, bool)
 		}
 	}
 	return best, found
+}
+
+// exceededMaxSteps returns the matched policy with the smallest positive
+// MaxSteps that steps has reached or exceeded, if any. As with
+// overThreshold, taking the strictest (lowest) exceeded cap means Decide
+// reports the most specific binding constraint when several policies
+// target the same agent.
+func exceededMaxSteps(policies []policy.Policy, steps int) (policy.Policy, bool) {
+	var best policy.Policy
+	found := false
+	for _, p := range policies {
+		if p.MaxSteps > 0 && steps >= p.MaxSteps {
+			if !found || p.MaxSteps < best.MaxSteps {
+				best = p
+				found = true
+			}
+		}
+	}
+	return best, found
+}
+
+// deniedDomain returns the first requested domain absent from some matched
+// policy's non-empty AllowDomains, and that policy, if any. It walks
+// domains outer, policies inner -- the same shape deniedTool uses -- so the
+// reported violation is deterministic for a given request. A policy whose
+// AllowDomains is empty imposes no restriction (skipped: AllowDomains is an
+// opt-in allow-list, not a default-deny), and an empty req.Domains makes
+// the whole check a no-op because the outer loop never runs: Decide only
+// restricts domains the caller actually declared, it never invents a
+// restriction the caller didn't ask to be checked against.
+//
+// When more than one matched policy declares a non-empty AllowDomains, a
+// domain must appear in every one of them: allow-lists compose by
+// intersection, not union, so the most restrictive matched policy governs
+// -- the same "strictest constraint wins" precedent as overThreshold and
+// exceededMaxSteps.
+func deniedDomain(policies []policy.Policy, domains []string) (domain string, pol policy.Policy, ok bool) {
+	for _, d := range domains {
+		for _, p := range policies {
+			if len(p.AllowDomains) == 0 {
+				continue
+			}
+			if !contains(p.AllowDomains, d) {
+				return d, p, true
+			}
+		}
+	}
+	return "", policy.Policy{}, false
 }
 
 func contains(ss []string, v string) bool {
