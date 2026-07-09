@@ -65,9 +65,12 @@ type DecideRequest struct {
 	// restriction: Decide only restricts domains the caller actually
 	// declares, it never invents one to check.
 	Domains []string
-	// Steps is the run's accumulated step count so far, including the
-	// action this request is deciding. Checked against every matched
-	// policy's MaxSteps.
+	// Steps is the run's accumulated step count so far -- how many prior
+	// actions on this run have already gone through, not counting the
+	// action this request is deciding (a run's first action reports 0).
+	// Checked against every matched policy's MaxSteps: Decide denies once
+	// Steps reaches or exceeds MaxSteps, so exactly MaxSteps actions are
+	// ever let through before the rule starts firing.
 	Steps int
 	// Model is the model the agent is running, carried through for
 	// logging/events; Decide does not branch on it.
