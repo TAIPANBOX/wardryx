@@ -263,6 +263,14 @@ func TestDecideTable(t *testing.T) {
 			if resp.PolicyVersion == "" {
 				t.Error("PolicyVersion must always be set")
 			}
+			// Every case here matches finance-guardrail, which sets
+			// max_steps, allow_domains, and require_human_above_usd, so
+			// every one of them is request-specific regardless of which
+			// rule actually fired -- see TestDecideCacheable for the
+			// dedicated true/false coverage.
+			if resp.Cacheable {
+				t.Error("Cacheable = true, want false: finance-guardrail sets max_steps, allow_domains, and require_human_above_usd")
+			}
 		})
 	}
 }
@@ -312,6 +320,9 @@ func TestDecideInvalidOnBehalfOfChainDeniesBeforeAnyPolicyRule(t *testing.T) {
 	}
 	if !strings.Contains(resp.Reason, "on_behalf_of") {
 		t.Errorf("Reason = %q, want it to mention the delegation chain", resp.Reason)
+	}
+	if resp.Cacheable {
+		t.Error("Cacheable = true, want false: on_behalf_of is a per-request value like Steps or Domains, and this deny returns before any policy is even matched")
 	}
 }
 
@@ -403,5 +414,106 @@ func TestPolicyVersionSurfacedOnEveryDecision(t *testing.T) {
 		if got := engine.Decide(req).PolicyVersion; got != want {
 			t.Errorf("PolicyVersion = %q, want %q", got, want)
 		}
+	}
+}
+
+// TestDecideCacheable covers Cacheable directly: false whenever a matched
+// policy sets max_steps, allow_domains, or require_human_above_usd (the
+// fields Decide checks against per-request state), true for a matched
+// policy that only sets deny_tool/deny_if_unattested (stable per-agent
+// facts) and for no match at all, and -- the case most likely to be
+// implemented wrong -- false whenever a request-specific policy matched
+// even if a different, non-request-specific rule is what actually denied.
+func TestDecideCacheable(t *testing.T) {
+	cases := []struct {
+		name          string
+		policies      []policy.Policy
+		req           DecideRequest
+		wantDecision  string
+		wantCacheable bool
+	}{
+		{
+			name:          "false: matched policy sets max_steps",
+			policies:      []policy.Policy{{Target: "agent://x/*", MaxSteps: 5}},
+			req:           DecideRequest{AgentID: "agent://x/bot"},
+			wantDecision:  Allow,
+			wantCacheable: false,
+		},
+		{
+			name:          "false: matched policy sets allow_domains",
+			policies:      []policy.Policy{{Target: "agent://x/*", AllowDomains: []string{"good.example.com"}}},
+			req:           DecideRequest{AgentID: "agent://x/bot"},
+			wantDecision:  Allow,
+			wantCacheable: false,
+		},
+		{
+			name:          "false: matched policy sets require_human_above_usd",
+			policies:      []policy.Policy{{Target: "agent://x/*", RequireHumanAboveUSD: 100}},
+			req:           DecideRequest{AgentID: "agent://x/bot"},
+			wantDecision:  Allow,
+			wantCacheable: false,
+		},
+		{
+			name: "true: matched policy only sets deny_tool and deny_if_unattested, request allowed",
+			policies: []policy.Policy{
+				{Target: "agent://x/*", DenyTool: []string{"send_wire_transfer"}, DenyIfUnattested: true},
+			},
+			req:           DecideRequest{AgentID: "agent://x/bot", ToolNames: []string{"read_file"}, AttestationMethod: "spiffe-svid"},
+			wantDecision:  Allow,
+			wantCacheable: true,
+		},
+		{
+			name: "true: matched policy only sets deny_tool and deny_if_unattested, request denied",
+			// Cacheable describes the shape of the matched policy set, not
+			// whether this particular request was allowed or denied: a
+			// deny_tool verdict is exactly as safe to cache as the allow
+			// case above, since neither ever depends on steps, domains, or
+			// cost.
+			policies: []policy.Policy{
+				{Target: "agent://x/*", DenyTool: []string{"send_wire_transfer"}, DenyIfUnattested: true},
+			},
+			req:           DecideRequest{AgentID: "agent://x/bot", ToolNames: []string{"send_wire_transfer"}, AttestationMethod: "spiffe-svid"},
+			wantDecision:  Deny,
+			wantCacheable: true,
+		},
+		{
+			name:          "true: no policy matched at all",
+			policies:      []policy.Policy{{Target: "agent://other/*", MaxSteps: 5}},
+			req:           DecideRequest{AgentID: "agent://x/bot"},
+			wantDecision:  Allow,
+			wantCacheable: true,
+		},
+		{
+			name: "false: request-specific policy matched even though deny_tool is what actually fired",
+			// deny_tool wins outright and produces this Decision, but the
+			// same matched policy also sets max_steps: a later call from
+			// this agent with the same (allowed) tool set could still
+			// resolve differently once Steps crosses 5, so the decision
+			// must be marked non-cacheable even though this particular
+			// verdict didn't itself depend on Steps.
+			policies: []policy.Policy{
+				{Target: "agent://x/*", DenyTool: []string{"send_wire_transfer"}, MaxSteps: 5},
+			},
+			req:           DecideRequest{AgentID: "agent://x/bot", ToolNames: []string{"send_wire_transfer"}},
+			wantDecision:  Deny,
+			wantCacheable: false,
+		},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			set, err := policy.Compile(c.policies)
+			if err != nil {
+				t.Fatalf("policy.Compile: %v", err)
+			}
+			engine := New(set, nil)
+			resp := engine.Decide(c.req)
+			if resp.Decision != c.wantDecision {
+				t.Fatalf("Decision = %q, want %q (reason: %s)", resp.Decision, c.wantDecision, resp.Reason)
+			}
+			if resp.Cacheable != c.wantCacheable {
+				t.Errorf("Cacheable = %v, want %v (decision=%s, reason=%s)", resp.Cacheable, c.wantCacheable, resp.Decision, resp.Reason)
+			}
+		})
 	}
 }

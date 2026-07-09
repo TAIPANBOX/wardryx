@@ -348,3 +348,39 @@ func TestDecideDenyDisallowedDomainOverWire(t *testing.T) {
 		t.Fatalf("Decision = %q (%s), want allow: no domains declared means nothing to restrict", none.Decision, none.Reason)
 	}
 }
+
+// TestDecideCacheableOverWire proves the "cacheable" JSON field actually
+// reaches the wire from pdp.Decide over the full HTTP path, mirroring
+// TestDecideDenyMaxStepsOverWire and TestDecideDenyDisallowedDomainOverWire's
+// proof for "steps"/"domains". This is the field an enforcement point's own
+// decision cache (TokenFuse's gateway) gates storage on, so it has to
+// actually arrive on the wire, not just live on pdp.DecideResponse.
+func TestDecideCacheableOverWire(t *testing.T) {
+	srv := newTestServer(t)
+
+	// The fixture policy (finance-guardrail) sets max_steps, allow_domains,
+	// and require_human_above_usd, so any request matching it is
+	// request-specific and must report cacheable=false on the wire.
+	rec := doRequest(t, srv.Handler(), http.MethodPost, "/v1/decide", adminKey, decideRequestDTO{
+		AgentID: "agent://acme.example/finance/bot1", RunID: "r1", ToolNames: []string{"generate_report"},
+	})
+	got := decodeBody[decideResponseDTO](t, rec)
+	if got.Decision != pdp.Allow {
+		t.Fatalf("Decision = %q (%s), want allow", got.Decision, got.Reason)
+	}
+	if got.Cacheable {
+		t.Error("Cacheable = true, want false: the fixture policy is request-specific")
+	}
+
+	// An agent no policy targets at all is a stable allow: cacheable=true.
+	noneRec := doRequest(t, srv.Handler(), http.MethodPost, "/v1/decide", adminKey, decideRequestDTO{
+		AgentID: "agent://nobody.example/anything/bot", RunID: "r1", ToolNames: []string{"anything"},
+	})
+	none := decodeBody[decideResponseDTO](t, noneRec)
+	if none.Decision != pdp.Allow {
+		t.Fatalf("Decision = %q (%s), want allow", none.Decision, none.Reason)
+	}
+	if !none.Cacheable {
+		t.Error("Cacheable = false, want true: no policy targets this agent")
+	}
+}

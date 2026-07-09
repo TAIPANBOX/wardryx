@@ -136,6 +136,13 @@ type decideResponseDTO struct {
 	Reason                string `json:"reason"`
 	ApprovalID            string `json:"approval_id,omitempty"`
 	ApprovalTokenRequired bool   `json:"approval_token_required"`
+	// Cacheable mirrors pdp.DecideResponse.Cacheable onto the wire: whether
+	// an enforcement point's own decision cache may store and later serve
+	// this decision again for the same agent/tool set without calling
+	// /v1/decide. No omitempty: false is exactly as meaningful as true
+	// here, and must never be silently dropped from the response the way
+	// an empty string field would be.
+	Cacheable bool `json:"cacheable"`
 }
 
 func (s *Server) handleDecide(w http.ResponseWriter, r *http.Request, principal Principal) {
@@ -209,6 +216,7 @@ func (s *Server) handleDecide(w http.ResponseWriter, r *http.Request, principal 
 		Reason:                resp.Reason,
 		ApprovalID:            resp.ApprovalID,
 		ApprovalTokenRequired: resp.ApprovalTokenRequired,
+		Cacheable:             resp.Cacheable,
 	})
 }
 

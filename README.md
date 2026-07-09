@@ -140,7 +140,8 @@ above the matched policy's `require_human_above_usd`):
   "policy_version": "3f9a2b7c1d4e",
   "reason": "estimated cost $1200.00 exceeds policy \"finance-guardrail\" threshold $500.00; human approval required",
   "approval_id": "ap_8f3e1c2a...",
-  "approval_token_required": true
+  "approval_token_required": true,
+  "cacheable": false
 }
 ```
 
@@ -153,6 +154,27 @@ A denied `max_steps` or `allow_domains` check reports its own `reason`
 \"finance-guardrail\" (target agent://acme.example/finance/*)"`) with
 `decision: "deny"` and `approval_token_required: false`, since a deny from
 an earlier rule short-circuits before the cost threshold is ever reached.
+
+`cacheable` tells the caller whether this decision may be stored and later
+served again, by whatever cache the caller keeps in front of `/v1/decide`,
+for another request against the same `agent_id` and tool set, without
+calling `/v1/decide` again. It is `true` only when no policy matched by
+`agent_id` sets `max_steps`, `allow_domains`, or `require_human_above_usd`
+-- the three fields Decide checks against this request's own `steps`,
+`domains`, and `est_cost_usd`, any of which can differ on the very next call
+even for the same agent and the same tools -- or when no policy matched at
+all. It is `false` whenever a matched policy sets any of those three,
+regardless of which rule actually produced this decision: Wardryx is the
+source of truth for whether a decision generalizes beyond the one request
+that produced it, not the caller. `cacheable` is independent of `decision`
+itself -- a cacheable decision can be `allow`, `deny`, or `hold` alike --
+though a caller's own cache should still never store a `hold` regardless of
+`cacheable`, since a replayed one would hand out a stale `approval_id` for
+what looks like a fresh hold. TokenFuse's gateway
+(`crates/gateway/src/wardryx.rs`) is the reference implementation: its
+decision cache is keyed only on `(agent_id, tool-set hash)`, coarser than
+the full request, and now gates every store on `cacheable` so a
+request-specific decision is never served stale within the cache's TTL.
 
 ---
 

@@ -111,6 +111,27 @@ type DecideResponse struct {
 	// satisfied it. False when no cost rule was ever reached (e.g. a
 	// deny fired first) or no matched policy sets a threshold.
 	ApprovalTokenRequired bool
+	// Cacheable reports whether this decision is a pure function of
+	// (agent_id, tool set), independent of any per-request value such as
+	// Steps, Domains, or EstCostUSD. True when no policy matched by
+	// AgentID sets MaxSteps, AllowDomains, or RequireHumanAboveUSD -- the
+	// only fields Decide checks against per-request state -- or when no
+	// policy matched at all. False whenever a matched policy sets any of
+	// those three, even if the rule that actually produced this Decision
+	// was something else entirely (e.g. DenyTool): a later call against
+	// the same agent and tool set could still resolve differently once
+	// Steps, Domains, or EstCostUSD change, so the decision as a whole is
+	// never safe to reuse, regardless of which rule happened to fire this
+	// time. Independent of Decision -- a cacheable decision can be Allow,
+	// Deny, or Hold alike -- and computed before any rule runs, so it
+	// covers every return path uniformly.
+	//
+	// Intended for an enforcement point's own decision cache (e.g. the
+	// TokenFuse gateway's, keyed only on (agent_id, tool-set hash),
+	// coarser than the full request) to gate what it stores: a decision
+	// with Cacheable false must never be served again from that cache,
+	// only ever re-decided.
+	Cacheable bool
 }
 
 // Engine evaluates DecideRequests against one compiled policy.Set. It holds
@@ -173,11 +194,20 @@ func (e *Engine) Decide(req DecideRequest) DecideResponse {
 		if err := chain.Validate(req.OnBehalfOf); err != nil {
 			resp.Decision = Deny
 			resp.Reason = fmt.Sprintf("invalid on_behalf_of delegation chain: %v", err)
+			// Cacheable stays false (the zero value): OnBehalfOf is a
+			// per-request value like Steps or Domains, not a stable
+			// per-agent fact, so a chain-validity deny must never be
+			// reused for a later call that presents a different chain.
 			return resp
 		}
 	}
 
 	matched := e.policies.Match(req.AgentID)
+	// Set once, before any rule runs, so every return path below --
+	// whichever rule ends up firing -- carries the same answer. See the
+	// field doc comment for why this depends on the matched policy set as
+	// a whole, not on which specific rule produced Decision.
+	resp.Cacheable = !requestSpecific(matched)
 
 	if tool, pol, ok := deniedTool(matched, req.ToolNames); ok {
 		resp.Decision = Deny
@@ -233,6 +263,24 @@ func (e *Engine) Decide(req DecideRequest) DecideResponse {
 		resp.Reason = "allowed: request satisfies all matched policy rules"
 	}
 	return resp
+}
+
+// requestSpecific reports whether any policy in matched checks a
+// per-request value that can differ from one call to the next even when
+// the agent and tool set stay the same: MaxSteps (checked against Steps),
+// AllowDomains (checked against Domains), or RequireHumanAboveUSD (checked
+// against EstCostUSD). DenyTool and DenyIfUnattested are deliberately not
+// considered: both are checked against facts that are stable for a given
+// agent and tool set (the tool set itself, and the agent's attestation
+// method), not anything that varies call to call the way a step count,
+// declared domains, or an estimated cost do.
+func requestSpecific(matched []policy.Policy) bool {
+	for _, p := range matched {
+		if p.MaxSteps > 0 || p.RequireHumanAboveUSD > 0 || len(p.AllowDomains) > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 func deniedTool(policies []policy.Policy, tools []string) (tool string, pol policy.Policy, ok bool) {
