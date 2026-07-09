@@ -1,0 +1,8 @@
+name: finance-guardrail
+target: "agent://acme.example/finance/*"
+deny_tool:
+  - send_wire_transfer
+  - send_wire_transfer
+  - delete_account
+require_human_above_usd: 500
+deny_if_unattested: true

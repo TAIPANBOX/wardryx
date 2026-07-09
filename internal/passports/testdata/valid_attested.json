@@ -1,0 +1,8 @@
+{
+  "schema": "taipanbox.dev/agent-passport/v0.1",
+  "id": "agent://acme.example/finance/bot1",
+  "display_name": "Finance reporting bot",
+  "owner": "team-finance@acme.example",
+  "runtime": "langgraph",
+  "attestation": { "method": "spiffe-svid", "detail": "spiffe://acme.example/agent/finance/bot1" }
+}

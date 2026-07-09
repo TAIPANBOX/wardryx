@@ -1,0 +1,5 @@
+{
+  "schema": "taipanbox.dev/agent-passport/v9.9",
+  "id": "agent://acme.example/finance/bot4",
+  "owner": "team-finance@acme.example"
+}

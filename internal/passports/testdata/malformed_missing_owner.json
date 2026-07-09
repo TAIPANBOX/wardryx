@@ -1,0 +1,4 @@
+{
+  "schema": "taipanbox.dev/agent-passport/v0.1",
+  "id": "agent://acme.example/finance/bot3"
+}

@@ -1,0 +1,3 @@
+name: attestation-floor
+target: "agent://acme.example/*"
+deny_if_unattested: true

@@ -1,0 +1,7 @@
+{
+  "name": "support-baseline",
+  "target": "agent://acme.example/support/*",
+  "deny_tool": ["shell_exec"],
+  "allow_domains": ["api.acme.example"],
+  "max_steps": 20
+}
