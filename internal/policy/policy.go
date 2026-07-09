@@ -106,6 +106,24 @@ func (s *Set) Len() int {
 	return len(s.policies)
 }
 
+// RequiresHumanApproval reports whether any loaded policy sets a
+// require_human_above_usd threshold above zero, i.e. whether Decide can
+// ever produce a hold for this Set. main uses it at startup to warn when
+// WARDRYX_APPROVAL_SECRET is empty but a hold could actually occur: without
+// the secret, the approvals-decide grant path fails closed (internal/api,
+// internal/approval.ErrNoSecret) rather than minting an approval_token.
+func (s *Set) RequiresHumanApproval() bool {
+	if s == nil {
+		return false
+	}
+	for _, c := range s.policies {
+		if c.RequireHumanAboveUSD > 0 {
+			return true
+		}
+	}
+	return false
+}
+
 // Empty returns a Set with no policies loaded: every agent matches zero
 // policies, so Decide allows everything (no rule can fire). Its Version is
 // the well-defined hash of an empty policy list, stable across calls.

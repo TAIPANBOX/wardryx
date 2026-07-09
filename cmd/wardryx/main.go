@@ -98,6 +98,9 @@ func runServe(args []string) error {
 	} else {
 		fmt.Fprintf(os.Stderr, "wardryx: loaded %d policy(ies) from %s, version %s\n", policies.Len(), *policyPath, policies.Version())
 	}
+	if cfg.ApprovalSecret == "" && policies.RequiresHumanApproval() {
+		fmt.Fprintln(os.Stderr, "wardryx: WARDRYX_APPROVAL_SECRET is empty but a policy requires human approval; hold decisions cannot be granted until it is set")
+	}
 
 	var st store.Store
 	if *dbDSN != "" {
