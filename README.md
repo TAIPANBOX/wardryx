@@ -119,7 +119,12 @@ answer.
    HMAC-SHA256-signed `approval_token`, bound to the exact
    `(agent_id, run_id, tool set)` that was held, which a subsequent
    `/v1/decide` call redeems statelessly (no database lookup on the token
-   itself).
+   itself). The token is signed by `WARDRYX_APPROVAL_SECRET` and valid for a
+   fixed TTL (default 10 minutes). Within that window it is reusable for the
+   same `(agent_id, run_id, tool set)`, not single-use: scope a held tool set
+   tightly if one approval should authorize only one action. Pending holds
+   live in the store, which is in-memory by default (lost on restart; pass
+   `-db` for durability).
 4. **HTTP API** (`internal/api`): `POST /v1/decide`,
    `POST /v1/approvals/{id}/decide` (admin only), `GET /v1/approvals`
    (org-scoped), `GET /healthz`. Bearer-key auth mirrors the Cloud plane's
