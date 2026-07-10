@@ -126,6 +126,26 @@ func (p *Postgres) DecideApproval(ctx context.Context, id, decision, decidedBy s
 	return p.GetApproval(ctx, id)
 }
 
+// TryRedeem claims key via an INSERT .. ON CONFLICT DO NOTHING against
+// approval_redemptions: the database's own unique constraint on
+// redemption_key makes the check-and-set atomic across every wardryx
+// instance sharing this Postgres, not just within one process (contrast
+// Memory.TryRedeem, which is only atomic within its own process).
+func (p *Postgres) TryRedeem(ctx context.Context, key string) (bool, error) {
+	res, err := p.db.ExecContext(ctx,
+		`INSERT INTO approval_redemptions (redemption_key) VALUES ($1)
+		 ON CONFLICT (redemption_key) DO NOTHING`,
+		key)
+	if err != nil {
+		return false, fmt.Errorf("store: try redeem %q: %w", key, err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("store: try redeem %q: %w", key, err)
+	}
+	return n == 1, nil
+}
+
 // rowScanner is satisfied by both *sql.Row and *sql.Rows.
 type rowScanner interface {
 	Scan(dest ...any) error

@@ -221,3 +221,38 @@ func TestDecideUnknownApprovalID(t *testing.T) {
 		t.Errorf("Decide(unknown id) = %v, want store.ErrNotFound", err)
 	}
 }
+
+// TestRedemptionKeyStableAndDistinct covers the properties
+// WARDRYX_APPROVAL_SINGLE_USE depends on: the same token always produces
+// the same key (so a genuine retry is recognized), and two different
+// tokens -- even ones minted for the exact same (agent_id, run_id, tools)
+// binding -- produce different keys (so a fresh re-grant of the same
+// triple is never mistaken for the earlier, already-redeemed one).
+func TestRedemptionKeyStableAndDistinct(t *testing.T) {
+	secret := []byte("test-secret")
+	tokenA, _, err := MintApprovalToken(secret, "agent://x/bot", "run-1", []string{"tool"}, DefaultTTL)
+	if err != nil {
+		t.Fatalf("mint tokenA: %v", err)
+	}
+	// tokenB is minted for the identical binding but is a distinct grant
+	// (its own expiry baked into the claims), the same way a re-approval
+	// after single-use exhaustion would mint a new token for the same
+	// triple.
+	tokenB, _, err := MintApprovalToken(secret, "agent://x/bot", "run-1", []string{"tool"}, DefaultTTL+time.Second)
+	if err != nil {
+		t.Fatalf("mint tokenB: %v", err)
+	}
+	if tokenA == tokenB {
+		t.Fatal("tokenA and tokenB are identical; test setup must mint two distinct tokens")
+	}
+
+	if first, again := RedemptionKey(tokenA), RedemptionKey(tokenA); first != again {
+		t.Errorf("RedemptionKey(tokenA) is not stable across calls: got %q then %q", first, again)
+	}
+	if RedemptionKey(tokenA) == RedemptionKey(tokenB) {
+		t.Error("RedemptionKey(tokenA) == RedemptionKey(tokenB): two different grants for the same triple must not collide")
+	}
+	if got := RedemptionKey(tokenA); len(got) != 64 {
+		t.Errorf("RedemptionKey returned %d hex chars, want 64 (sha256)", len(got))
+	}
+}

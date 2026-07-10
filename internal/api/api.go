@@ -38,25 +38,30 @@ const (
 
 // Server is Wardryx's HTTP API.
 type Server struct {
-	engine         *pdp.Engine
-	store          store.Store
-	events         *event.Writer
-	keys           map[string]Principal
-	approvalSecret []byte
-	approvalTTL    time.Duration
+	engine            *pdp.Engine
+	store             store.Store
+	events            *event.Writer
+	keys              map[string]Principal
+	approvalSecret    []byte
+	approvalTTL       time.Duration
+	approvalSingleUse bool
 }
 
 // New returns a Server. events may be nil, which makes event emission a
 // silent no-op (opt-in, per WARDRYX_EVENTS_PATH). keys should come from
-// ParseKeys, which never returns an empty map.
-func New(engine *pdp.Engine, st store.Store, events *event.Writer, keys map[string]Principal, approvalSecret []byte) *Server {
+// ParseKeys, which never returns an empty map. approvalSingleUse is
+// WARDRYX_APPROVAL_SINGLE_USE (internal/config): false preserves the
+// original behavior of a granted approval_token staying reusable for its
+// full TTL; see handleDecide.
+func New(engine *pdp.Engine, st store.Store, events *event.Writer, keys map[string]Principal, approvalSecret []byte, approvalSingleUse bool) *Server {
 	return &Server{
-		engine:         engine,
-		store:          st,
-		events:         events,
-		keys:           keys,
-		approvalSecret: approvalSecret,
-		approvalTTL:    approval.DefaultTTL,
+		engine:            engine,
+		store:             st,
+		events:            events,
+		keys:              keys,
+		approvalSecret:    approvalSecret,
+		approvalTTL:       approval.DefaultTTL,
+		approvalSingleUse: approvalSingleUse,
 	}
 }
 
@@ -169,6 +174,32 @@ func (s *Server) handleDecide(w http.ResponseWriter, r *http.Request, principal 
 		ApprovalToken:     dto.ApprovalToken,
 	}
 	resp := s.engine.Decide(req)
+
+	// WARDRYX_APPROVAL_SINGLE_USE: an Allow with ApprovalTokenRequired set
+	// only ever happens when a presented approval_token just verified (see
+	// pdp.Engine.Decide's overThreshold branch -- that is the only path
+	// that sets ApprovalTokenRequired and can still reach Allow). Off by
+	// default, so this block never runs and the decision is returned
+	// unchanged, exactly as before single-use mode existed: a valid token
+	// stays reusable for its full TTL.
+	//
+	// When enabled, TryRedeem is the atomic check-and-set that lets a
+	// token allow at most once: the first /v1/decide to claim this token's
+	// RedemptionKey wins Allow, and any later presentation of that same
+	// token -- a genuine retry or a race against it -- loses the claim and
+	// falls back to a fresh Hold, indistinguishable from presenting no
+	// token at all, rather than silently allowing a second time.
+	if s.approvalSingleUse && resp.Decision == pdp.Allow && resp.ApprovalTokenRequired {
+		redeemed, rErr := s.store.TryRedeem(r.Context(), approval.RedemptionKey(dto.ApprovalToken))
+		if rErr != nil {
+			writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to record approval_token redemption: %v", rErr))
+			return
+		}
+		if !redeemed {
+			resp.Decision = pdp.Hold
+			resp.Reason = "approval_token was already redeemed once under WARDRYX_APPROVAL_SINGLE_USE; a new approval is required"
+		}
+	}
 
 	switch resp.Decision {
 	case pdp.Allow:

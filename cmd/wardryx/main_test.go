@@ -161,6 +161,43 @@ func TestDisplayAddr(t *testing.T) {
 	}
 }
 
+// TestSingleUseInMemoryWarning covers singleUseInMemoryWarning's three
+// cases: single-use off (no warning regardless of -db), single-use on with
+// no -db (warns), single-use on with -db set (no warning: Postgres is
+// durable and shared across instances, so the in-memory caveat doesn't
+// apply). This is the startup warning path from
+// WARDRYX_APPROVAL_SINGLE_USE=true with an in-memory store, exercised as a
+// pure unit test rather than by parsing serve's stderr.
+func TestSingleUseInMemoryWarning(t *testing.T) {
+	cases := []struct {
+		name      string
+		singleUse bool
+		dbDSN     string
+		wantEmpty bool
+	}{
+		{"off, no db", false, "", true},
+		{"off, with db", false, "postgres://x", true},
+		{"on, no db: warns", true, "", false},
+		{"on, with db: no warning", true, "postgres://x", true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := singleUseInMemoryWarning(c.singleUse, c.dbDSN)
+			if c.wantEmpty && got != "" {
+				t.Errorf("singleUseInMemoryWarning(%v, %q) = %q, want empty", c.singleUse, c.dbDSN, got)
+			}
+			if !c.wantEmpty {
+				if got == "" {
+					t.Errorf("singleUseInMemoryWarning(%v, %q) = empty, want a warning", c.singleUse, c.dbDSN)
+				}
+				if !strings.Contains(got, "WARDRYX_APPROVAL_SINGLE_USE") || !strings.Contains(got, "in-memory") {
+					t.Errorf("warning = %q, want it to mention WARDRYX_APPROVAL_SINGLE_USE and in-memory", got)
+				}
+			}
+		})
+	}
+}
+
 func TestOrDash(t *testing.T) {
 	if got := orDash(""); got != "-" {
 		t.Errorf("orDash(\"\") = %q, want -", got)

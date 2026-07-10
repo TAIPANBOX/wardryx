@@ -10,6 +10,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"sync"
 	"testing"
 	"time"
 )
@@ -24,7 +25,7 @@ func testDB(t *testing.T) *Postgres {
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
-	if _, err := p.db.Exec(`TRUNCATE approvals`); err != nil {
+	if _, err := p.db.Exec(`TRUNCATE approvals, approval_redemptions`); err != nil {
 		t.Fatalf("truncate: %v", err)
 	}
 	t.Cleanup(func() { p.Close() })
@@ -137,5 +138,76 @@ func TestPgMigrateIsIdempotent(t *testing.T) {
 	p := testDB(t)
 	if err := p.migrate(context.Background()); err != nil {
 		t.Fatalf("re-migrate: %v", err)
+	}
+}
+
+// TestPgTryRedeemAtomic mirrors TestMemoryTryRedeemAtomic against a real
+// Postgres: hitting TryRedeem twice with the same key returns true then
+// false, backed by approval_redemptions' primary key rather than an
+// in-process mutex.
+func TestPgTryRedeemAtomic(t *testing.T) {
+	p := testDB(t)
+	ctx := context.Background()
+
+	first, err := p.TryRedeem(ctx, "pg-key-a")
+	if err != nil {
+		t.Fatalf("first TryRedeem: %v", err)
+	}
+	if !first {
+		t.Fatal("first TryRedeem(pg-key-a) = false, want true")
+	}
+
+	second, err := p.TryRedeem(ctx, "pg-key-a")
+	if err != nil {
+		t.Fatalf("second TryRedeem: %v", err)
+	}
+	if second {
+		t.Fatal("second TryRedeem(pg-key-a) = true, want false (already claimed)")
+	}
+
+	otherKey, err := p.TryRedeem(ctx, "pg-key-b")
+	if err != nil {
+		t.Fatalf("TryRedeem(pg-key-b): %v", err)
+	}
+	if !otherKey {
+		t.Error("TryRedeem(pg-key-b) = false, want true: a different key must not be blocked by pg-key-a's claim")
+	}
+}
+
+// TestPgTryRedeemRaceSafe mirrors TestMemoryTryRedeemRaceSafe: many
+// concurrent callers claiming the same key against a real Postgres, backed
+// by approval_redemptions' unique constraint (INSERT .. ON CONFLICT DO
+// NOTHING) rather than any client-side lock, must still let exactly one of
+// them win. Run with -race for the client-side goroutine coordination in
+// this test itself; the atomicity guarantee under test is the database's.
+func TestPgTryRedeemRaceSafe(t *testing.T) {
+	p := testDB(t)
+	ctx := context.Background()
+	const n = 20
+
+	var wg sync.WaitGroup
+	results := make([]bool, n)
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			ok, err := p.TryRedeem(ctx, "pg-contended-key")
+			if err != nil {
+				t.Errorf("TryRedeem: %v", err)
+				return
+			}
+			results[i] = ok
+		}(i)
+	}
+	wg.Wait()
+
+	wins := 0
+	for _, ok := range results {
+		if ok {
+			wins++
+		}
+	}
+	if wins != 1 {
+		t.Errorf("concurrent TryRedeem(pg-contended-key) across %d goroutines: %d observed true, want exactly 1", n, wins)
 	}
 }

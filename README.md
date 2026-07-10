@@ -121,10 +121,14 @@ answer.
    `/v1/decide` call redeems statelessly (no database lookup on the token
    itself). The token is signed by `WARDRYX_APPROVAL_SECRET` and valid for a
    fixed TTL (default 10 minutes). Within that window it is reusable for the
-   same `(agent_id, run_id, tool set)`, not single-use: scope a held tool set
-   tightly if one approval should authorize only one action. Pending holds
-   live in the store, which is in-memory by default (lost on restart; pass
-   `-db` for durability).
+   same `(agent_id, run_id, tool set)`, not single-use by default: scope a
+   held tool set tightly if one approval should authorize only one action, or
+   opt into `WARDRYX_APPROVAL_SINGLE_USE=true` to make every minted token
+   allow exactly one `/v1/decide` call (a second presentation falls back to a
+   fresh hold instead of allowing again). Pending holds live in the store,
+   which is in-memory by default (lost on restart; pass `-db` for
+   durability); single-use redemption tracking has the same durability
+   split (see [Stateless human-in-the-loop](#stateless-human-in-the-loop)).
 4. **HTTP API** (`internal/api`): `POST /v1/decide`,
    `POST /v1/approvals/{id}/decide` (admin only), `GET /v1/approvals`
    (org-scoped), `GET /healthz`. Bearer-key auth mirrors the Cloud plane's
@@ -249,6 +253,28 @@ agent/run/tool-set presented at `/v1/decide` exactly match what was granted.
 refuse rather than accept, since there is no such thing as an unsigned or
 always-valid token.
 
+By default a granted token stays valid for every `/v1/decide` call that
+presents it within the TTL window, step 5-6 above can repeat. Setting
+`WARDRYX_APPROVAL_SINGLE_USE=true` tightens this: the first `/v1/decide` call
+that redeems a token records the redemption in the store (an atomic
+check-and-set, `Store.TryRedeem`, keyed by a hash of the token itself so a
+later, separately-granted token for the same `agent_id`/`run_id`/tool set is
+never mistaken for the earlier one); a second presentation of that *same*
+token no longer allows, it falls back to a fresh `hold` (a new
+`approval_id`), exactly as if no token had been presented, so the action can
+be re-approved out of band rather than silently allowed again. This is
+off by default, so with `WARDRYX_APPROVAL_SINGLE_USE` unset the decide path
+is byte-for-byte unchanged from before single-use existed.
+
+Single-use redemption tracking has the same durability split as approval
+holds themselves: with `-db`/`WARDRYX_DB` set, `TryRedeem` is a Postgres
+`INSERT .. ON CONFLICT DO NOTHING` (atomic across every wardryx instance
+sharing that database); with no `-db`, redemptions live in one process's
+memory only, so single-use is enforced per-process, not across multiple
+wardryx instances behind a load balancer. `serve` prints a startup warning
+to stderr when `WARDRYX_APPROVAL_SINGLE_USE=true` is combined with no `-db`,
+so this caveat is never silent.
+
 ---
 
 ## Architecture
@@ -346,6 +372,7 @@ environment variable when the flag itself is left unset.
 | `WARDRYX_POLICY` | `-policy` | Policy file or directory (YAML/JSON); empty allows every request |
 | `WARDRYX_EVENTS_PATH` | `-events` | NDJSON agent-event output path; empty disables events |
 | `WARDRYX_APPROVAL_SECRET` | (none) | HMAC key for approval tokens; unset fails closed on any mint/verify |
+| `WARDRYX_APPROVAL_SINGLE_USE` | (none) | `true` makes each granted token allow exactly one `/v1/decide` call; default `false` keeps a token reusable for its full TTL (see [Stateless human-in-the-loop](#stateless-human-in-the-loop)) |
 | `WARDRYX_OTLP_ENDPOINT` | (none) | Reserved for a future OTLP exporter; read into `Config` but not otherwise consulted by this build |
 
 The `[:role]` segment of a `WARDRYX_KEYS` entry is one of `admin` (every endpoint, including `POST /v1/approvals/{id}/decide`) or `viewer` (every other authenticated endpoint), and defaults to `admin` when the segment is omitted.
@@ -381,6 +408,10 @@ defaults are worth stating plainly:
   start rather than silently loading a smaller rule set than intended.
 - `WARDRYX_APPROVAL_SECRET` unset fails every mint/verify closed; there is no
   fallback to an unsigned or always-valid token.
+- `WARDRYX_APPROVAL_SINGLE_USE=true` with no `-db`/`WARDRYX_DB` only enforces
+  single-use within that one process, not across multiple wardryx instances
+  sharing the load; `serve` warns about this combination at startup rather
+  than silently giving weaker guarantees than the name implies.
 
 ## License
 

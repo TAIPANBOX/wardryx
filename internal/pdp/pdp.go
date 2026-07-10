@@ -110,6 +110,14 @@ type DecideResponse struct {
 	// matched policy's threshold, whether or not a valid token ultimately
 	// satisfied it. False when no cost rule was ever reached (e.g. a
 	// deny fired first) or no matched policy sets a threshold.
+	//
+	// Decision == Allow && ApprovalTokenRequired uniquely identifies an
+	// allow produced by redeeming a valid token (the only path that can
+	// set this field and still return Allow): the caller (internal/api)
+	// uses exactly that combination, under WARDRYX_APPROVAL_SINGLE_USE, to
+	// decide whether to additionally consult store.Store.TryRedeem and
+	// possibly downgrade this Allow to a fresh Hold. Decide itself stays
+	// storage-free either way; it never performs that check.
 	ApprovalTokenRequired bool
 	// Cacheable reports whether this decision is a pure function of
 	// (agent_id, tool set), independent of any per-request value such as

@@ -20,7 +20,21 @@ const (
 	testHMAC  = "test-approval-secret"
 )
 
+// newTestServer returns a Server with WARDRYX_APPROVAL_SINGLE_USE off (the
+// default): a granted approval_token stays reusable for its full TTL.
 func newTestServer(t *testing.T) *Server {
+	t.Helper()
+	return newTestServerOpts(t, false)
+}
+
+// newTestServerSingleUse returns a Server with WARDRYX_APPROVAL_SINGLE_USE
+// on: a granted approval_token allows exactly one /v1/decide call.
+func newTestServerSingleUse(t *testing.T) *Server {
+	t.Helper()
+	return newTestServerOpts(t, true)
+}
+
+func newTestServerOpts(t *testing.T, singleUse bool) *Server {
 	t.Helper()
 	set, err := policy.Compile([]policy.Policy{
 		{
@@ -42,7 +56,7 @@ func newTestServer(t *testing.T) *Server {
 		viewerKey: {Org: "acme", Role: RoleViewer},
 		otherOrg:  {Org: "globex", Role: RoleAdmin},
 	}
-	return New(engine, st, nil, keys, []byte(testHMAC))
+	return New(engine, st, nil, keys, []byte(testHMAC), singleUse)
 }
 
 func doRequest(t *testing.T, h http.Handler, method, path, bearer string, body any) *httptest.ResponseRecorder {
@@ -205,6 +219,145 @@ func TestFullHoldGrantThenDecideAllowsWithToken(t *testing.T) {
 	retry := decodeBody[decideResponseDTO](t, retryRec)
 	if retry.Decision != pdp.Allow {
 		t.Fatalf("Decision after presenting the granted token = %q (%s), want allow", retry.Decision, retry.Reason)
+	}
+}
+
+// TestSingleUseOffTokenStaysReusableForFullTTL locks in today's default
+// behavior (WARDRYX_APPROVAL_SINGLE_USE unset/false, via newTestServer):
+// a granted approval_token allows *every* /v1/decide call presenting it
+// within its TTL, not just the first. This must keep passing unchanged
+// after WARDRYX_APPROVAL_SINGLE_USE is introduced.
+func TestSingleUseOffTokenStaysReusableForFullTTL(t *testing.T) {
+	srv := newTestServer(t)
+
+	holdRec := doRequest(t, srv.Handler(), http.MethodPost, "/v1/decide", adminKey, decideRequestDTO{
+		AgentID: "agent://acme.example/finance/bot1", RunID: "run-1", ToolNames: []string{"generate_report"}, EstCostUSD: 999,
+	})
+	held := decodeBody[decideResponseDTO](t, holdRec)
+
+	grantRec := doRequest(t, srv.Handler(), http.MethodPost, "/v1/approvals/"+held.ApprovalID+"/decide", adminKey,
+		approvalDecideRequestDTO{Decision: "grant", DecidedBy: "alice@acme.example"})
+	granted := decodeBody[approvalDecideResponseDTO](t, grantRec)
+	if granted.ApprovalToken == "" {
+		t.Fatal("grant did not return an approval_token")
+	}
+
+	for i := 0; i < 3; i++ {
+		rec := doRequest(t, srv.Handler(), http.MethodPost, "/v1/decide", adminKey, decideRequestDTO{
+			AgentID: "agent://acme.example/finance/bot1", RunID: "run-1", ToolNames: []string{"generate_report"}, EstCostUSD: 999,
+			ApprovalToken: granted.ApprovalToken,
+		})
+		got := decodeBody[decideResponseDTO](t, rec)
+		if got.Decision != pdp.Allow {
+			t.Fatalf("presentation #%d: Decision = %q (%s), want allow: single-use is off, the token must stay reusable", i+1, got.Decision, got.Reason)
+		}
+	}
+}
+
+// TestSingleUseOnSecondDecideWithSameTokenHolds is the ON counterpart:
+// with WARDRYX_APPROVAL_SINGLE_USE true, the first /v1/decide to redeem a
+// granted token allows; a second /v1/decide presenting that same token for
+// the same triple must not allow via the token again -- it falls back to a
+// fresh hold (a new ApprovalID), not a silent allow.
+func TestSingleUseOnSecondDecideWithSameTokenHolds(t *testing.T) {
+	srv := newTestServerSingleUse(t)
+
+	holdRec := doRequest(t, srv.Handler(), http.MethodPost, "/v1/decide", adminKey, decideRequestDTO{
+		AgentID: "agent://acme.example/finance/bot1", RunID: "run-1", ToolNames: []string{"generate_report"}, EstCostUSD: 999,
+	})
+	held := decodeBody[decideResponseDTO](t, holdRec)
+	if held.Decision != pdp.Hold {
+		t.Fatalf("initial Decision = %q, want hold", held.Decision)
+	}
+
+	grantRec := doRequest(t, srv.Handler(), http.MethodPost, "/v1/approvals/"+held.ApprovalID+"/decide", adminKey,
+		approvalDecideRequestDTO{Decision: "grant", DecidedBy: "alice@acme.example"})
+	granted := decodeBody[approvalDecideResponseDTO](t, grantRec)
+	if granted.ApprovalToken == "" {
+		t.Fatal("grant did not return an approval_token")
+	}
+
+	decideReq := decideRequestDTO{
+		AgentID: "agent://acme.example/finance/bot1", RunID: "run-1", ToolNames: []string{"generate_report"}, EstCostUSD: 999,
+		ApprovalToken: granted.ApprovalToken,
+	}
+
+	firstRec := doRequest(t, srv.Handler(), http.MethodPost, "/v1/decide", adminKey, decideReq)
+	first := decodeBody[decideResponseDTO](t, firstRec)
+	if first.Decision != pdp.Allow {
+		t.Fatalf("first presentation: Decision = %q (%s), want allow", first.Decision, first.Reason)
+	}
+
+	secondRec := doRequest(t, srv.Handler(), http.MethodPost, "/v1/decide", adminKey, decideReq)
+	second := decodeBody[decideResponseDTO](t, secondRec)
+	if second.Decision != pdp.Hold {
+		t.Fatalf("second presentation of the same token: Decision = %q (%s), want hold (single-use mode)", second.Decision, second.Reason)
+	}
+	if second.ApprovalID == "" {
+		t.Fatal("second presentation: ApprovalID is empty on the fresh hold")
+	}
+	if second.ApprovalID == held.ApprovalID {
+		t.Error("second presentation minted the same ApprovalID as the original hold, want a fresh one")
+	}
+	if !second.ApprovalTokenRequired {
+		t.Error("ApprovalTokenRequired = false on the fresh hold, want true")
+	}
+}
+
+// TestSingleUseOnReapprovalAfterExhaustionAllowsAgain proves single-use
+// scopes to one grant, not to the (agent_id, run_id, tool set) triple
+// forever: once a token is exhausted and /v1/decide falls back to a fresh
+// hold, granting *that* hold mints a new token which itself redeems
+// successfully. Single-use must never permanently lock a triple out of
+// approval after its first grant is spent.
+func TestSingleUseOnReapprovalAfterExhaustionAllowsAgain(t *testing.T) {
+	srv := newTestServerSingleUse(t)
+
+	holdRec := doRequest(t, srv.Handler(), http.MethodPost, "/v1/decide", adminKey, decideRequestDTO{
+		AgentID: "agent://acme.example/finance/bot1", RunID: "run-1", ToolNames: []string{"generate_report"}, EstCostUSD: 999,
+	})
+	held := decodeBody[decideResponseDTO](t, holdRec)
+
+	grantRec := doRequest(t, srv.Handler(), http.MethodPost, "/v1/approvals/"+held.ApprovalID+"/decide", adminKey,
+		approvalDecideRequestDTO{Decision: "grant", DecidedBy: "alice@acme.example"})
+	granted := decodeBody[approvalDecideResponseDTO](t, grantRec)
+
+	decideReq := decideRequestDTO{
+		AgentID: "agent://acme.example/finance/bot1", RunID: "run-1", ToolNames: []string{"generate_report"}, EstCostUSD: 999,
+		ApprovalToken: granted.ApprovalToken,
+	}
+	firstRec := doRequest(t, srv.Handler(), http.MethodPost, "/v1/decide", adminKey, decideReq)
+	if decodeBody[decideResponseDTO](t, firstRec).Decision != pdp.Allow {
+		t.Fatal("first presentation did not allow")
+	}
+
+	// Second presentation of the exhausted token: falls back to a fresh hold.
+	secondRec := doRequest(t, srv.Handler(), http.MethodPost, "/v1/decide", adminKey, decideReq)
+	second := decodeBody[decideResponseDTO](t, secondRec)
+	if second.Decision != pdp.Hold {
+		t.Fatalf("second presentation: Decision = %q, want hold", second.Decision)
+	}
+
+	// Re-approve the fresh hold out of band: a new token is minted.
+	regrantRec := doRequest(t, srv.Handler(), http.MethodPost, "/v1/approvals/"+second.ApprovalID+"/decide", adminKey,
+		approvalDecideRequestDTO{Decision: "grant", DecidedBy: "bob@acme.example"})
+	regranted := decodeBody[approvalDecideResponseDTO](t, regrantRec)
+	if regranted.ApprovalToken == "" {
+		t.Fatal("re-grant did not return an approval_token")
+	}
+	if regranted.ApprovalToken == granted.ApprovalToken {
+		t.Fatal("re-grant minted the exact same token string as the first grant")
+	}
+
+	// The newly granted token must redeem successfully: single-use is
+	// per-grant, not a permanent lock on the triple.
+	thirdRec := doRequest(t, srv.Handler(), http.MethodPost, "/v1/decide", adminKey, decideRequestDTO{
+		AgentID: "agent://acme.example/finance/bot1", RunID: "run-1", ToolNames: []string{"generate_report"}, EstCostUSD: 999,
+		ApprovalToken: regranted.ApprovalToken,
+	})
+	third := decodeBody[decideResponseDTO](t, thirdRec)
+	if third.Decision != pdp.Allow {
+		t.Fatalf("presenting the freshly re-granted token: Decision = %q (%s), want allow", third.Decision, third.Reason)
 	}
 }
 

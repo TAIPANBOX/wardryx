@@ -84,6 +84,16 @@ type Store interface {
 	// ErrAlreadyDecided if it was already decided.
 	DecideApproval(ctx context.Context, id, decision, decidedBy string, decidedAt time.Time) (Approval, error)
 
+	// TryRedeem atomically claims key if (and only if) it has not already
+	// been claimed, and reports whether this call was the one that did so:
+	// true the first time a given key is presented, false on every
+	// subsequent call with that same key. It is the check-and-set primitive
+	// WARDRYX_APPROVAL_SINGLE_USE is built on (internal/api, keyed by
+	// approval.RedemptionKey), and implementations must make it race-safe
+	// under concurrent callers -- exactly one concurrent caller for a given
+	// key may ever observe true.
+	TryRedeem(ctx context.Context, key string) (bool, error)
+
 	// Close releases any resources held by the store (e.g. a Postgres
 	// connection pool). Memory's Close is a no-op.
 	Close() error

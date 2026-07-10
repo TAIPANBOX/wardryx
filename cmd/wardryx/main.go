@@ -68,8 +68,9 @@ commands:
   version    print version
 
 Every serve flag (-addr, -policy, -db, -events) falls back to its
-WARDRYX_* environment variable when the flag itself is unset; WARDRYX_KEYS
-and WARDRYX_APPROVAL_SECRET are environment-only (no flag).`)
+WARDRYX_* environment variable when the flag itself is unset; WARDRYX_KEYS,
+WARDRYX_APPROVAL_SECRET, and WARDRYX_APPROVAL_SINGLE_USE are
+environment-only (no flag).`)
 }
 
 // --- serve ---
@@ -114,6 +115,9 @@ func runServe(args []string) error {
 		fmt.Fprintln(os.Stderr, "wardryx: no -db given; using an in-memory approval store (state is lost on restart)")
 		st = store.NewMemory()
 	}
+	if warn := singleUseInMemoryWarning(cfg.ApprovalSingleUse, *dbDSN); warn != "" {
+		fmt.Fprintln(os.Stderr, warn)
+	}
 
 	var events *event.Writer
 	if *eventsPath != "" {
@@ -127,7 +131,7 @@ func runServe(args []string) error {
 
 	keys := api.ParseKeys(cfg.Keys)
 	engine := pdp.New(policies, []byte(cfg.ApprovalSecret))
-	srv := api.New(engine, st, events, keys, []byte(cfg.ApprovalSecret))
+	srv := api.New(engine, st, events, keys, []byte(cfg.ApprovalSecret), cfg.ApprovalSingleUse)
 
 	fmt.Fprintf(os.Stderr, "wardryx: serving on http://%s\n", displayAddr(*addr))
 	httpSrv := &http.Server{
@@ -136,6 +140,20 @@ func runServe(args []string) error {
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 	return httpSrv.ListenAndServe()
+}
+
+// singleUseInMemoryWarning returns the stderr warning to print when
+// WARDRYX_APPROVAL_SINGLE_USE is enabled but serve is about to use the
+// in-memory approval store (dbDSN empty): Memory.TryRedeem's claimed keys
+// live only in this one process, so single-use only holds within it, not
+// across multiple wardryx instances sharing the load (e.g. behind a load
+// balancer) -- durable, cross-instance single-use needs -db/WARDRYX_DB.
+// Returns "" (no warning) when singleUse is false or dbDSN is set.
+func singleUseInMemoryWarning(singleUse bool, dbDSN string) string {
+	if !singleUse || dbDSN != "" {
+		return ""
+	}
+	return "wardryx: WARDRYX_APPROVAL_SINGLE_USE=true with no -db (in-memory approval store); single-use is only enforced within this one process, not across multiple wardryx instances -- pass -db for single-use that holds across a multi-instance deployment"
 }
 
 func displayAddr(addr string) string {

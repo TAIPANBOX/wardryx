@@ -14,6 +14,12 @@
 // and verifying both refuse rather than accept, so a misconfigured
 // deployment cannot silently treat every token as valid (or mint one nobody
 // can ever redeem for something other than "invalid").
+//
+// A valid token is reusable for its full TTL against the same
+// (agent_id, run_id, tool set) by default: fine for retry-tolerance, loose
+// for spend governance. WARDRYX_APPROVAL_SINGLE_USE (internal/api, backed
+// by internal/store's Store.TryRedeem) is an opt-in mode that lets a
+// minted token allow exactly one /v1/decide call; see RedemptionKey.
 package approval
 
 import (
@@ -63,14 +69,25 @@ var (
 )
 
 // claims is the payload embedded in a minted approval_token: exactly the
-// fields the token is bound to, plus its expiry. Tools is always stored
-// sorted so Verify can compare it against a freshly sorted request tool set
-// without caring about the order either side supplied them in.
+// fields the token is bound to, plus its expiry and a random nonce. Tools is
+// always stored sorted so Verify can compare it against a freshly sorted
+// request tool set without caring about the order either side supplied them
+// in.
+//
+// Nonce carries no meaning of its own and Verify never checks it; it exists
+// purely so that two independent mints for the identical
+// (agent_id, run_id, tools) with the same ttl -- e.g. a hold that is
+// granted, exhausted under WARDRYX_APPROVAL_SINGLE_USE, and re-granted
+// within the same wall-clock second, so Exp (second granularity) does not
+// differ either -- still produce distinct token strings. Distinct token
+// strings is exactly what RedemptionKey needs from two separate grants: see
+// its doc comment.
 type claims struct {
 	AgentID string   `json:"agent_id"`
 	RunID   string   `json:"run_id"`
 	Tools   []string `json:"tools"`
 	Exp     int64    `json:"exp"` // unix seconds
+	Nonce   string   `json:"nonce"`
 }
 
 func sortedCopy(ss []string) []string {
@@ -99,8 +116,12 @@ func MintApprovalToken(secret []byte, agentID, runID string, tools []string, ttl
 	if len(secret) == 0 {
 		return "", time.Time{}, ErrNoSecret
 	}
+	nonce, err := randomNonce()
+	if err != nil {
+		return "", time.Time{}, err
+	}
 	expiresAt = time.Now().Add(ttl)
-	c := claims{AgentID: agentID, RunID: runID, Tools: sortedCopy(tools), Exp: expiresAt.Unix()}
+	c := claims{AgentID: agentID, RunID: runID, Tools: sortedCopy(tools), Exp: expiresAt.Unix(), Nonce: nonce}
 	body, err := json.Marshal(c)
 	if err != nil {
 		return "", time.Time{}, fmt.Errorf("approval: marshal claims: %w", err)
@@ -155,6 +176,43 @@ func sign(secret []byte, payload string) string {
 	mac := hmac.New(sha256.New, secret)
 	mac.Write([]byte(payload))
 	return hex.EncodeToString(mac.Sum(nil))
+}
+
+// randomNonce returns 8 random bytes (64 bits), hex-encoded, for claims.Nonce.
+// It only has to make one mint's claims differ from another's, not resist a
+// dedicated attacker (the token's HMAC signature is what actually secures
+// it), so 64 bits of entropy is ample headroom for that.
+func randomNonce() (string, error) {
+	b := make([]byte, 8)
+	if _, err := rand.Read(b); err != nil {
+		return "", fmt.Errorf("approval: generate nonce: %w", err)
+	}
+	return hex.EncodeToString(b), nil
+}
+
+// RedemptionKey returns a stable identifier for one specific minted
+// approval_token, the sha256 hex digest of the token string itself. It is
+// how WARDRYX_APPROVAL_SINGLE_USE (internal/api) tracks, via
+// store.Store.TryRedeem, whether a given token has already been redeemed:
+// the first /v1/decide to successfully claim a key wins, and any later
+// presentation of that same token loses the claim.
+//
+// The key is deliberately derived from the whole token, not from the
+// (agent_id, run_id, tool set) triple alone. Every mint embeds its own
+// expiry in the signed claims, so two grants for the same triple -- e.g. a
+// single-use token that was already spent, re-granted out of band per the
+// package doc comment -- produce different token strings and therefore
+// different keys. Keying only on the triple would instead make it
+// redeemable exactly once ever, permanently blocking any later legitimate
+// re-approval of the same agent/run/tool-set rather than just the exhausted
+// grant.
+//
+// The key is not a secret and needs no HMAC: it never proves anything on
+// its own (the token's own signature already does that), it only names a
+// redemption slot, so collision resistance is all that is required.
+func RedemptionKey(token string) string {
+	sum := sha256.Sum256([]byte(token))
+	return hex.EncodeToString(sum[:])
 }
 
 // newApprovalID returns a fresh, random approval identifier: "ap_" followed

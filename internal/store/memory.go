@@ -12,15 +12,21 @@ import (
 // Memory is an in-process Store: the default when -db/WARDRYX_DB is unset.
 // State does not survive process restart, so it is only meaningful for the
 // lifetime of one `wardryx serve` run. Safe for concurrent use.
+//
+// Because redeemed lives only in this process's memory, WARDRYX_APPROVAL_
+// SINGLE_USE enforced against a Memory store only holds within one process:
+// it gives no cross-instance guarantee behind a load balancer. cmd/wardryx
+// warns about exactly this at startup.
 type Memory struct {
-	mu    sync.Mutex
-	byID  map[string]Approval
-	order []string // insertion order, for a deterministic ListApprovals
+	mu       sync.Mutex
+	byID     map[string]Approval
+	order    []string             // insertion order, for a deterministic ListApprovals
+	redeemed map[string]time.Time // TryRedeem's claimed keys, by approval.RedemptionKey
 }
 
 // NewMemory returns an empty in-memory Store.
 func NewMemory() *Memory {
-	return &Memory{byID: make(map[string]Approval)}
+	return &Memory{byID: make(map[string]Approval), redeemed: make(map[string]time.Time)}
 }
 
 // deepCopyContext round-trips a.Context through JSON, the same
@@ -99,6 +105,16 @@ func (m *Memory) DecideApproval(_ context.Context, id, decision, decidedBy strin
 	a.DecidedAt = decidedAt
 	m.byID[id] = a
 	return a, nil
+}
+
+func (m *Memory) TryRedeem(_ context.Context, key string) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, claimed := m.redeemed[key]; claimed {
+		return false, nil
+	}
+	m.redeemed[key] = time.Now().UTC()
+	return true, nil
 }
 
 func (m *Memory) Close() error { return nil }
