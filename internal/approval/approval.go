@@ -4,11 +4,13 @@
 // for a human: internal/store records a pending row and the caller moves
 // on. When an admin later grants it (POST /v1/approvals/{id}/decide), this
 // package mints a short-lived approval_token bound to the exact
-// (agent_id, run_id, tool-set) that was held, signed with HMAC-SHA256 over
-// a server secret (WARDRYX_APPROVAL_SECRET). A subsequent /v1/decide call
-// for that same action, presenting that token, is verified statelessly --
-// no database lookup, no parked connection -- mirroring the stateless
-// kill-switch pattern already used elsewhere in the TAIPANBOX stack.
+// (agent_id, run_id, tool-set) that was held, and to the est_cost_usd that
+// triggered the hold as a cost ceiling (see claims.MaxCostUSD), signed with
+// HMAC-SHA256 over a server secret (WARDRYX_APPROVAL_SECRET). A subsequent
+// /v1/decide call for that same action, presenting that token, is verified
+// statelessly -- no database lookup, no parked connection -- mirroring the
+// stateless kill-switch pattern already used elsewhere in the TAIPANBOX
+// stack.
 //
 // The secret is fail-closed: with WARDRYX_APPROVAL_SECRET unset, minting
 // and verifying both refuse rather than accept, so a misconfigured
@@ -16,10 +18,12 @@
 // can ever redeem for something other than "invalid").
 //
 // A valid token is reusable for its full TTL against the same
-// (agent_id, run_id, tool set) by default: fine for retry-tolerance, loose
-// for spend governance. WARDRYX_APPROVAL_SINGLE_USE (internal/api, backed
-// by internal/store's Store.TryRedeem) is an opt-in mode that lets a
-// minted token allow exactly one /v1/decide call; see RedemptionKey.
+// (agent_id, run_id, tool set), at the same or a lower est_cost_usd, by
+// default: fine for retry-tolerance, and no longer loose for spend
+// governance now that the cost ceiling is enforced too.
+// WARDRYX_APPROVAL_SINGLE_USE (internal/api, backed by internal/store's
+// Store.TryRedeem) is an opt-in mode that lets a minted token allow exactly
+// one /v1/decide call; see RedemptionKey.
 package approval
 
 import (
@@ -63,6 +67,14 @@ var (
 	// same (agent_id, run_id, tool set) as the request it was presented
 	// with.
 	ErrTokenBinding = errors.New("approval: token does not match this agent_id/run_id/tool set")
+	// ErrTokenCostExceeded means the token verified (signature, expiry,
+	// and agent/run/tool-set binding all matched) but the request's
+	// est_cost_usd exceeds the token's embedded MaxCostUSD: the ceiling a
+	// human actually approved when the hold was granted, not merely the
+	// policy threshold it crossed. A token minted before MaxCostUSD
+	// existed decodes to a ceiling of 0, so it hits this same error for
+	// any positive est_cost_usd; see claims' doc comment.
+	ErrTokenCostExceeded = errors.New("approval: token's approved cost ceiling is exceeded by the requested cost")
 	// ErrInvalidDecision means Decide was called with a decision other
 	// than "grant" or "deny".
 	ErrInvalidDecision = errors.New("approval: decision must be \"grant\" or \"deny\"")
@@ -74,6 +86,16 @@ var (
 // request tool set without caring about the order either side supplied them
 // in.
 //
+// MaxCostUSD is the est_cost_usd that actually triggered the hold this
+// token grants (see Decide and costFromContext), not merely the policy
+// threshold it exceeded. It is a ceiling, not an exact-match value:
+// VerifyApprovalToken accepts any presented est_cost_usd up to and
+// including it, so a legitimate retry at the same or a lower cost still
+// works, but rejects anything higher. A decoded MaxCostUSD of zero -- which
+// is exactly what a token minted before this field existed decodes to, since
+// it is simply absent from that token's JSON -- is deliberately never
+// treated as "no ceiling"; see VerifyApprovalToken.
+//
 // Nonce carries no meaning of its own and Verify never checks it; it exists
 // purely so that two independent mints for the identical
 // (agent_id, run_id, tools) with the same ttl -- e.g. a hold that is
@@ -83,11 +105,12 @@ var (
 // strings is exactly what RedemptionKey needs from two separate grants: see
 // its doc comment.
 type claims struct {
-	AgentID string   `json:"agent_id"`
-	RunID   string   `json:"run_id"`
-	Tools   []string `json:"tools"`
-	Exp     int64    `json:"exp"` // unix seconds
-	Nonce   string   `json:"nonce"`
+	AgentID    string   `json:"agent_id"`
+	RunID      string   `json:"run_id"`
+	Tools      []string `json:"tools"`
+	MaxCostUSD float64  `json:"max_cost_usd"`
+	Exp        int64    `json:"exp"` // unix seconds
+	Nonce      string   `json:"nonce"`
 }
 
 func sortedCopy(ss []string) []string {
@@ -109,10 +132,12 @@ func sameToolSet(a, b []string) bool {
 }
 
 // MintApprovalToken creates a signed, self-contained approval_token bound
-// to (agentID, runID, tools) that expires after ttl. It returns ErrNoSecret
-// if secret is empty: minting never silently produces an unsigned or
-// weakly-signed token.
-func MintApprovalToken(secret []byte, agentID, runID string, tools []string, ttl time.Duration) (token string, expiresAt time.Time, err error) {
+// to (agentID, runID, tools, maxCostUSD) that expires after ttl. maxCostUSD
+// is the ceiling the token authorizes: VerifyApprovalToken rejects any
+// presented est_cost_usd greater than it. It returns ErrNoSecret if secret
+// is empty: minting never silently produces an unsigned or weakly-signed
+// token.
+func MintApprovalToken(secret []byte, agentID, runID string, tools []string, maxCostUSD float64, ttl time.Duration) (token string, expiresAt time.Time, err error) {
 	if len(secret) == 0 {
 		return "", time.Time{}, ErrNoSecret
 	}
@@ -121,7 +146,7 @@ func MintApprovalToken(secret []byte, agentID, runID string, tools []string, ttl
 		return "", time.Time{}, err
 	}
 	expiresAt = time.Now().Add(ttl)
-	c := claims{AgentID: agentID, RunID: runID, Tools: sortedCopy(tools), Exp: expiresAt.Unix(), Nonce: nonce}
+	c := claims{AgentID: agentID, RunID: runID, Tools: sortedCopy(tools), MaxCostUSD: maxCostUSD, Exp: expiresAt.Unix(), Nonce: nonce}
 	body, err := json.Marshal(c)
 	if err != nil {
 		return "", time.Time{}, fmt.Errorf("approval: marshal claims: %w", err)
@@ -131,12 +156,24 @@ func MintApprovalToken(secret []byte, agentID, runID string, tools []string, ttl
 	return payload + "." + sig, expiresAt, nil
 }
 
-// VerifyApprovalToken checks token's signature, expiry, and binding to
-// (agentID, runID, tools). It returns nil when the token is valid; any
+// VerifyApprovalToken checks token's signature, expiry, binding to
+// (agentID, runID, tools), and that estCostUSD does not exceed the token's
+// approved cost ceiling. It returns nil when the token is valid; any
 // non-nil error means the caller must not treat the action as approved.
 // Verification is entirely stateless: no store lookup, matching the
 // package's no-parked-connection design.
-func VerifyApprovalToken(secret []byte, token, agentID, runID string, tools []string) error {
+//
+// The cost check is a ceiling, not an exact match (see claims.MaxCostUSD's
+// doc comment): estCostUSD up to and including the token's embedded
+// MaxCostUSD passes, so a legitimate retry at the same or a lower cost
+// still works. A token minted before MaxCostUSD existed decodes it as the
+// Go zero value (0), and that is deliberately never treated as "no
+// ceiling": it fails closed against any positive estCostUSD, exactly like a
+// ceiling of 0 would. Tokens are short-lived (DefaultTTL, 10 minutes), so
+// refusing a pre-existing token still in flight across a deploy of this
+// change is an acceptable, bounded cost for closing the gap where such a
+// token would otherwise go on authorizing unbounded spend.
+func VerifyApprovalToken(secret []byte, token, agentID, runID string, tools []string, estCostUSD float64) error {
 	if len(secret) == 0 {
 		return ErrNoSecret
 	}
@@ -168,6 +205,9 @@ func VerifyApprovalToken(secret []byte, token, agentID, runID string, tools []st
 	}
 	if !sameToolSet(c.Tools, sortedCopy(tools)) {
 		return ErrTokenBinding
+	}
+	if estCostUSD > c.MaxCostUSD {
+		return fmt.Errorf("%w: approved ceiling $%.2f exceeded by requested $%.2f", ErrTokenCostExceeded, c.MaxCostUSD, estCostUSD)
 	}
 	return nil
 }
@@ -261,9 +301,12 @@ func Request(ctx context.Context, st store.Store, agentID, runID string, tools [
 // Decide resolves a pending approval as granted or denied. On "deny", no
 // secret is needed and the returned token is empty. On "grant", it mints an
 // approval_token bound to the approval's original (agent_id, run_id,
-// tool_names) via MintApprovalToken; if secret is empty the grant is
-// refused before anything is written, per this package's fail-closed rule
-// -- there is no such thing as a recorded grant with no usable token.
+// tool_names), with MaxCostUSD set to the est_cost_usd that triggered the
+// hold (see costFromContext) -- the amount a human is actually approving,
+// not merely the policy threshold it exceeded -- via MintApprovalToken; if
+// secret is empty the grant is refused before anything is written, per this
+// package's fail-closed rule -- there is no such thing as a recorded grant
+// with no usable token.
 func Decide(ctx context.Context, st store.Store, secret []byte, id, decision, decidedBy string, ttl time.Duration) (approved store.Approval, token string, err error) {
 	if decision != "grant" && decision != "deny" {
 		return store.Approval{}, "", fmt.Errorf("%w: got %q", ErrInvalidDecision, decision)
@@ -280,7 +323,7 @@ func Decide(ctx context.Context, st store.Store, secret []byte, id, decision, de
 		return a, "", nil
 	}
 
-	tok, _, err := MintApprovalToken(secret, a.AgentID, a.RunID, toolsFromContext(a.Context), ttl)
+	tok, _, err := MintApprovalToken(secret, a.AgentID, a.RunID, toolsFromContext(a.Context), costFromContext(a.Context), ttl)
 	if err != nil {
 		return a, "", err
 	}
@@ -311,5 +354,29 @@ func toolsFromContext(ctx map[string]any) []string {
 		return out
 	default:
 		return nil
+	}
+}
+
+// costFromContext extracts the "est_cost_usd" entry api.go stamped onto a
+// held approval's Context (handleDecide's approval.Request call), the
+// estimated cost that actually triggered the hold and therefore the
+// ceiling Decide mints the grant's approval_token against. A JSON number
+// decoded into a map[string]any is always a float64 -- unlike
+// toolsFromContext's Tools, there is no []any-style wrinkle here from
+// round-tripping through JSON, but a value that was never serialized at
+// all (e.g. a unit test building an Approval by hand with an int or no
+// entry) is tolerated by falling back to 0.
+func costFromContext(ctx map[string]any) float64 {
+	raw, ok := ctx["est_cost_usd"]
+	if !ok {
+		return 0
+	}
+	switch v := raw.(type) {
+	case float64:
+		return v
+	case int:
+		return float64(v)
+	default:
+		return 0
 	}
 }

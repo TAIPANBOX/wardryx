@@ -215,7 +215,7 @@ func (s *Server) handleDecide(w http.ResponseWriter, r *http.Request, principal 
 		// policy_deny above, distinct from approval_requested (which
 		// covers only a *fresh* hold).
 		if dto.ApprovalToken != "" {
-			verr := approval.VerifyApprovalToken(s.approvalSecret, dto.ApprovalToken, req.AgentID, req.RunID, req.ToolNames)
+			verr := approval.VerifyApprovalToken(s.approvalSecret, dto.ApprovalToken, req.AgentID, req.RunID, req.ToolNames, req.EstCostUSD)
 			if errors.Is(verr, approval.ErrTokenExpired) {
 				s.emit(evApprovalTimeout, event.SeverityHigh, req.AgentID, req.RunID, req.OnBehalfOf,
 					map[string]any{"reason": "presented approval_token had expired"})

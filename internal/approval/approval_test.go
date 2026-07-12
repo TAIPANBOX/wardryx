@@ -2,6 +2,8 @@ package approval
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"testing"
 	"time"
@@ -12,7 +14,7 @@ import (
 func TestMintAndVerifyRoundTrip(t *testing.T) {
 	secret := []byte("test-secret")
 	tools := []string{"send_wire_transfer", "delete_account"}
-	token, exp, err := MintApprovalToken(secret, "agent://x/bot", "run-1", tools, DefaultTTL)
+	token, exp, err := MintApprovalToken(secret, "agent://x/bot", "run-1", tools, 1000, DefaultTTL)
 	if err != nil {
 		t.Fatalf("MintApprovalToken: %v", err)
 	}
@@ -26,17 +28,17 @@ func TestMintAndVerifyRoundTrip(t *testing.T) {
 	// Verify with tools presented in a different order: binding compares
 	// the tool *set*, not a literal sequence.
 	reordered := []string{"delete_account", "send_wire_transfer"}
-	if err := VerifyApprovalToken(secret, token, "agent://x/bot", "run-1", reordered); err != nil {
+	if err := VerifyApprovalToken(secret, token, "agent://x/bot", "run-1", reordered, 1000); err != nil {
 		t.Errorf("VerifyApprovalToken: %v, want nil (valid)", err)
 	}
 }
 
 func TestVerifyWrongSecret(t *testing.T) {
-	token, _, err := MintApprovalToken([]byte("secret-a"), "agent://x/bot", "run-1", []string{"tool"}, DefaultTTL)
+	token, _, err := MintApprovalToken([]byte("secret-a"), "agent://x/bot", "run-1", []string{"tool"}, 100, DefaultTTL)
 	if err != nil {
 		t.Fatalf("MintApprovalToken: %v", err)
 	}
-	err = VerifyApprovalToken([]byte("secret-b"), token, "agent://x/bot", "run-1", []string{"tool"})
+	err = VerifyApprovalToken([]byte("secret-b"), token, "agent://x/bot", "run-1", []string{"tool"}, 100)
 	if !errors.Is(err, ErrTokenSignature) {
 		t.Errorf("VerifyApprovalToken with wrong secret = %v, want ErrTokenSignature", err)
 	}
@@ -44,11 +46,11 @@ func TestVerifyWrongSecret(t *testing.T) {
 
 func TestVerifyExpiredToken(t *testing.T) {
 	secret := []byte("test-secret")
-	token, _, err := MintApprovalToken(secret, "agent://x/bot", "run-1", []string{"tool"}, -time.Second)
+	token, _, err := MintApprovalToken(secret, "agent://x/bot", "run-1", []string{"tool"}, 100, -time.Second)
 	if err != nil {
 		t.Fatalf("MintApprovalToken: %v", err)
 	}
-	err = VerifyApprovalToken(secret, token, "agent://x/bot", "run-1", []string{"tool"})
+	err = VerifyApprovalToken(secret, token, "agent://x/bot", "run-1", []string{"tool"}, 100)
 	if !errors.Is(err, ErrTokenExpired) {
 		t.Errorf("VerifyApprovalToken with a negative TTL = %v, want ErrTokenExpired", err)
 	}
@@ -56,7 +58,7 @@ func TestVerifyExpiredToken(t *testing.T) {
 
 func TestVerifyWrongBinding(t *testing.T) {
 	secret := []byte("test-secret")
-	token, _, err := MintApprovalToken(secret, "agent://x/bot", "run-1", []string{"tool_a"}, DefaultTTL)
+	token, _, err := MintApprovalToken(secret, "agent://x/bot", "run-1", []string{"tool_a"}, 100, DefaultTTL)
 	if err != nil {
 		t.Fatalf("MintApprovalToken: %v", err)
 	}
@@ -74,7 +76,7 @@ func TestVerifyWrongBinding(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			err := VerifyApprovalToken(secret, token, c.agentID, c.runID, c.tools)
+			err := VerifyApprovalToken(secret, token, c.agentID, c.runID, c.tools, 100)
 			if !errors.Is(err, ErrTokenBinding) {
 				t.Errorf("VerifyApprovalToken(%s) = %v, want ErrTokenBinding", c.name, err)
 			}
@@ -82,18 +84,96 @@ func TestVerifyWrongBinding(t *testing.T) {
 	}
 }
 
+// TestVerifyCostCeiling covers the ceiling comparison directly: a token
+// minted with a given MaxCostUSD accepts any estCostUSD up to and
+// including it (an exact match and a lower retry both work) and rejects
+// anything higher, all the way up to a wildly inflated amount.
+func TestVerifyCostCeiling(t *testing.T) {
+	secret := []byte("test-secret")
+	token, _, err := MintApprovalToken(secret, "agent://x/bot", "run-1", []string{"tool"}, 501, DefaultTTL)
+	if err != nil {
+		t.Fatalf("MintApprovalToken: %v", err)
+	}
+	cases := []struct {
+		name    string
+		cost    float64
+		wantErr bool
+	}{
+		{"exactly at the ceiling", 501, false},
+		{"under the ceiling", 100, false},
+		{"zero cost", 0, false},
+		{"a cent over the ceiling", 501.01, true},
+		{"wildly over the ceiling", 5_000_000, true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			err := VerifyApprovalToken(secret, token, "agent://x/bot", "run-1", []string{"tool"}, c.cost)
+			if c.wantErr && !errors.Is(err, ErrTokenCostExceeded) {
+				t.Errorf("VerifyApprovalToken(estCostUSD=%v) = %v, want ErrTokenCostExceeded", c.cost, err)
+			}
+			if !c.wantErr && err != nil {
+				t.Errorf("VerifyApprovalToken(estCostUSD=%v) = %v, want nil", c.cost, err)
+			}
+		})
+	}
+}
+
+// TestVerifyOldFormatTokenFailsClosedOnCost simulates a token minted before
+// MaxCostUSD existed: its JSON payload has no max_cost_usd key at all, not
+// merely an explicit zero value. Decoding it into today's claims leaves
+// MaxCostUSD at Go's zero value, and that must fail closed against any
+// positive presented cost rather than being treated as "no ceiling" --
+// otherwise a token issued just before this fix shipped would carry on
+// authorizing unbounded cost for the rest of its (short) TTL.
+func TestVerifyOldFormatTokenFailsClosedOnCost(t *testing.T) {
+	secret := []byte("test-secret")
+	type oldClaims struct {
+		AgentID string   `json:"agent_id"`
+		RunID   string   `json:"run_id"`
+		Tools   []string `json:"tools"`
+		Exp     int64    `json:"exp"`
+		Nonce   string   `json:"nonce"`
+	}
+	old := oldClaims{
+		AgentID: "agent://x/bot",
+		RunID:   "run-1",
+		Tools:   []string{"tool"},
+		Exp:     time.Now().Add(time.Minute).Unix(),
+		Nonce:   "abcd1234abcd1234",
+	}
+	body, err := json.Marshal(old)
+	if err != nil {
+		t.Fatalf("marshal old-format claims: %v", err)
+	}
+	payload := base64.RawURLEncoding.EncodeToString(body)
+	token := payload + "." + sign(secret, payload)
+
+	if err := VerifyApprovalToken(secret, token, "agent://x/bot", "run-1", []string{"tool"}, 0.01); !errors.Is(err, ErrTokenCostExceeded) {
+		t.Errorf("VerifyApprovalToken(old-format token, estCostUSD=0.01) = %v, want ErrTokenCostExceeded", err)
+	}
+	// pdp.Decide only ever calls VerifyApprovalToken with a positive
+	// EstCostUSD (overThreshold requires cost > a positive threshold), so
+	// a zero-cost request against an old-format token is not a case the
+	// fail-closed rule needs to guard -- but the comparison is documented
+	// as strictly greater-than, not greater-or-equal, so it is worth
+	// pinning here too.
+	if err := VerifyApprovalToken(secret, token, "agent://x/bot", "run-1", []string{"tool"}, 0); err != nil {
+		t.Errorf("VerifyApprovalToken(old-format token, estCostUSD=0) = %v, want nil", err)
+	}
+}
+
 func TestMintAndVerifyFailClosedWithNoSecret(t *testing.T) {
-	if _, _, err := MintApprovalToken(nil, "agent://x/bot", "run-1", []string{"tool"}, DefaultTTL); !errors.Is(err, ErrNoSecret) {
+	if _, _, err := MintApprovalToken(nil, "agent://x/bot", "run-1", []string{"tool"}, 100, DefaultTTL); !errors.Is(err, ErrNoSecret) {
 		t.Errorf("MintApprovalToken with no secret = %v, want ErrNoSecret", err)
 	}
 	// Even a syntactically well-formed token (minted under some other
 	// secret) must be refused once the verifying side has no secret
 	// configured: empty secret is never "no signature required."
-	token, _, err := MintApprovalToken([]byte("some-secret"), "agent://x/bot", "run-1", []string{"tool"}, DefaultTTL)
+	token, _, err := MintApprovalToken([]byte("some-secret"), "agent://x/bot", "run-1", []string{"tool"}, 100, DefaultTTL)
 	if err != nil {
 		t.Fatalf("MintApprovalToken: %v", err)
 	}
-	if err := VerifyApprovalToken(nil, token, "agent://x/bot", "run-1", []string{"tool"}); !errors.Is(err, ErrNoSecret) {
+	if err := VerifyApprovalToken(nil, token, "agent://x/bot", "run-1", []string{"tool"}, 100); !errors.Is(err, ErrNoSecret) {
 		t.Errorf("VerifyApprovalToken with no secret = %v, want ErrNoSecret", err)
 	}
 }
@@ -102,7 +182,7 @@ func TestVerifyMalformedToken(t *testing.T) {
 	secret := []byte("test-secret")
 	cases := []string{"", "no-dot-separator", "payload.", ".sig", "not-base64!!!.deadbeef"}
 	for _, tok := range cases {
-		if err := VerifyApprovalToken(secret, tok, "agent://x/bot", "run-1", nil); err == nil {
+		if err := VerifyApprovalToken(secret, tok, "agent://x/bot", "run-1", nil, 0); err == nil {
 			t.Errorf("VerifyApprovalToken(%q) = nil, want an error", tok)
 		}
 	}
@@ -136,13 +216,21 @@ func TestRequestAndDecideGrantMintsUsableToken(t *testing.T) {
 	if token == "" {
 		t.Fatal("Decide(grant) returned an empty token")
 	}
-	if err := VerifyApprovalToken(secret, token, "agent://acme.example/finance/bot1", "run-42", []string{"send_wire_transfer"}); err != nil {
+	if err := VerifyApprovalToken(secret, token, "agent://acme.example/finance/bot1", "run-42", []string{"send_wire_transfer"}, 1200); err != nil {
 		t.Errorf("the token minted by Decide(grant) does not verify: %v", err)
 	}
 	// The token must stay bound to exactly the held tool set: presenting it
 	// for a different tool must fail.
-	if err := VerifyApprovalToken(secret, token, "agent://acme.example/finance/bot1", "run-42", []string{"a_different_tool"}); !errors.Is(err, ErrTokenBinding) {
+	if err := VerifyApprovalToken(secret, token, "agent://acme.example/finance/bot1", "run-42", []string{"a_different_tool"}, 1200); !errors.Is(err, ErrTokenBinding) {
 		t.Errorf("token verified against a different tool set: %v, want ErrTokenBinding", err)
+	}
+	// The token must also stay bound to the est_cost_usd that triggered the
+	// hold (1200, stamped in Request's context above): it is a ceiling on
+	// what Decide mints, not merely a value that happened to verify once.
+	// A wildly higher cost at redemption time must fail even though every
+	// other binding (agent/run/tool-set) matches.
+	if err := VerifyApprovalToken(secret, token, "agent://acme.example/finance/bot1", "run-42", []string{"send_wire_transfer"}, 5_000_000); !errors.Is(err, ErrTokenCostExceeded) {
+		t.Errorf("token verified for $5,000,000 against a $1,200 approval: %v, want ErrTokenCostExceeded", err)
 	}
 }
 
@@ -230,7 +318,7 @@ func TestDecideUnknownApprovalID(t *testing.T) {
 // triple is never mistaken for the earlier, already-redeemed one).
 func TestRedemptionKeyStableAndDistinct(t *testing.T) {
 	secret := []byte("test-secret")
-	tokenA, _, err := MintApprovalToken(secret, "agent://x/bot", "run-1", []string{"tool"}, DefaultTTL)
+	tokenA, _, err := MintApprovalToken(secret, "agent://x/bot", "run-1", []string{"tool"}, 100, DefaultTTL)
 	if err != nil {
 		t.Fatalf("mint tokenA: %v", err)
 	}
@@ -238,7 +326,7 @@ func TestRedemptionKeyStableAndDistinct(t *testing.T) {
 	// (its own expiry baked into the claims), the same way a re-approval
 	// after single-use exhaustion would mint a new token for the same
 	// triple.
-	tokenB, _, err := MintApprovalToken(secret, "agent://x/bot", "run-1", []string{"tool"}, DefaultTTL+time.Second)
+	tokenB, _, err := MintApprovalToken(secret, "agent://x/bot", "run-1", []string{"tool"}, 100, DefaultTTL+time.Second)
 	if err != nil {
 		t.Fatalf("mint tokenB: %v", err)
 	}

@@ -18,11 +18,13 @@
 // A request over a matched policy's cost threshold resolves three ways: no
 // ApprovalToken presented resolves to Hold (the normal, expected path: go
 // get a human to grant one); a valid ApprovalToken resolves to Allow; a
-// *presented but invalid* token (expired, forged, or bound to a different
-// agent/run/tool-set) resolves to Deny rather than falling back to Hold --
-// a stale or mismatched credential is a stronger signal that something is
-// wrong than simply not having approval yet, so it is rejected outright
-// instead of silently being treated the same as the no-token case.
+// *presented but invalid* token (expired, forged, bound to a different
+// agent/run/tool-set, or presented against an EstCostUSD higher than the
+// ceiling it was actually granted for) resolves to Deny rather than falling
+// back to Hold -- a stale or mismatched credential is a stronger signal
+// that something is wrong than simply not having approval yet, so it is
+// rejected outright instead of silently being treated the same as the
+// no-token case.
 package pdp
 
 import (
@@ -258,7 +260,7 @@ func (e *Engine) Decide(req DecideRequest) DecideResponse {
 	if pol, ok := overThreshold(matched, req.EstCostUSD); ok {
 		resp.ApprovalTokenRequired = true
 		if req.ApprovalToken != "" {
-			verr := approval.VerifyApprovalToken(e.approvalSecret, req.ApprovalToken, req.AgentID, req.RunID, req.ToolNames)
+			verr := approval.VerifyApprovalToken(e.approvalSecret, req.ApprovalToken, req.AgentID, req.RunID, req.ToolNames, req.EstCostUSD)
 			if verr == nil {
 				resp.Decision = Allow
 				resp.Reason = fmt.Sprintf("estimated cost $%.2f exceeds policy %q threshold $%.2f; allowed via a valid approval_token", req.EstCostUSD, pol.Name, pol.RequireHumanAboveUSD)

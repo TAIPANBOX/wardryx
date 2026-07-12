@@ -45,15 +45,15 @@ func testEngine(t *testing.T) *Engine {
 func TestDecideTable(t *testing.T) {
 	engine := testEngine(t)
 
-	validToken, _, err := approval.MintApprovalToken([]byte(testSecret), "agent://acme.example/finance/bot1", "run-1", []string{"generate_report"}, approval.DefaultTTL)
+	validToken, _, err := approval.MintApprovalToken([]byte(testSecret), "agent://acme.example/finance/bot1", "run-1", []string{"generate_report"}, 750, approval.DefaultTTL)
 	if err != nil {
 		t.Fatalf("mint valid token: %v", err)
 	}
-	expiredToken, _, err := approval.MintApprovalToken([]byte(testSecret), "agent://acme.example/finance/bot1", "run-1", []string{"generate_report"}, -time.Minute)
+	expiredToken, _, err := approval.MintApprovalToken([]byte(testSecret), "agent://acme.example/finance/bot1", "run-1", []string{"generate_report"}, 750, -time.Minute)
 	if err != nil {
 		t.Fatalf("mint expired token: %v", err)
 	}
-	wrongBindingToken, _, err := approval.MintApprovalToken([]byte(testSecret), "agent://acme.example/finance/bot1", "a-different-run", []string{"generate_report"}, approval.DefaultTTL)
+	wrongBindingToken, _, err := approval.MintApprovalToken([]byte(testSecret), "agent://acme.example/finance/bot1", "a-different-run", []string{"generate_report"}, 750, approval.DefaultTTL)
 	if err != nil {
 		t.Fatalf("mint wrong-binding token: %v", err)
 	}
@@ -273,6 +273,53 @@ func TestDecideTable(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestDecideApprovalTokenCostCeiling reproduces a real bug: an
+// approval_token was bound to (agent_id, run_id, tool set) but not to the
+// cost a human actually approved, so a token minted for a hold that crossed
+// the policy threshold by a single dollar would then authorize *any*
+// est_cost_usd whatsoever for the same agent/run/tool-set, for the rest of
+// its TTL. The fix binds the token to the est_cost_usd that triggered the
+// hold as a ceiling: a resubmission at the same or a lower cost still
+// allows (retries are not penalized), but a resubmission at a wildly higher
+// cost must not.
+func TestDecideApprovalTokenCostCeiling(t *testing.T) {
+	engine := testEngine(t)
+	const approvedCost = 501 // just over finance-guardrail's require_human_above_usd: 500
+
+	token, _, err := approval.MintApprovalToken([]byte(testSecret), "agent://acme.example/finance/bot1", "run-1", []string{"generate_report"}, approvedCost, approval.DefaultTTL)
+	if err != nil {
+		t.Fatalf("mint token: %v", err)
+	}
+
+	t.Run("same-or-lower cost still allows", func(t *testing.T) {
+		resp := engine.Decide(DecideRequest{
+			AgentID:           "agent://acme.example/finance/bot1",
+			RunID:             "run-1",
+			ToolNames:         []string{"generate_report"},
+			EstCostUSD:        approvedCost,
+			AttestationMethod: "spiffe-svid",
+			ApprovalToken:     token,
+		})
+		if resp.Decision != Allow {
+			t.Fatalf("Decision = %q (reason: %s), want %q: a retry at the exact approved cost must still work", resp.Decision, resp.Reason, Allow)
+		}
+	})
+
+	t.Run("inflated cost is rejected despite a token valid for the original amount", func(t *testing.T) {
+		resp := engine.Decide(DecideRequest{
+			AgentID:           "agent://acme.example/finance/bot1",
+			RunID:             "run-1",
+			ToolNames:         []string{"generate_report"},
+			EstCostUSD:        5_000_000,
+			AttestationMethod: "spiffe-svid",
+			ApprovalToken:     token,
+		})
+		if resp.Decision == Allow {
+			t.Fatalf("Decision = %q (reason: %s), want Hold or Deny: a token approved for $%d must not authorize $5,000,000", resp.Decision, resp.Reason, approvedCost)
+		}
+	})
 }
 
 func TestDecideNoMatchedPolicyAllows(t *testing.T) {
