@@ -188,8 +188,9 @@ type checkResult struct {
 // EstCostUSD, Steps, and Domains are left at their zero values: only
 // deny_if_unattested (and, trivially, whether any policy targets the agent
 // at all) is meaningfully exercised by a dry-run over passports alone.
-// deny_tool/require_human_above_usd/max_steps/allow_domains rules only
-// ever fire against a real, in-flight DecideRequest from /v1/decide.
+// deny_tool/require_human_above_usd/deny_above_usd/max_steps/allow_domains
+// rules only ever fire against a real, in-flight DecideRequest from
+// /v1/decide.
 func checkAgents(passportDir, policyPath string) ([]checkResult, passports.Report, string, error) {
 	ids, rep, err := passports.Load(passportDir)
 	if err != nil {
