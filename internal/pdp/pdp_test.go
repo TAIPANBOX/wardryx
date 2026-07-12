@@ -564,3 +564,85 @@ func TestDecideCacheable(t *testing.T) {
 		})
 	}
 }
+
+// TestDecideUnattestedNormalization reproduces a real bypass:
+// unattestedDenied compared attestation_method exactly and case-sensitively
+// against only "" and "none", so deny_if_unattested was defeated by any
+// other spelling of "no attestation" -- "None", "NONE", a bare space,
+// "n/a", and "unattested" all slipped through and were treated as a live
+// attestation. Fixed by trimming and lowercasing method before comparing it
+// against a small set of known no-attestation spellings (unattestedSentinels
+// in pdp.go).
+func TestDecideUnattestedNormalization(t *testing.T) {
+	engine := testEngine(t)
+
+	cases := []struct {
+		name         string
+		method       string
+		wantDecision string
+	}{
+		{name: "denies mixed-case None", method: "None", wantDecision: Deny},
+		{name: "denies upper-case NONE", method: "NONE", wantDecision: Deny},
+		{name: "denies a bare space", method: " ", wantDecision: Deny},
+		{name: "denies n/a", method: "n/a", wantDecision: Deny},
+		{name: "denies unattested", method: "unattested", wantDecision: Deny},
+		{name: "denies none with surrounding whitespace", method: "  none  ", wantDecision: Deny},
+		{name: "allows a genuine attestation method", method: "spiffe-svid", wantDecision: Allow},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			resp := engine.Decide(DecideRequest{
+				AgentID:           "agent://acme.example/finance/bot1",
+				RunID:             "run-1",
+				ToolNames:         []string{"generate_report"},
+				AttestationMethod: c.method,
+			})
+			if resp.Decision != c.wantDecision {
+				t.Fatalf("Decision = %q (reason: %s), want %q for attestation_method %q", resp.Decision, resp.Reason, c.wantDecision, c.method)
+			}
+			if c.wantDecision == Deny && !strings.Contains(resp.Reason, "requires a live attestation") {
+				t.Errorf("Reason = %q, want it to mention the missing attestation", resp.Reason)
+			}
+		})
+	}
+}
+
+// TestDecideDenyToolNormalization reproduces a real bypass: deniedTool's
+// membership check compared tool names exactly and case-sensitively, so a
+// deny_tool entry like "send_wire_transfer" failed to catch
+// "Send_Wire_Transfer", "SEND_WIRE_TRANSFER", or a trailing-whitespace
+// variant -- under-matching a security deny-list fails open. Fixed by
+// comparing case-insensitively (strings.EqualFold) after trimming both
+// sides (containsFold in pdp.go).
+func TestDecideDenyToolNormalization(t *testing.T) {
+	engine := testEngine(t)
+
+	cases := []struct {
+		name         string
+		tool         string
+		wantDecision string
+	}{
+		{name: "denies mixed-case variant", tool: "Send_Wire_Transfer", wantDecision: Deny},
+		{name: "denies upper-case variant", tool: "SEND_WIRE_TRANSFER", wantDecision: Deny},
+		{name: "denies a trailing-whitespace variant", tool: "send_wire_transfer ", wantDecision: Deny},
+		{name: "allows an unrelated tool", tool: "read_docs", wantDecision: Allow},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			resp := engine.Decide(DecideRequest{
+				AgentID:           "agent://acme.example/finance/bot1",
+				RunID:             "run-1",
+				ToolNames:         []string{c.tool},
+				AttestationMethod: "spiffe-svid",
+			})
+			if resp.Decision != c.wantDecision {
+				t.Fatalf("Decision = %q (reason: %s), want %q for tool %q", resp.Decision, resp.Reason, c.wantDecision, c.tool)
+			}
+			if c.wantDecision == Deny && !strings.Contains(resp.Reason, "is denied") {
+				t.Errorf("Reason = %q, want it to mention the denied tool", resp.Reason)
+			}
+		})
+	}
+}

@@ -29,6 +29,7 @@ package pdp
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/TAIPANBOX/agent-stack-go/chain"
 	"github.com/TAIPANBOX/wardryx/internal/approval"
@@ -320,10 +321,16 @@ func requestSpecific(matched []policy.Policy) bool {
 	return false
 }
 
+// deniedTool checks a request's tool names against each matched policy's
+// deny_tool using containsFold, not contains: deny_tool is a security
+// deny-list, so an entry like "send_wire_transfer" must also catch
+// "Send_Wire_Transfer", "SEND_WIRE_TRANSFER", or a trailing-whitespace
+// variant. See containsFold's doc comment for why that direction (over-
+// matching a deny-list fails safe) is the opposite of allow_domains's.
 func deniedTool(policies []policy.Policy, tools []string) (tool string, pol policy.Policy, ok bool) {
 	for _, t := range tools {
 		for _, p := range policies {
-			if contains(p.DenyTool, t) {
+			if containsFold(p.DenyTool, t) {
 				return t, p, true
 			}
 		}
@@ -331,8 +338,37 @@ func deniedTool(policies []policy.Policy, tools []string) (tool string, pol poli
 	return "", policy.Policy{}, false
 }
 
+// unattestedSentinels are the attestation_method spellings that
+// unattestedDenied treats as "no live attestation" once method has been
+// trimmed and lowercased: the documented "" and "none", plus a handful of
+// other obvious placeholder/empty markers a caller might send instead.
+// This is a NEGATIVE list of known non-attestation spellings, so it can
+// only ever widen what counts as unattested, never narrow it. The robust
+// long-term shape for this check is the opposite: a POSITIVE allow-list of
+// accepted attestation methods (e.g. "spiffe-svid") configured per
+// deployment, so anything not on that allow-list counts as unattested by
+// default. That is out of scope here; it needs its own config surface.
+var unattestedSentinels = map[string]bool{
+	"":           true,
+	"none":       true,
+	"n/a":        true,
+	"na":         true,
+	"null":       true,
+	"nil":        true,
+	"-":          true,
+	"unattested": true,
+	"unknown":    true,
+}
+
+// unattestedDenied reports whether some policy in policies sets
+// DenyIfUnattested and method carries no live attestation. method is
+// trimmed and lowercased before the check, so "None", "NONE", " ", and
+// "none " (and the other unattestedSentinels spellings) are all recognized
+// as no attestation, the same as "" and "none": a case- or whitespace-
+// sensitive comparison here would let any of those variants silently
+// bypass deny_if_unattested.
 func unattestedDenied(policies []policy.Policy, method string) (policy.Policy, bool) {
-	if method != "" && method != "none" {
+	if !unattestedSentinels[strings.ToLower(strings.TrimSpace(method))] {
 		return policy.Policy{}, false
 	}
 	for _, p := range policies {
@@ -410,9 +446,31 @@ func deniedDomain(policies []policy.Policy, domains []string) (domain string, po
 	return "", policy.Policy{}, false
 }
 
+// contains is an exact, case-sensitive membership check. It backs
+// deniedDomain (allow_domains): allow_domains is an allow-list, so folding
+// case or whitespace there would widen what an agent is allowed to reach
+// and so fail OPEN, the opposite of the deny-list direction containsFold
+// below exists for. Keep this one exact.
 func contains(ss []string, v string) bool {
 	for _, s := range ss {
 		if s == v {
+			return true
+		}
+	}
+	return false
+}
+
+// containsFold is contains's case- and whitespace-insensitive counterpart.
+// It exists only for deniedTool (deny_tool): deny_tool is a security
+// deny-list, so under-matching it (e.g. "Send_Wire_Transfer" slipping past
+// a "send_wire_transfer" entry) silently fails open, whereas over-matching
+// it only blocks a little more, which is the safe direction for a
+// deny-list. Do not reuse this for allow_domains and do not "simplify" it
+// back to contains: either change would reopen a bypass.
+func containsFold(ss []string, v string) bool {
+	v = strings.TrimSpace(v)
+	for _, s := range ss {
+		if strings.EqualFold(strings.TrimSpace(s), v) {
 			return true
 		}
 	}
