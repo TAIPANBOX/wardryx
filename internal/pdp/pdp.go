@@ -135,10 +135,24 @@ type DecideResponse struct {
 	// covers every return path uniformly.
 	//
 	// Intended for an enforcement point's own decision cache (e.g. the
-	// TokenFuse gateway's, keyed only on (agent_id, tool-set hash),
-	// coarser than the full request) to gate what it stores: a decision
-	// with Cacheable false must never be served again from that cache,
-	// only ever re-decided.
+	// TokenFuse gateway's) to gate what it stores: a decision with
+	// Cacheable false must never be served again from that cache, only
+	// ever re-decided.
+	//
+	// Cacheable true does not by itself make (agent_id, tool-set hash)
+	// a safe cache key. TokenFuse's gateway learned this the hard way
+	// (2026-07-11, fixed in PR #110): a deny_if_unattested decision is
+	// Cacheable (attestation_method is not one of the per-request values
+	// requestSpecific checks), but attestation_method itself is NOT
+	// stable call-to-call for a fixed agent_id/tool-set -- the same
+	// agent can present attestation on one call and none on the next.
+	// A cache keyed on (agent_id, tool-set hash) alone let an
+	// unattested request inherit a recently-attested cached Allow,
+	// silently defeating deny_if_unattested. Any enforcement point
+	// fronting /v1/decide with its own cache MUST fold
+	// attestation_method into its key, regardless of Cacheable; see
+	// requestSpecific's doc comment below for the same warning from
+	// the other side of this contract.
 	Cacheable bool
 }
 
@@ -277,11 +291,24 @@ func (e *Engine) Decide(req DecideRequest) DecideResponse {
 // per-request value that can differ from one call to the next even when
 // the agent and tool set stay the same: MaxSteps (checked against Steps),
 // AllowDomains (checked against Domains), or RequireHumanAboveUSD (checked
-// against EstCostUSD). DenyTool and DenyIfUnattested are deliberately not
-// considered: both are checked against facts that are stable for a given
-// agent and tool set (the tool set itself, and the agent's attestation
-// method), not anything that varies call to call the way a step count,
-// declared domains, or an estimated cost do.
+// against EstCostUSD). DenyTool is deliberately not considered: it is
+// checked against the tool set itself, which this function already holds
+// fixed.
+//
+// DenyIfUnattested is also not considered here, but NOT because
+// attestation_method is a stable per-agent fact -- it isn't. The same
+// agent_id/tool-set pair can arrive with attestation on one call and
+// without it on the next (a downgrade, a differently-configured caller,
+// or simply a caller that stops presenting it). requestSpecific still
+// omits it because Cacheable is a request-shape signal (does the
+// decision depend on values this Engine has no memory of between
+// calls), not a cache-key recipe: Wardryx does not cache anything
+// itself and has no key to get right or wrong. The risk lives entirely
+// downstream, in whatever enforcement point caches /v1/decide
+// responses. See the Cacheable field's doc comment for the concrete
+// incident (TokenFuse PR #110) this caused when a downstream cache
+// keyed on (agent_id, tool-set hash) alone treated attestation_method
+// as if it were as stable as the tool set.
 func requestSpecific(matched []policy.Policy) bool {
 	for _, p := range matched {
 		if p.MaxSteps > 0 || p.RequireHumanAboveUSD > 0 || len(p.AllowDomains) > 0 {
