@@ -188,6 +188,12 @@ func TestCompileRejectsNegativeMaxSteps(t *testing.T) {
 	}
 }
 
+func TestCompileRejectsNegativeDenyAboveUSD(t *testing.T) {
+	if _, err := Compile([]Policy{{Target: "agent://x/*", DenyAboveUSD: -1}}); err == nil {
+		t.Fatal("Compile with negative deny_above_usd: expected an error, got nil")
+	}
+}
+
 func TestCompileNilIsValidEmptySet(t *testing.T) {
 	set, err := Compile(nil)
 	if err != nil {

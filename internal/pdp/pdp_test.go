@@ -465,11 +465,11 @@ func TestPolicyVersionSurfacedOnEveryDecision(t *testing.T) {
 }
 
 // TestDecideCacheable covers Cacheable directly: false whenever a matched
-// policy sets max_steps, allow_domains, or require_human_above_usd (the
-// fields Decide checks against per-request state), true for a matched
-// policy that only sets deny_tool/deny_if_unattested (stable per-agent
-// facts) and for no match at all, and -- the case most likely to be
-// implemented wrong -- false whenever a request-specific policy matched
+// policy sets max_steps, allow_domains, require_human_above_usd, or
+// deny_above_usd (the fields Decide checks against per-request state), true
+// for a matched policy that only sets deny_tool/deny_if_unattested (stable
+// per-agent facts) and for no match at all, and -- the case most likely to
+// be implemented wrong -- false whenever a request-specific policy matched
 // even if a different, non-request-specific rule is what actually denied.
 func TestDecideCacheable(t *testing.T) {
 	cases := []struct {
@@ -497,6 +497,13 @@ func TestDecideCacheable(t *testing.T) {
 			name:          "false: matched policy sets require_human_above_usd",
 			policies:      []policy.Policy{{Target: "agent://x/*", RequireHumanAboveUSD: 100}},
 			req:           DecideRequest{AgentID: "agent://x/bot"},
+			wantDecision:  Allow,
+			wantCacheable: false,
+		},
+		{
+			name:          "false: matched policy sets deny_above_usd",
+			policies:      []policy.Policy{{Target: "agent://x/*", DenyAboveUSD: 1000}},
+			req:           DecideRequest{AgentID: "agent://x/bot", EstCostUSD: 10},
 			wantDecision:  Allow,
 			wantCacheable: false,
 		},
@@ -644,5 +651,112 @@ func TestDecideDenyToolNormalization(t *testing.T) {
 				t.Errorf("Reason = %q, want it to mention the denied tool", resp.Reason)
 			}
 		})
+	}
+}
+
+// TestDecideDenyAboveUSDHardCeiling covers deny_above_usd: a HARD,
+// non-approvable cost ceiling, unlike require_human_above_usd's approvable
+// hold. A cost over the ceiling denies outright and, critically, denies
+// even when a token that would otherwise verify cleanly is presented -- no
+// approval can ever authorize crossing this line, which is the whole point
+// of the field and the key differentiator from require_human_above_usd. A
+// cost at or under the ceiling is not denied by this rule.
+func TestDecideDenyAboveUSDHardCeiling(t *testing.T) {
+	set, err := policy.Compile([]policy.Policy{
+		{Name: "hard-ceiling", Target: "agent://x/*", DenyAboveUSD: 1000},
+	})
+	if err != nil {
+		t.Fatalf("policy.Compile: %v", err)
+	}
+	engine := New(set, []byte(testSecret))
+
+	t.Run("over the ceiling denies", func(t *testing.T) {
+		resp := engine.Decide(DecideRequest{AgentID: "agent://x/bot", EstCostUSD: 1500})
+		if resp.Decision != Deny {
+			t.Fatalf("Decision = %q (reason: %s), want %q", resp.Decision, resp.Reason, Deny)
+		}
+		if !strings.Contains(resp.Reason, "hard ceiling") || !strings.Contains(resp.Reason, "deny_above_usd") {
+			t.Errorf("Reason = %q, want it to name the hard ceiling and deny_above_usd", resp.Reason)
+		}
+		if resp.ApprovalTokenRequired {
+			t.Error("ApprovalTokenRequired = true, want false: deny_above_usd is not an approval gate")
+		}
+	})
+
+	t.Run("a token that verifies cleanly still denies: the ceiling is not approvable", func(t *testing.T) {
+		const agentID = "agent://x/bot"
+		const runID = "run-1"
+		tools := []string{"generate_report"}
+		const cost = 1500.0
+
+		token, _, err := approval.MintApprovalToken([]byte(testSecret), agentID, runID, tools, cost, approval.DefaultTTL)
+		if err != nil {
+			t.Fatalf("mint token: %v", err)
+		}
+		// Prove the token is genuinely valid by the approval package's own
+		// standard, so this test cannot be trivially satisfied by an
+		// accidentally-broken token: if a future change ever made Decide
+		// consult the token for deny_above_usd, this exact token would
+		// verify cleanly and would need to be rejected for some other
+		// reason.
+		if err := approval.VerifyApprovalToken([]byte(testSecret), token, agentID, runID, tools, cost); err != nil {
+			t.Fatalf("test setup: token should verify cleanly, got %v", err)
+		}
+
+		resp := engine.Decide(DecideRequest{
+			AgentID:       agentID,
+			RunID:         runID,
+			ToolNames:     tools,
+			EstCostUSD:    cost,
+			ApprovalToken: token,
+		})
+		if resp.Decision != Deny {
+			t.Fatalf("Decision = %q (reason: %s), want %q: a cleanly-verifying approval_token must not authorize crossing a deny_above_usd hard ceiling", resp.Decision, resp.Reason, Deny)
+		}
+		if !strings.Contains(resp.Reason, "deny_above_usd") {
+			t.Errorf("Reason = %q, want it to name deny_above_usd", resp.Reason)
+		}
+	})
+
+	t.Run("under the ceiling is not denied by this rule", func(t *testing.T) {
+		resp := engine.Decide(DecideRequest{AgentID: "agent://x/bot", EstCostUSD: 500})
+		if resp.Decision != Allow {
+			t.Fatalf("Decision = %q (reason: %s), want %q: $500 is under the $1000 ceiling and no other rule applies", resp.Decision, resp.Reason, Allow)
+		}
+	})
+
+	t.Run("exactly at the ceiling is not denied by this rule", func(t *testing.T) {
+		// DenyAboveUSD denies strictly-greater-than costs, mirroring
+		// RequireHumanAboveUSD's "cost > threshold" convention (see
+		// overThreshold): a cost equal to the ceiling itself must not deny.
+		resp := engine.Decide(DecideRequest{AgentID: "agent://x/bot", EstCostUSD: 1000})
+		if resp.Decision != Allow {
+			t.Fatalf("Decision = %q (reason: %s), want %q: $1000 equals the ceiling, not above it", resp.Decision, resp.Reason, Allow)
+		}
+	})
+}
+
+// TestDecideDenyAboveUSDPrecedesRequireHumanAboveUSDHold covers precedence:
+// a policy setting both deny_above_usd and require_human_above_usd, with a
+// cost over both, must Deny rather than Hold -- the hard ceiling wins
+// outright and require_human_above_usd's hold is never even reached, so
+// ApprovalTokenRequired stays false.
+func TestDecideDenyAboveUSDPrecedesRequireHumanAboveUSDHold(t *testing.T) {
+	set, err := policy.Compile([]policy.Policy{
+		{Name: "both", Target: "agent://x/*", DenyAboveUSD: 1000, RequireHumanAboveUSD: 100},
+	})
+	if err != nil {
+		t.Fatalf("policy.Compile: %v", err)
+	}
+	engine := New(set, nil)
+	resp := engine.Decide(DecideRequest{AgentID: "agent://x/bot", EstCostUSD: 1500})
+	if resp.Decision != Deny {
+		t.Fatalf("Decision = %q (reason: %s), want %q: deny_above_usd must win over require_human_above_usd's hold", resp.Decision, resp.Reason, Deny)
+	}
+	if !strings.Contains(resp.Reason, "hard ceiling") {
+		t.Errorf("Reason = %q, want it to cite the hard ceiling", resp.Reason)
+	}
+	if resp.ApprovalTokenRequired {
+		t.Error("ApprovalTokenRequired = true, want false: require_human_above_usd's threshold check is never reached once deny_above_usd fires")
 	}
 }

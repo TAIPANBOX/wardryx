@@ -51,6 +51,19 @@ type Policy struct {
 	// human must approve the action. Zero (the default) means "no
 	// threshold": Decide never holds solely because this field is unset.
 	RequireHumanAboveUSD float64 `yaml:"require_human_above_usd,omitempty" json:"require_human_above_usd,omitempty"`
+	// DenyAboveUSD is a hard, non-approvable cost ceiling: internal/pdp's
+	// Decide denies any action whose estimated cost exceeds it outright, and
+	// no approval_token -- however validly minted -- can ever turn that deny
+	// into an allow. This is deliberately stronger than RequireHumanAboveUSD,
+	// which only holds pending a human's approval: DenyAboveUSD instead marks
+	// a line no human approval is trusted to cross at all. A policy commonly
+	// sets both, with DenyAboveUSD above RequireHumanAboveUSD, to get an
+	// approvable band between them and a hard ceiling above it; when a
+	// request exceeds both, the hard ceiling wins and require_human_above_usd
+	// is never reached (see internal/pdp's Decide doc comment for the exact
+	// rule order). Zero (the default) means "no hard ceiling": Decide never
+	// denies solely because this field is unset.
+	DenyAboveUSD float64 `yaml:"deny_above_usd,omitempty" json:"deny_above_usd,omitempty"`
 	// MaxSteps caps how many steps a run may take. Enforced by
 	// internal/pdp's Decide against the request's declared Steps: once
 	// Steps reaches or exceeds MaxSteps, the request denies. Zero (the
@@ -266,6 +279,9 @@ func validate(p Policy) error {
 	}
 	if p.RequireHumanAboveUSD < 0 {
 		return fmt.Errorf("policy %q: require_human_above_usd must not be negative", p.Name)
+	}
+	if p.DenyAboveUSD < 0 {
+		return fmt.Errorf("policy %q: deny_above_usd must not be negative", p.Name)
 	}
 	if p.MaxSteps < 0 {
 		return fmt.Errorf("policy %q: max_steps must not be negative", p.Name)

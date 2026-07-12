@@ -109,10 +109,15 @@ type DecideResponse struct {
 	// returns.
 	ApprovalID string
 	// ApprovalTokenRequired reports whether this action is gated by human
-	// approval at all -- true whenever the estimated cost exceeds a
-	// matched policy's threshold, whether or not a valid token ultimately
-	// satisfied it. False when no cost rule was ever reached (e.g. a
-	// deny fired first) or no matched policy sets a threshold.
+	// approval at all -- true whenever the estimated cost exceeds a matched
+	// policy's require_human_above_usd threshold, whether or not a valid
+	// token ultimately satisfied it. False when no cost rule was ever
+	// reached (e.g. a deny fired first) or no matched policy sets a
+	// threshold. It is also false when a matched policy's deny_above_usd
+	// hard ceiling is what denied the request: that rule runs before
+	// require_human_above_usd and is never approvable in the first place,
+	// so it counts as "a deny fired first," not as an approval gate that
+	// went unsatisfied.
 	//
 	// Decision == Allow && ApprovalTokenRequired uniquely identifies an
 	// allow produced by redeeming a valid token (the only path that can
@@ -125,17 +130,17 @@ type DecideResponse struct {
 	// Cacheable reports whether this decision is a pure function of
 	// (agent_id, tool set), independent of any per-request value such as
 	// Steps, Domains, or EstCostUSD. True when no policy matched by
-	// AgentID sets MaxSteps, AllowDomains, or RequireHumanAboveUSD -- the
-	// only fields Decide checks against per-request state -- or when no
-	// policy matched at all. False whenever a matched policy sets any of
-	// those three, even if the rule that actually produced this Decision
-	// was something else entirely (e.g. DenyTool): a later call against
-	// the same agent and tool set could still resolve differently once
-	// Steps, Domains, or EstCostUSD change, so the decision as a whole is
-	// never safe to reuse, regardless of which rule happened to fire this
-	// time. Independent of Decision -- a cacheable decision can be Allow,
-	// Deny, or Hold alike -- and computed before any rule runs, so it
-	// covers every return path uniformly.
+	// AgentID sets MaxSteps, AllowDomains, RequireHumanAboveUSD, or
+	// DenyAboveUSD -- the only fields Decide checks against per-request
+	// state -- or when no policy matched at all. False whenever a matched
+	// policy sets any of those four, even if the rule that actually
+	// produced this Decision was something else entirely (e.g. DenyTool): a
+	// later call against the same agent and tool set could still resolve
+	// differently once Steps, Domains, or EstCostUSD change, so the
+	// decision as a whole is never safe to reuse, regardless of which rule
+	// happened to fire this time. Independent of Decision -- a cacheable
+	// decision can be Allow, Deny, or Hold alike -- and computed before any
+	// rule runs, so it covers every return path uniformly.
 	//
 	// Intended for an enforcement point's own decision cache (e.g. the
 	// TokenFuse gateway's) to gate what it stores: a decision with
@@ -191,20 +196,30 @@ func (e *Engine) PolicyVersion() string { return e.policies.Version() }
 //     denies;
 //  5. a matched policy's allow_domains, missing an entry from req.Domains,
 //     denies;
-//  6. a matched policy's require_human_above_usd, exceeded by EstCostUSD,
+//  6. a matched policy's deny_above_usd, exceeded by EstCostUSD, denies
+//     outright: this is a hard ceiling, not an approval gate, so no
+//     ApprovalToken -- however validly minted -- is even inspected, unlike
+//     rule 7 below;
+//  7. a matched policy's require_human_above_usd, exceeded by EstCostUSD,
 //     resolves to Hold, unless a valid ApprovalToken was presented (then
 //     Allow) or an *invalid* one was presented (then Deny);
-//  7. otherwise, Allow.
+//  8. otherwise, Allow.
 //
 // A deny from any rule wins outright: it short-circuits every later rule
 // and Decide never has to reconcile a deny against a later hold or allow.
-// Rules 1-5 are all deny-or-continue and carry no state, so their relative
+// Rules 1-6 are all deny-or-continue and carry no state, so their relative
 // order only changes which single Reason string is reported when a request
 // happens to violate more than one of them at once -- it never changes
-// whether the final Decision is Deny. Rule 6 is ordered last because it is
-// the only rule that can resolve to something other than Deny or
-// fall-through (Hold, or Allow via a redeemed token), so every unconditional
-// deny check runs first.
+// whether the final Decision is Deny. Rule 6 is deliberately placed before
+// rule 7: a policy that sets both deny_above_usd and
+// require_human_above_usd, with a cost that exceeds both, must Deny rather
+// than Hold -- the hard ceiling always wins over the approval gate, and
+// require_human_above_usd's threshold is never even reached, so no
+// ApprovalToken is checked at all. Rule 7 is ordered last among the
+// deny-capable rules because it is the only one that can resolve to
+// something other than Deny or fall-through (Hold, or Allow via a redeemed
+// token), so every unconditional deny check -- including the new hard
+// ceiling -- runs first.
 func (e *Engine) Decide(req DecideRequest) DecideResponse {
 	resp := DecideResponse{PolicyVersion: e.policies.Version()}
 
@@ -258,6 +273,12 @@ func (e *Engine) Decide(req DecideRequest) DecideResponse {
 		return resp
 	}
 
+	if pol, ok := deniedAboveCeiling(matched, req.EstCostUSD); ok {
+		resp.Decision = Deny
+		resp.Reason = fmt.Sprintf("estimated cost $%.2f exceeds policy %q hard ceiling $%.2f (deny_above_usd); no approval can authorize this", req.EstCostUSD, pol.Name, pol.DenyAboveUSD)
+		return resp
+	}
+
 	if pol, ok := overThreshold(matched, req.EstCostUSD); ok {
 		resp.ApprovalTokenRequired = true
 		if req.ApprovalToken != "" {
@@ -293,10 +314,10 @@ func (e *Engine) Decide(req DecideRequest) DecideResponse {
 // requestSpecific reports whether any policy in matched checks a
 // per-request value that can differ from one call to the next even when
 // the agent and tool set stay the same: MaxSteps (checked against Steps),
-// AllowDomains (checked against Domains), or RequireHumanAboveUSD (checked
-// against EstCostUSD). DenyTool is deliberately not considered: it is
-// checked against the tool set itself, which this function already holds
-// fixed.
+// AllowDomains (checked against Domains), or RequireHumanAboveUSD /
+// DenyAboveUSD (both checked against EstCostUSD). DenyTool is deliberately
+// not considered: it is checked against the tool set itself, which this
+// function already holds fixed.
 //
 // DenyIfUnattested is also not considered here, but NOT because
 // attestation_method is a stable per-agent fact -- it isn't. The same
@@ -314,7 +335,7 @@ func (e *Engine) Decide(req DecideRequest) DecideResponse {
 // as if it were as stable as the tool set.
 func requestSpecific(matched []policy.Policy) bool {
 	for _, p := range matched {
-		if p.MaxSteps > 0 || p.RequireHumanAboveUSD > 0 || len(p.AllowDomains) > 0 {
+		if p.MaxSteps > 0 || p.RequireHumanAboveUSD > 0 || p.DenyAboveUSD > 0 || len(p.AllowDomains) > 0 {
 			return true
 		}
 	}
@@ -377,6 +398,27 @@ func unattestedDenied(policies []policy.Policy, method string) (policy.Policy, b
 		}
 	}
 	return policy.Policy{}, false
+}
+
+// deniedAboveCeiling returns the matched policy with the smallest positive
+// DenyAboveUSD that cost exceeds, if any. As with overThreshold, taking the
+// strictest (lowest) exceeded ceiling, rather than e.g. the first matched
+// policy, means Decide reports the most specific binding constraint when
+// several policies target the same agent. Unlike overThreshold, there is no
+// approval path that can ever satisfy this: a policy match here always
+// means Deny, never Hold, which is exactly why Decide checks it first.
+func deniedAboveCeiling(policies []policy.Policy, cost float64) (policy.Policy, bool) {
+	var best policy.Policy
+	found := false
+	for _, p := range policies {
+		if p.DenyAboveUSD > 0 && cost > p.DenyAboveUSD {
+			if !found || p.DenyAboveUSD < best.DenyAboveUSD {
+				best = p
+				found = true
+			}
+		}
+	}
+	return best, found
 }
 
 // overThreshold returns the matched policy with the smallest positive
