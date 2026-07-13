@@ -363,7 +363,7 @@ Wardryx is itself a security-relevant component, so a few of its own defaults ar
 - [x] CLI: `serve`, `check` (offline dry-run), `approvals`, `version`
 - [x] OTLP exporter: one span per `/v1/decide` outcome to `WARDRYX_OTLP_ENDPOINT`/`-otlp-endpoint`, fire-and-forget, no-op when unset (`internal/otel`)
 - [x] Policy-as-code admin API (`/v1/policies`, this repo's side): file-loaded policies stay a permanent floor, store-managed policies layer on top, validate-then-apply, live-swapped with no restart
-- [ ] Policies as code via terraform-provider-taipan (a `wardryx_policy` Terraform resource driving the API above; not yet wired)
+- [x] Policies as code via terraform-provider-taipan: the `taipan_wardryx_policy` Terraform resource (that repo's side) drives the API above -- create/update/read/delete, live-verified against a running Wardryx instance including drift detection and destroy
 
 ## License
 
