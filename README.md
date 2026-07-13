@@ -53,6 +53,16 @@ flowchart TB
 
 The full stack is TokenFuse (spend), Wardryx (policy), Engram (memory), Idryx (access), Qryx (crypto), Verdryx (quality), Mockryx (pre-prod), on the shared Agent Passport + agent-event contract (agent-stack-go / agent-passport), configured via terraform-provider-taipan.
 
+## Live infrastructure validation
+
+Before any public launch, Wardryx was run as a live policy decision point under real concurrent load:
+176 real decisions with differentiated per-agent rights, correctly filtered under a 34-request concurrent
+burst - including two real enforcement gaps that only concurrent traffic exposed, both found and fixed.
+
+![Wardryx PDP: 176 decisions, per-agent differentiated rights (analyst denied wire_transfer, treasury allowed, scraper gated on attestation)](assets/09-wardryx.png)
+
+Full write-up and both bugs live testing found (and fixed): [`VALIDATION.md`](VALIDATION.md).
+
 ---
 
 ## Why
