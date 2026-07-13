@@ -34,3 +34,20 @@ CREATE TABLE IF NOT EXISTS approval_redemptions (
     redemption_key TEXT PRIMARY KEY,
     redeemed_at    TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- Policy-as-code documents written through the admin policy API
+-- (internal/api's POST/PUT/DELETE /v1/policies), so an API-managed policy
+-- survives a restart the way -policy's file-based rules always did.
+-- policy_json stores one policy.Policy (JSON-tagged, see internal/policy),
+-- keyed by an operator-assigned id, not the policy's own Name (which need
+-- not be unique or URL-safe). A write here does not by itself change what
+-- internal/pdp's Engine decides against -- internal/api recompiles the
+-- full set via policy.Compile and calls Engine.SetPolicies after every
+-- successful write, so a partially-applied policy is never live.
+CREATE TABLE IF NOT EXISTS policies (
+    policy_id   TEXT PRIMARY KEY,
+    policy_json JSONB NOT NULL,
+    updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS policies_updated_at ON policies (updated_at);

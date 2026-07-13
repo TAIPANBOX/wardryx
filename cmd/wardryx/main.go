@@ -139,7 +139,24 @@ func runServe(args []string) error {
 
 	keys := api.ParseKeys(cfg.Keys)
 	engine := pdp.New(policies, []byte(cfg.ApprovalSecret))
-	srv := api.New(engine, st, events, otelExporter, keys, []byte(cfg.ApprovalSecret), cfg.ApprovalSingleUse)
+	basePolicies := policies.Policies()
+	srv := api.New(engine, st, events, otelExporter, keys, []byte(cfg.ApprovalSecret), cfg.ApprovalSingleUse, basePolicies)
+
+	// Restore any policies an earlier process (or another wardryx instance
+	// sharing this Postgres) wrote through the admin policy API: Engine so
+	// far only has the file-loaded base, layered here with whatever the
+	// store already holds -- a no-op for a fresh Memory store, or for
+	// Postgres with no prior API writes. Uses the exact same
+	// base-plus-store combination rule the PUT/DELETE handlers apply on
+	// every later write, so a restart and a live write can never disagree
+	// about what the effective policy set is.
+	if restored, err := api.ComputePolicySet(context.Background(), st, basePolicies); err != nil {
+		return fmt.Errorf("compute initial policy set from store: %w", err)
+	} else if restored.Len() != policies.Len() {
+		fmt.Fprintf(os.Stderr, "wardryx: restored %d policy(ies) from the store on top of %d file-loaded, version %s\n",
+			restored.Len()-policies.Len(), policies.Len(), restored.Version())
+		engine.SetPolicies(restored)
+	}
 
 	fmt.Fprintf(os.Stderr, "wardryx: serving on http://%s\n", displayAddr(*addr))
 	httpSrv := &http.Server{

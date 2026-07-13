@@ -30,6 +30,7 @@ package pdp
 import (
 	"fmt"
 	"strings"
+	"sync/atomic"
 
 	"github.com/TAIPANBOX/agent-stack-go/chain"
 	"github.com/TAIPANBOX/wardryx/internal/approval"
@@ -164,12 +165,15 @@ type DecideResponse struct {
 	Cacheable bool
 }
 
-// Engine evaluates DecideRequests against one compiled policy.Set. It holds
-// no mutable state after construction and is safe for concurrent use by
-// many goroutines, which is exactly how the HTTP API uses it: one Engine,
-// many concurrent /v1/decide calls.
+// Engine evaluates DecideRequests against one compiled policy.Set. Its
+// policy set can be swapped at runtime (see SetPolicies), so Engine itself
+// carries mutable state -- but that state is a single atomic.Pointer, never
+// mutated in place, so Engine remains safe for concurrent use by many
+// goroutines: exactly how the HTTP API uses it, one Engine serving many
+// concurrent /v1/decide calls, with policy-as-code updates (internal/api's
+// admin policy routes) swapping the pointer underneath them.
 type Engine struct {
-	policies       *policy.Set
+	policies       atomic.Pointer[policy.Set]
 	approvalSecret []byte
 }
 
@@ -180,11 +184,27 @@ func New(policies *policy.Set, approvalSecret []byte) *Engine {
 	if policies == nil {
 		policies = policy.Empty()
 	}
-	return &Engine{policies: policies, approvalSecret: approvalSecret}
+	e := &Engine{approvalSecret: approvalSecret}
+	e.policies.Store(policies)
+	return e
 }
 
-// PolicyVersion returns the Engine's loaded policy set's PolicyVersion.
-func (e *Engine) PolicyVersion() string { return e.policies.Version() }
+// PolicyVersion returns the Engine's currently loaded policy set's
+// PolicyVersion.
+func (e *Engine) PolicyVersion() string { return e.policies.Load().Version() }
+
+// SetPolicies atomically replaces the Engine's policy set. Every /v1/decide
+// call that starts after this returns observes the new set; a call already
+// in flight keeps evaluating against whichever set it loaded when it
+// started (see Decide) -- a swap never produces a decision evaluated
+// against a half-old, half-new mix of rules. A nil policies is treated as
+// policy.Empty(), matching New.
+func (e *Engine) SetPolicies(policies *policy.Set) {
+	if policies == nil {
+		policies = policy.Empty()
+	}
+	e.policies.Store(policies)
+}
 
 // Decide evaluates req against the Engine's policy set, in this order:
 //  1. an invalid on_behalf_of delegation chain denies, independent of any
@@ -221,7 +241,14 @@ func (e *Engine) PolicyVersion() string { return e.policies.Version() }
 // token), so every unconditional deny check -- including the new hard
 // ceiling -- runs first.
 func (e *Engine) Decide(req DecideRequest) DecideResponse {
-	resp := DecideResponse{PolicyVersion: e.policies.Version()}
+	// Loaded once, up front: every rule below evaluates against this exact
+	// snapshot, so a concurrent SetPolicies mid-decision can never make one
+	// call's PolicyVersion and matched-rule-set come from two different
+	// policy sets. A decision already in flight always finishes against
+	// whichever set it started with; the next /v1/decide call is the first
+	// to observe a swap.
+	policies := e.policies.Load()
+	resp := DecideResponse{PolicyVersion: policies.Version()}
 
 	// Defense in depth, independent of any policy: a malformed delegation
 	// chain (a cycle, one too deep, or an entry that isn't an
@@ -242,7 +269,7 @@ func (e *Engine) Decide(req DecideRequest) DecideResponse {
 		}
 	}
 
-	matched := e.policies.Match(req.AgentID)
+	matched := policies.Match(req.AgentID)
 	// Set once, before any rule runs, so every return path below --
 	// whichever rule ends up firing -- carries the same answer. See the
 	// field doc comment for why this depends on the matched policy set as

@@ -119,6 +119,26 @@ func (s *Set) Len() int {
 	return len(s.policies)
 }
 
+// Policies returns every policy in s, in the same normalized, deterministic
+// order Compile produced (sorted by target, then name). Unlike Match, this
+// is unfiltered -- the inverse of Compile, useful for a caller that loaded
+// a Set and now needs to recombine its rules with more policies from
+// another source before recompiling. Wardryx's internal/api policy-as-code
+// routes use this to layer store-managed policies on top of a fixed
+// file-loaded base (see Server.recomputePolicySet): the file-loaded Set's
+// Policies() plus the store's current rows, recompiled together on every
+// write, so an API write can never make the file-loaded rules disappear.
+func (s *Set) Policies() []Policy {
+	if s == nil {
+		return nil
+	}
+	out := make([]Policy, len(s.policies))
+	for i, c := range s.policies {
+		out[i] = c.Policy
+	}
+	return out
+}
+
 // RequiresHumanApproval reports whether any loaded policy sets a
 // require_human_above_usd threshold above zero, i.e. whether Decide can
 // ever produce a hold for this Set. main uses it at startup to warn when

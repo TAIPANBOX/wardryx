@@ -7,6 +7,8 @@ import (
 	"sort"
 	"sync"
 	"time"
+
+	"github.com/TAIPANBOX/wardryx/internal/policy"
 )
 
 // Memory is an in-process Store: the default when -db/WARDRYX_DB is unset.
@@ -16,17 +18,25 @@ import (
 // Because redeemed lives only in this process's memory, WARDRYX_APPROVAL_
 // SINGLE_USE enforced against a Memory store only holds within one process:
 // it gives no cross-instance guarantee behind a load balancer. cmd/wardryx
-// warns about exactly this at startup.
+// warns about exactly this at startup. Policies stored here are equally
+// process-local: an API-managed policy written to a Memory store does not
+// survive a restart, unlike the file-based -policy path -- cmd/wardryx
+// warns about this too (see runServe).
 type Memory struct {
-	mu       sync.Mutex
-	byID     map[string]Approval
-	order    []string             // insertion order, for a deterministic ListApprovals
-	redeemed map[string]time.Time // TryRedeem's claimed keys, by approval.RedemptionKey
+	mu         sync.Mutex
+	byID       map[string]Approval
+	order      []string             // insertion order, for a deterministic ListApprovals
+	redeemed   map[string]time.Time // TryRedeem's claimed keys, by approval.RedemptionKey
+	policyByID map[string]PolicyRecord
 }
 
 // NewMemory returns an empty in-memory Store.
 func NewMemory() *Memory {
-	return &Memory{byID: make(map[string]Approval), redeemed: make(map[string]time.Time)}
+	return &Memory{
+		byID:       make(map[string]Approval),
+		redeemed:   make(map[string]time.Time),
+		policyByID: make(map[string]PolicyRecord),
+	}
 }
 
 // deepCopyContext round-trips a.Context through JSON, the same
@@ -118,3 +128,65 @@ func (m *Memory) TryRedeem(_ context.Context, key string) (bool, error) {
 }
 
 func (m *Memory) Close() error { return nil }
+
+// deepCopyPolicy round-trips p through JSON for the same reason
+// deepCopyContext does: keep Memory and Postgres behaviorally identical,
+// and protect the store from a caller mutating a policy.Policy's slice
+// fields (DenyTool, AllowDomains) after PutPolicy returns.
+func deepCopyPolicy(p policy.Policy) (policy.Policy, error) {
+	b, err := json.Marshal(p)
+	if err != nil {
+		return policy.Policy{}, fmt.Errorf("store: marshal policy: %w", err)
+	}
+	var out policy.Policy
+	if err := json.Unmarshal(b, &out); err != nil {
+		return policy.Policy{}, fmt.Errorf("store: unmarshal policy: %w", err)
+	}
+	return out, nil
+}
+
+func (m *Memory) PutPolicy(_ context.Context, id string, p policy.Policy, updatedAt time.Time) error {
+	pCopy, err := deepCopyPolicy(p)
+	if err != nil {
+		return err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.policyByID[id] = PolicyRecord{ID: id, Policy: pCopy, UpdatedAt: updatedAt}
+	return nil
+}
+
+func (m *Memory) GetPolicy(_ context.Context, id string) (PolicyRecord, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	r, ok := m.policyByID[id]
+	if !ok {
+		return PolicyRecord{}, fmt.Errorf("%w: %s", ErrNotFound, id)
+	}
+	return r, nil
+}
+
+func (m *Memory) ListPolicies(_ context.Context) ([]PolicyRecord, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	ids := make([]string, 0, len(m.policyByID))
+	for id := range m.policyByID {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	out := make([]PolicyRecord, 0, len(ids))
+	for _, id := range ids {
+		out = append(out, m.policyByID[id])
+	}
+	return out, nil
+}
+
+func (m *Memory) DeletePolicy(_ context.Context, id string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, ok := m.policyByID[id]; !ok {
+		return fmt.Errorf("%w: %s", ErrNotFound, id)
+	}
+	delete(m.policyByID, id)
+	return nil
+}

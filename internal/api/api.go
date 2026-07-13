@@ -1,15 +1,34 @@
 // Package api is Wardryx's HTTP surface: POST /v1/decide (the decision
 // engine), POST /v1/approvals/{id}/decide (admin-only grant/deny), GET
-// /v1/approvals (org-scoped list), and GET /healthz.
+// /v1/approvals (org-scoped list), the admin-only policy-as-code routes
+// under /v1/policies (see "Policy-as-code" below), and GET /healthz.
 //
 // Every /v1/* route requires a bearer key (Authorization: Bearer <key>)
 // resolved through ParseKeys, mirroring the Cloud plane's
 // "key:org[:role]" convention; /healthz does not, matching Idryx's own
-// unauthenticated liveness endpoint. Only the approvals-decide endpoint
-// additionally requires the admin role.
+// unauthenticated liveness endpoint. The approvals-decide and every
+// /v1/policies route additionally require the admin role.
+//
+// # Policy-as-code
+//
+// Wardryx's original policy source is a file (-policy/WARDRYX_POLICY),
+// loaded once at startup and never hot-reloaded -- pdp.Engine.SetPolicies
+// exists to change that, and this package is what calls it. A Server's
+// basePolicies (the file-loaded Set's own Policies(), fixed at
+// construction) and its Store's currently-persisted PolicyRecords are
+// ALWAYS combined and recompiled together (see recomputePolicySet): the
+// file-loaded rules are a permanent floor that no API write can ever make
+// disappear, and the store holds only the operator-managed layer on top of
+// it. Every successful PUT or DELETE under /v1/policies recomputes and
+// swaps the live Engine's policy set atomically; a request that would
+// produce an invalid combined set (see policy.Compile) is rejected before
+// anything is persisted or swapped, so a bad write can never partially
+// apply -- the same "malformed policy is a hard error" rule the file path
+// already enforces.
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -23,6 +42,7 @@ import (
 	"github.com/TAIPANBOX/wardryx/internal/approval"
 	wotel "github.com/TAIPANBOX/wardryx/internal/otel"
 	"github.com/TAIPANBOX/wardryx/internal/pdp"
+	"github.com/TAIPANBOX/wardryx/internal/policy"
 	"github.com/TAIPANBOX/wardryx/internal/store"
 )
 
@@ -35,7 +55,17 @@ const (
 	evApprovalGranted   = "approval_granted"
 	evApprovalDenied    = "approval_denied"
 	evApprovalTimeout   = "approval_timeout"
+	evPolicyUpdated     = "policy_updated"
 )
+
+// systemAgentID is the agent_id agent-event's schema requires on every
+// event (agent-passport SPEC.md Sec 3.1: a well-formed agent:// URI).
+// evPolicyUpdated describes an admin action against the policy-as-code API
+// itself, not any one governed agent's behavior, so there is no real
+// agent_id to report -- this synthetic identity names the API as its own
+// well-formed subject rather than leaving the field empty (which would
+// make the event schema-invalid) or borrowing an unrelated agent's id.
+const systemAgentID = "agent://wardryx.internal/admin/policy-api"
 
 // Server is Wardryx's HTTP API.
 type Server struct {
@@ -47,6 +77,11 @@ type Server struct {
 	approvalSecret    []byte
 	approvalTTL       time.Duration
 	approvalSingleUse bool
+	// basePolicies is the file-loaded policy set's own rules, fixed at
+	// construction: the permanent floor recomputePolicySet always layers
+	// the store's operator-managed policies on top of. See the package doc
+	// comment's "Policy-as-code" section.
+	basePolicies []policy.Policy
 }
 
 // New returns a Server. events may be nil, which makes event emission a
@@ -56,8 +91,12 @@ type Server struct {
 // come from ParseKeys, which never returns an empty map. approvalSingleUse
 // is WARDRYX_APPROVAL_SINGLE_USE (internal/config): false preserves the
 // original behavior of a granted approval_token staying reusable for its
-// full TTL; see handleDecide.
-func New(engine *pdp.Engine, st store.Store, events *event.Writer, otel *wotel.Exporter, keys map[string]Principal, approvalSecret []byte, approvalSingleUse bool) *Server {
+// full TTL; see handleDecide. basePolicies is normally the file-loaded
+// policy.Set's own Policies() (cmd/wardryx passes policies.Policies()); nil
+// or empty is valid and means the file path (-policy unset, or set to an
+// empty policy set) contributes no fixed floor, so the admin policy API
+// alone determines what Engine decides against.
+func New(engine *pdp.Engine, st store.Store, events *event.Writer, otel *wotel.Exporter, keys map[string]Principal, approvalSecret []byte, approvalSingleUse bool, basePolicies []policy.Policy) *Server {
 	return &Server{
 		engine:            engine,
 		store:             st,
@@ -67,6 +106,7 @@ func New(engine *pdp.Engine, st store.Store, events *event.Writer, otel *wotel.E
 		approvalSecret:    approvalSecret,
 		approvalTTL:       approval.DefaultTTL,
 		approvalSingleUse: approvalSingleUse,
+		basePolicies:      basePolicies,
 	}
 }
 
@@ -77,6 +117,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/decide", s.requireAuth(s.handleDecide))
 	mux.HandleFunc("POST /v1/approvals/{id}/decide", s.requireAdmin(s.handleApprovalDecide))
 	mux.HandleFunc("GET /v1/approvals", s.requireAuth(s.handleListApprovals))
+	mux.HandleFunc("GET /v1/policies", s.requireAdmin(s.handleListPolicies))
+	mux.HandleFunc("GET /v1/policies/{id}", s.requireAdmin(s.handleGetPolicy))
+	mux.HandleFunc("PUT /v1/policies/{id}", s.requireAdmin(s.handlePutPolicy))
+	mux.HandleFunc("DELETE /v1/policies/{id}", s.requireAdmin(s.handleDeletePolicy))
 	return mux
 }
 
@@ -370,6 +414,193 @@ func (s *Server) handleListApprovals(w http.ResponseWriter, r *http.Request, pri
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].RequestedAt < out[j].RequestedAt })
 	writeJSON(w, http.StatusOK, out)
+}
+
+// --- /v1/policies (admin only) ---
+
+// policyDTO is policy.Policy's wire shape for the admin policy API, plus
+// the id/updated_at store.PolicyRecord carries alongside it. Reuses
+// policy.Policy's own JSON tags directly (embedded) rather than a parallel
+// hand-copied field list, so a new Policy field is visible over the wire
+// the moment it's added there, with no second struct to keep in sync.
+type policyDTO struct {
+	ID string `json:"id"`
+	policy.Policy
+	UpdatedAt string `json:"updated_at,omitempty"`
+}
+
+func policyRecordToDTO(r store.PolicyRecord) policyDTO {
+	dto := policyDTO{ID: r.ID, Policy: r.Policy}
+	if !r.UpdatedAt.IsZero() {
+		dto.UpdatedAt = r.UpdatedAt.UTC().Format(time.RFC3339)
+	}
+	return dto
+}
+
+// ComputePolicySet is the shared "layer the store's currently-persisted
+// policies on top of a fixed base, then compile" rule the package doc
+// comment's "Policy-as-code" section describes. cmd/wardryx calls this
+// once at startup (after building st but before serving) to restore
+// whatever an earlier process wrote through the admin policy API on top of
+// basePolicies (the file-loaded Set's own Policies()); handlePutPolicy and
+// handleDeletePolicy apply the same combination rule inline, since they
+// additionally need to validate one specific mutation (a put or delete)
+// before it is persisted, not just recompile whatever is already stored.
+// A pure computation: it never touches Engine or the store beyond the
+// ListPolicies read.
+func ComputePolicySet(ctx context.Context, st store.Store, basePolicies []policy.Policy) (*policy.Set, error) {
+	stored, err := st.ListPolicies(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("list stored policies: %w", err)
+	}
+	all := make([]policy.Policy, 0, len(basePolicies)+len(stored))
+	all = append(all, basePolicies...)
+	for _, r := range stored {
+		all = append(all, r.Policy)
+	}
+	return policy.Compile(all)
+}
+
+func (s *Server) handleListPolicies(w http.ResponseWriter, r *http.Request, _ Principal) {
+	all, err := s.store.ListPolicies(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	out := make([]policyDTO, 0, len(all))
+	for _, rec := range all {
+		out = append(out, policyRecordToDTO(rec))
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+func (s *Server) handleGetPolicy(w http.ResponseWriter, r *http.Request, _ Principal) {
+	id := r.PathValue("id")
+	rec, err := s.store.GetPolicy(r.Context(), id)
+	if errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "policy not found")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, policyRecordToDTO(rec))
+}
+
+// handlePutPolicy creates or replaces the policy stored under {id}. The
+// request body is one policy.Policy document (id is the URL path segment,
+// not a body field). Validate-then-apply, never partial: the full
+// candidate set (basePolicies + every stored policy with id's entry
+// replaced/added) is compiled BEFORE anything is persisted, so a body that
+// would make the combined set invalid (empty target, a negative threshold,
+// ...) is rejected with the store and the live Engine both left exactly as
+// they were. Only once policy.Compile succeeds does this persist the write
+// and swap Engine -- and swapping an atomic.Pointer cannot itself fail, so
+// there is no window where the store and the live decision engine disagree
+// about what was just written.
+func (s *Server) handlePutPolicy(w http.ResponseWriter, r *http.Request, principal Principal) {
+	id := r.PathValue("id")
+	if id == "" {
+		writeError(w, http.StatusBadRequest, "missing policy id")
+		return
+	}
+	var p policy.Policy
+	if err := json.NewDecoder(r.Body).Decode(&p); err != nil {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("invalid request body: %v", err))
+		return
+	}
+
+	ctx := r.Context()
+	stored, err := s.store.ListPolicies(ctx)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	candidate := make([]policy.Policy, 0, len(s.basePolicies)+len(stored)+1)
+	candidate = append(candidate, s.basePolicies...)
+	replaced := false
+	for _, rec := range stored {
+		if rec.ID == id {
+			candidate = append(candidate, p)
+			replaced = true
+			continue
+		}
+		candidate = append(candidate, rec.Policy)
+	}
+	if !replaced {
+		candidate = append(candidate, p)
+	}
+
+	newSet, err := policy.Compile(candidate)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("invalid policy: %v", err))
+		return
+	}
+
+	now := time.Now().UTC()
+	if err := s.store.PutPolicy(ctx, id, p, now); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	s.engine.SetPolicies(newSet)
+	s.emit(evPolicyUpdated, event.SeverityHigh, systemAgentID, "", nil,
+		map[string]any{"action": "put", "policy_id": id, "policy_version": newSet.Version(), "decided_by": principal.Org})
+
+	rec, err := s.store.GetPolicy(ctx, id)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, policyRecordToDTO(rec))
+}
+
+// handleDeletePolicy removes the policy stored under {id}. Same
+// validate-then-apply discipline as handlePutPolicy: the resulting set
+// (basePolicies + every remaining stored policy) is compiled before the
+// delete is persisted or Engine is swapped, even though removing one valid
+// policy from an already-valid set cannot itself make policy.Compile fail
+// -- kept symmetric with the put path rather than special-cased, so both
+// handlers are provably held to the same "never partially apply" rule.
+func (s *Server) handleDeletePolicy(w http.ResponseWriter, r *http.Request, principal Principal) {
+	id := r.PathValue("id")
+	ctx := r.Context()
+
+	stored, err := s.store.ListPolicies(ctx)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	found := false
+	candidate := make([]policy.Policy, 0, len(s.basePolicies)+len(stored))
+	candidate = append(candidate, s.basePolicies...)
+	for _, rec := range stored {
+		if rec.ID == id {
+			found = true
+			continue
+		}
+		candidate = append(candidate, rec.Policy)
+	}
+	if !found {
+		writeError(w, http.StatusNotFound, "policy not found")
+		return
+	}
+
+	newSet, err := policy.Compile(candidate)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("invalid resulting policy set: %v", err))
+		return
+	}
+
+	if err := s.store.DeletePolicy(ctx, id); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	s.engine.SetPolicies(newSet)
+	s.emit(evPolicyUpdated, event.SeverityHigh, systemAgentID, "", nil,
+		map[string]any{"action": "delete", "policy_id": id, "policy_version": newSet.Version(), "decided_by": principal.Org})
+
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // --- helpers ---

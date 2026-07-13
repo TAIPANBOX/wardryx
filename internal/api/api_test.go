@@ -2,7 +2,9 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -65,7 +67,7 @@ func newTestServerOpts(t *testing.T, singleUse bool, otel *wotel.Exporter) *Serv
 		viewerKey: {Org: "acme", Role: RoleViewer},
 		otherOrg:  {Org: "globex", Role: RoleAdmin},
 	}
-	return New(engine, st, nil, otel, keys, []byte(testHMAC), singleUse)
+	return New(engine, st, nil, otel, keys, []byte(testHMAC), singleUse, set.Policies())
 }
 
 func doRequest(t *testing.T, h http.Handler, method, path, bearer string, body any) *httptest.ResponseRecorder {
@@ -670,5 +672,251 @@ func TestDecideCacheableOverWire(t *testing.T) {
 	}
 	if !none.Cacheable {
 		t.Error("Cacheable = false, want true: no policy targets this agent")
+	}
+}
+
+// ------------------------------------------------------------------
+// Policy-as-code API (/v1/policies). newTestServer's fixture Set (see
+// newTestServerOpts) becomes each of these tests' basePolicies -- the fixed
+// file-loaded floor -- so these tests also prove that floor survives
+// alongside, and after, API-managed policies.
+// ------------------------------------------------------------------
+
+func TestListPoliciesRequiresAdmin(t *testing.T) {
+	srv := newTestServer(t)
+	if rec := doRequest(t, srv.Handler(), http.MethodGet, "/v1/policies", "", nil); rec.Code != http.StatusUnauthorized {
+		t.Errorf("no key: status = %d, want 401", rec.Code)
+	}
+	if rec := doRequest(t, srv.Handler(), http.MethodGet, "/v1/policies", viewerKey, nil); rec.Code != http.StatusForbidden {
+		t.Errorf("viewer key: status = %d, want 403", rec.Code)
+	}
+}
+
+func TestListPoliciesEmptyByDefault(t *testing.T) {
+	// The fixture's finance-guardrail policy is file-loaded (basePolicies),
+	// not stored -- GET /v1/policies lists only store-managed policies, so
+	// a fresh server (nothing written through the API yet) reports empty.
+	srv := newTestServer(t)
+	rec := doRequest(t, srv.Handler(), http.MethodGet, "/v1/policies", adminKey, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	got := decodeBody[[]policyDTO](t, rec)
+	if len(got) != 0 {
+		t.Errorf("ListPolicies on a fresh server = %+v, want empty", got)
+	}
+}
+
+func TestPutPolicyRequiresAdmin(t *testing.T) {
+	srv := newTestServer(t)
+	body := policy.Policy{Target: "agent://x/*"}
+	if rec := doRequest(t, srv.Handler(), http.MethodPut, "/v1/policies/p1", viewerKey, body); rec.Code != http.StatusForbidden {
+		t.Errorf("status = %d, want 403 for a viewer key", rec.Code)
+	}
+}
+
+func TestPutPolicyCreatesThenGetReturnsIt(t *testing.T) {
+	srv := newTestServer(t)
+	body := policy.Policy{Name: "block-scraping", Target: "agent://acme.example/scraper/*", DenyTool: []string{"scrape"}}
+
+	putRec := doRequest(t, srv.Handler(), http.MethodPut, "/v1/policies/scraper-guard", adminKey, body)
+	if putRec.Code != http.StatusOK {
+		t.Fatalf("PUT status = %d, body = %s", putRec.Code, putRec.Body.String())
+	}
+	put := decodeBody[policyDTO](t, putRec)
+	if put.ID != "scraper-guard" || put.Target != body.Target {
+		t.Errorf("PUT response = %+v, want id=scraper-guard target=%s", put, body.Target)
+	}
+	if put.UpdatedAt == "" {
+		t.Error("PUT response UpdatedAt is empty")
+	}
+
+	getRec := doRequest(t, srv.Handler(), http.MethodGet, "/v1/policies/scraper-guard", adminKey, nil)
+	if getRec.Code != http.StatusOK {
+		t.Fatalf("GET status = %d, body = %s", getRec.Code, getRec.Body.String())
+	}
+	got := decodeBody[policyDTO](t, getRec)
+	if got.ID != "scraper-guard" || len(got.DenyTool) != 1 || got.DenyTool[0] != "scrape" {
+		t.Errorf("GET = %+v, want id=scraper-guard deny_tool=[scrape]", got)
+	}
+
+	listRec := doRequest(t, srv.Handler(), http.MethodGet, "/v1/policies", adminKey, nil)
+	list := decodeBody[[]policyDTO](t, listRec)
+	if len(list) != 1 || list[0].ID != "scraper-guard" {
+		t.Errorf("ListPolicies = %+v, want exactly [scraper-guard]", list)
+	}
+}
+
+func TestGetPolicyNotFound(t *testing.T) {
+	srv := newTestServer(t)
+	rec := doRequest(t, srv.Handler(), http.MethodGet, "/v1/policies/does-not-exist", adminKey, nil)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", rec.Code)
+	}
+}
+
+// TestPutPolicyTakesEffectImmediately proves the write is live, not just
+// stored: a tool /v1/decide would otherwise allow starts denying the
+// moment the policy is PUT, with no restart and no cache to invalidate.
+func TestPutPolicyTakesEffectImmediately(t *testing.T) {
+	srv := newTestServer(t)
+	req := decideRequestDTO{AgentID: "agent://acme.example/ops/bot1", RunID: "r1", ToolNames: []string{"shell_exec"}}
+
+	before := decodeBody[decideResponseDTO](t, doRequest(t, srv.Handler(), http.MethodPost, "/v1/decide", adminKey, req))
+	if before.Decision != pdp.Allow {
+		t.Fatalf("before PUT: Decision = %q, want allow (no policy targets agent://acme.example/ops/* yet)", before.Decision)
+	}
+
+	putRec := doRequest(t, srv.Handler(), http.MethodPut, "/v1/policies/ops-guard", adminKey,
+		policy.Policy{Target: "agent://acme.example/ops/*", DenyTool: []string{"shell_exec"}})
+	if putRec.Code != http.StatusOK {
+		t.Fatalf("PUT status = %d, body = %s", putRec.Code, putRec.Body.String())
+	}
+
+	after := decodeBody[decideResponseDTO](t, doRequest(t, srv.Handler(), http.MethodPost, "/v1/decide", adminKey, req))
+	if after.Decision != pdp.Deny {
+		t.Fatalf("after PUT: Decision = %q, want deny (shell_exec now denied by ops-guard)", after.Decision)
+	}
+}
+
+// TestPutPolicyInvalidBodyRejectedWithoutSideEffects is the "never
+// partially apply" guarantee: an invalid write must change neither the
+// store nor the live Engine.
+func TestPutPolicyInvalidBodyRejectedWithoutSideEffects(t *testing.T) {
+	srv := newTestServer(t)
+	versionBefore := srv.engine.PolicyVersion()
+
+	// Target is required; an empty one must fail policy.Compile.
+	rec := doRequest(t, srv.Handler(), http.MethodPut, "/v1/policies/bad", adminKey, policy.Policy{Name: "no-target"})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, body = %s, want 400", rec.Code, rec.Body.String())
+	}
+
+	if srv.engine.PolicyVersion() != versionBefore {
+		t.Error("PolicyVersion changed after a rejected PUT: Engine must be untouched on validation failure")
+	}
+	if _, err := srv.store.GetPolicy(context.Background(), "bad"); !errors.Is(err, store.ErrNotFound) {
+		t.Errorf("GetPolicy(bad) after rejected PUT = %v, want ErrNotFound: the store must be untouched too", err)
+	}
+}
+
+// TestPutPolicyReplacesExisting proves PUT is upsert: a second PUT under
+// the same id replaces the first rule's effect rather than adding a second
+// one alongside it.
+func TestPutPolicyReplacesExisting(t *testing.T) {
+	srv := newTestServer(t)
+	if rec := doRequest(t, srv.Handler(), http.MethodPut, "/v1/policies/p1", adminKey,
+		policy.Policy{Target: "agent://acme.example/x/*", MaxSteps: 3}); rec.Code != http.StatusOK {
+		t.Fatalf("first PUT status = %d", rec.Code)
+	}
+	if rec := doRequest(t, srv.Handler(), http.MethodPut, "/v1/policies/p1", adminKey,
+		policy.Policy{Target: "agent://acme.example/x/*", MaxSteps: 30}); rec.Code != http.StatusOK {
+		t.Fatalf("second PUT status = %d", rec.Code)
+	}
+
+	got := decodeBody[policyDTO](t, doRequest(t, srv.Handler(), http.MethodGet, "/v1/policies/p1", adminKey, nil))
+	if got.MaxSteps != 30 {
+		t.Errorf("MaxSteps = %d, want 30 (the second PUT's value)", got.MaxSteps)
+	}
+
+	// Exactly one stored policy, not two.
+	list := decodeBody[[]policyDTO](t, doRequest(t, srv.Handler(), http.MethodGet, "/v1/policies", adminKey, nil))
+	if len(list) != 1 {
+		t.Errorf("ListPolicies = %+v, want exactly one entry for p1", list)
+	}
+}
+
+func TestDeletePolicyRequiresAdmin(t *testing.T) {
+	srv := newTestServer(t)
+	doRequest(t, srv.Handler(), http.MethodPut, "/v1/policies/p1", adminKey, policy.Policy{Target: "agent://x/*"})
+	if rec := doRequest(t, srv.Handler(), http.MethodDelete, "/v1/policies/p1", viewerKey, nil); rec.Code != http.StatusForbidden {
+		t.Errorf("status = %d, want 403 for a viewer key", rec.Code)
+	}
+}
+
+func TestDeletePolicyNotFound(t *testing.T) {
+	srv := newTestServer(t)
+	rec := doRequest(t, srv.Handler(), http.MethodDelete, "/v1/policies/does-not-exist", adminKey, nil)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", rec.Code)
+	}
+}
+
+// TestDeletePolicyStopsEnforcingItImmediately mirrors
+// TestPutPolicyTakesEffectImmediately for the removal path: once deleted, a
+// call the policy used to deny must allow again, live, no restart.
+func TestDeletePolicyStopsEnforcingItImmediately(t *testing.T) {
+	srv := newTestServer(t)
+	doRequest(t, srv.Handler(), http.MethodPut, "/v1/policies/ops-guard", adminKey,
+		policy.Policy{Target: "agent://acme.example/ops/*", DenyTool: []string{"shell_exec"}})
+	req := decideRequestDTO{AgentID: "agent://acme.example/ops/bot1", RunID: "r1", ToolNames: []string{"shell_exec"}}
+
+	before := decodeBody[decideResponseDTO](t, doRequest(t, srv.Handler(), http.MethodPost, "/v1/decide", adminKey, req))
+	if before.Decision != pdp.Deny {
+		t.Fatalf("before DELETE: Decision = %q, want deny", before.Decision)
+	}
+
+	delRec := doRequest(t, srv.Handler(), http.MethodDelete, "/v1/policies/ops-guard", adminKey, nil)
+	if delRec.Code != http.StatusNoContent {
+		t.Fatalf("DELETE status = %d, want 204", delRec.Code)
+	}
+
+	after := decodeBody[decideResponseDTO](t, doRequest(t, srv.Handler(), http.MethodPost, "/v1/decide", adminKey, req))
+	if after.Decision != pdp.Allow {
+		t.Fatalf("after DELETE: Decision = %q, want allow (ops-guard no longer in force)", after.Decision)
+	}
+
+	if _, err := srv.store.GetPolicy(context.Background(), "ops-guard"); !errors.Is(err, store.ErrNotFound) {
+		t.Errorf("GetPolicy after DELETE = %v, want ErrNotFound", err)
+	}
+}
+
+// TestFileLoadedPolicyNeverDisappearsFromApiWrites is the core
+// policy-as-code safety property: newTestServer's fixture finance-guardrail
+// (file-loaded, basePolicies) keeps denying send_wire_transfer through
+// several unrelated API writes and deletes, proving the file floor is never
+// touched by store-side churn.
+func TestFileLoadedPolicyNeverDisappearsFromApiWrites(t *testing.T) {
+	srv := newTestServer(t)
+	fileFloorReq := decideRequestDTO{
+		AgentID: "agent://acme.example/finance/bot1", RunID: "r1", ToolNames: []string{"send_wire_transfer"},
+	}
+	assertStillDenied := func(t *testing.T, when string) {
+		t.Helper()
+		got := decodeBody[decideResponseDTO](t, doRequest(t, srv.Handler(), http.MethodPost, "/v1/decide", adminKey, fileFloorReq))
+		if got.Decision != pdp.Deny {
+			t.Errorf("%s: finance-guardrail Decision = %q, want deny (file-loaded floor must survive API writes)", when, got.Decision)
+		}
+	}
+	assertStillDenied(t, "at start")
+
+	doRequest(t, srv.Handler(), http.MethodPut, "/v1/policies/extra-1", adminKey, policy.Policy{Target: "agent://acme.example/ops/*", MaxSteps: 1})
+	assertStillDenied(t, "after PUT extra-1")
+
+	doRequest(t, srv.Handler(), http.MethodPut, "/v1/policies/extra-1", adminKey, policy.Policy{Target: "agent://acme.example/ops/*", MaxSteps: 2})
+	assertStillDenied(t, "after replacing extra-1")
+
+	doRequest(t, srv.Handler(), http.MethodDelete, "/v1/policies/extra-1", adminKey, nil)
+	assertStillDenied(t, "after deleting extra-1")
+
+	// The file-loaded policy itself is not a store id: not listed, not
+	// gettable, not deletable through the admin API.
+	if rec := doRequest(t, srv.Handler(), http.MethodGet, "/v1/policies/finance-guardrail", adminKey, nil); rec.Code != http.StatusNotFound {
+		t.Errorf("GET finance-guardrail by name = %d, want 404 (it is file-loaded, not store-addressable)", rec.Code)
+	}
+	if rec := doRequest(t, srv.Handler(), http.MethodDelete, "/v1/policies/finance-guardrail", adminKey, nil); rec.Code != http.StatusNotFound {
+		t.Errorf("DELETE finance-guardrail = %d, want 404", rec.Code)
+	}
+	assertStillDenied(t, "after attempting to delete the file-loaded policy by name")
+}
+
+// TestPutPolicyMissingIDSegmentRejected covers the PathValue("id") ==""
+// defensive check: PUT /v1/policies/ (trailing slash, no id) must not
+// silently write an empty-string-keyed policy.
+func TestPutPolicyMissingIDSegmentRejected(t *testing.T) {
+	srv := newTestServer(t)
+	rec := doRequest(t, srv.Handler(), http.MethodPut, "/v1/policies/", adminKey, policy.Policy{Target: "agent://x/*"})
+	if rec.Code == http.StatusOK {
+		t.Fatalf("PUT /v1/policies/ (no id) succeeded, want a client error")
 	}
 }

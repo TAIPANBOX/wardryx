@@ -10,6 +10,8 @@ import (
 	"time"
 
 	_ "github.com/jackc/pgx/v5/stdlib" // registers the "pgx" database/sql driver
+
+	"github.com/TAIPANBOX/wardryx/internal/policy"
 )
 
 //go:embed schema.sql
@@ -144,6 +146,85 @@ func (p *Postgres) TryRedeem(ctx context.Context, key string) (bool, error) {
 		return false, fmt.Errorf("store: try redeem %q: %w", key, err)
 	}
 	return n == 1, nil
+}
+
+func (p *Postgres) PutPolicy(ctx context.Context, id string, pol policy.Policy, updatedAt time.Time) error {
+	polJSON, err := json.Marshal(pol)
+	if err != nil {
+		return fmt.Errorf("store: marshal policy %q: %w", id, err)
+	}
+	_, err = p.db.ExecContext(ctx,
+		`INSERT INTO policies (policy_id, policy_json, updated_at) VALUES ($1, $2, $3)
+		 ON CONFLICT (policy_id) DO UPDATE SET policy_json = $2, updated_at = $3`,
+		id, polJSON, updatedAt)
+	if err != nil {
+		return fmt.Errorf("store: put policy %q: %w", id, err)
+	}
+	return nil
+}
+
+func (p *Postgres) GetPolicy(ctx context.Context, id string) (PolicyRecord, error) {
+	row := p.db.QueryRowContext(ctx,
+		`SELECT policy_id, policy_json, updated_at FROM policies WHERE policy_id = $1`, id)
+	r, err := scanPolicy(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return PolicyRecord{}, fmt.Errorf("%w: %s", ErrNotFound, id)
+	}
+	if err != nil {
+		return PolicyRecord{}, fmt.Errorf("store: get policy %q: %w", id, err)
+	}
+	return r, nil
+}
+
+func (p *Postgres) ListPolicies(ctx context.Context) ([]PolicyRecord, error) {
+	rows, err := p.db.QueryContext(ctx,
+		`SELECT policy_id, policy_json, updated_at FROM policies ORDER BY policy_id ASC`)
+	if err != nil {
+		return nil, fmt.Errorf("store: list policies: %w", err)
+	}
+	defer rows.Close()
+
+	var out []PolicyRecord
+	for rows.Next() {
+		r, err := scanPolicy(rows)
+		if err != nil {
+			return nil, fmt.Errorf("store: scan policy: %w", err)
+		}
+		out = append(out, r)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: list policies: %w", err)
+	}
+	return out, nil
+}
+
+func (p *Postgres) DeletePolicy(ctx context.Context, id string) error {
+	res, err := p.db.ExecContext(ctx, `DELETE FROM policies WHERE policy_id = $1`, id)
+	if err != nil {
+		return fmt.Errorf("store: delete policy %q: %w", id, err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("store: delete policy %q: %w", id, err)
+	}
+	if n == 0 {
+		return fmt.Errorf("%w: %s", ErrNotFound, id)
+	}
+	return nil
+}
+
+func scanPolicy(row rowScanner) (PolicyRecord, error) {
+	var (
+		r          PolicyRecord
+		policyJSON []byte
+	)
+	if err := row.Scan(&r.ID, &policyJSON, &r.UpdatedAt); err != nil {
+		return PolicyRecord{}, err
+	}
+	if err := json.Unmarshal(policyJSON, &r.Policy); err != nil {
+		return PolicyRecord{}, fmt.Errorf("store: unmarshal policy %q: %w", r.ID, err)
+	}
+	return r, nil
 }
 
 // rowScanner is satisfied by both *sql.Row and *sql.Rows.

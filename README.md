@@ -160,6 +160,33 @@ Single-use redemption tracking has the same durability split as approval holds t
 
 ---
 
+## Policy-as-code
+
+`-policy`/`WARDRYX_POLICY` (above) loads policy files once at startup and never hot-reloads them -- that stays exactly true. On top of it, four admin-only routes let an operator manage a second, additional layer of policies at runtime, without a restart:
+
+```
+GET    /v1/policies       list every store-managed policy
+GET    /v1/policies/{id}  fetch one
+PUT    /v1/policies/{id}  create or replace one (body: a policy.Policy document, e.g. the YAML example above as JSON)
+DELETE /v1/policies/{id}  remove one
+```
+
+The file-loaded set is a **permanent floor**: every one of these routes recompiles `file-loaded policies + everything currently in the store` together (`internal/api.ComputePolicySet`) and swaps the result into `pdp.Engine` atomically (`Engine.SetPolicies`, an `atomic.Pointer[policy.Set]` under the hood) -- an API write can add, replace, or remove a *store-managed* rule, but it can never make a *file-loaded* one disappear, and the file-loaded policies aren't individually addressable through this API at all (they have no `id`). A `-db`/`WARDRYX_DB` Postgres store persists what's written here across a restart (a new `policies` table, additive migration); with no `-db`, an in-memory store still accepts writes for the life of the process, same "lost on restart" caveat every other in-memory piece of state already carries.
+
+Every `PUT`/`DELETE` is validate-then-apply, never partial: the *whole* prospective combined set is compiled (`policy.Compile`) before anything is persisted or swapped, so a request that would produce an invalid policy (empty `target`, a negative threshold, a bad glob) is rejected with both the store and the live `Engine` left exactly as they were -- the same "malformed policy is a hard error" rule the file path already enforces, now also covering runtime writes. A successful write also emits a `policy_updated` agent-event (severity `high`, `source: "wardryx"`) if an event log is configured.
+
+```sh
+curl -X PUT localhost:8090/v1/policies/ops-guard \
+  -H "Authorization: Bearer $ADMIN_KEY" -H "Content-Type: application/json" \
+  -d '{"target": "agent://acme.example/ops/*", "deny_tool": ["shell_exec"]}'
+
+curl localhost:8090/v1/policies -H "Authorization: Bearer $ADMIN_KEY"
+
+curl -X DELETE localhost:8090/v1/policies/ops-guard -H "Authorization: Bearer $ADMIN_KEY"
+```
+
+---
+
 ## OTLP export
 
 `WARDRYX_OTLP_ENDPOINT` (or `-otlp-endpoint`) turns on one exported span per `/v1/decide` outcome -- allow, deny, or hold -- posted to `<endpoint>/v1/traces`. `internal/otel` builds the OTLP/HTTP-JSON payload directly (no OpenTelemetry SDK dependency), mirroring TokenFuse's own exporter (`crates/gateway/src/otel.rs`): small, hand-rolled, and a fire-and-forget POST from a background goroutine, so a slow or unreachable collector never adds latency to `/v1/decide` and a delivery failure is dropped silently, never surfaced to the caller.
@@ -197,7 +224,7 @@ This mirrors Wardryx's own stated defaults for its *own* availability: with no `
 
 Beyond the decision engine and the approval flow above, Wardryx ships:
 
-1. **HTTP API** (`internal/api`): `POST /v1/decide`, `POST /v1/approvals/{id}/decide` (admin only), `GET /v1/approvals` (org-scoped), `GET /healthz`. Bearer-key auth mirrors the Cloud plane's `key:org[:role]` convention (TokenFuse `crates/cloud/src/keys.rs`), reimplemented in Go for the same wire format.
+1. **HTTP API** (`internal/api`): `POST /v1/decide`, `POST /v1/approvals/{id}/decide` (admin only), `GET /v1/approvals` (org-scoped), the admin-only `/v1/policies` policy-as-code routes (see [Policy-as-code](#policy-as-code)), `GET /healthz`. Bearer-key auth mirrors the Cloud plane's `key:org[:role]` convention (TokenFuse `crates/cloud/src/keys.rs`), reimplemented in Go for the same wire format.
 2. **Storage** (`internal/store`): Postgres via `pgx/v5` with an embedded, idempotent `schema.sql`, or an in-memory store when no DSN is configured. Both implementations satisfy the same `Store` interface.
 3. **Events** (`source: wardryx`): optional NDJSON `agent-event` output (`WARDRYX_EVENTS_PATH`) via `agent-stack-go/event`: `policy_allow`, `policy_deny`, `approval_requested`, `approval_granted`, `approval_denied`, `approval_timeout`.
 4. **OTLP export** (`internal/otel`): optional one-span-per-decision export to an OTLP/HTTP collector (`WARDRYX_OTLP_ENDPOINT`), see [OTLP export](#otlp-export).
@@ -212,8 +239,8 @@ cmd/wardryx/main.go     CLI: serve | check | approvals | version
 internal/policy         policy model, YAML/JSON loader, glob matcher, PolicyVersion
 internal/pdp            Engine.Decide: the pure decision algorithm
 internal/approval       approval_token minting/verification (HMAC-SHA256) + hold/decide orchestration
-internal/store          Store interface; Postgres (pgx/v5, embedded schema.sql) + in-memory
-internal/api            net/http API: bearer auth, /v1/decide, /v1/approvals, /healthz
+internal/store          Store interface; Postgres (pgx/v5, embedded schema.sql) + in-memory; approvals + policies
+internal/api            net/http API: bearer auth, /v1/decide, /v1/approvals, /v1/policies, /healthz
 internal/passports      directory loader for the offline `check` command (agent-stack-go/passport)
 internal/otel           OTLP/HTTP-JSON span export, one per /v1/decide outcome
 internal/config         WARDRYX_* environment variables, read once at startup
@@ -225,6 +252,7 @@ Design principles, held as hard rules:
 - **Never an actor.** Wardryx returns a decision; it never calls a tool, never reaches a network destination, and never mutates anything on an agent's behalf.
 - **Stateless approvals.** A hold never parks a connection or a goroutine. The proof of a later grant is a signed, self-contained token, not a stored session.
 - **Fail closed on missing security config.** No `WARDRYX_APPROVAL_SECRET` means no token can ever mint or verify: never an implicit "allow."
+- **Policy writes never partially apply.** A `/v1/policies` write that would produce an invalid combined policy set is rejected before anything is persisted or the live `Engine` is touched -- the same "malformed policy is a hard error" rule the file path enforces, extended to runtime writes.
 
 ---
 
@@ -320,6 +348,7 @@ Wardryx is itself a security-relevant component, so a few of its own defaults ar
 - A malformed policy file is a **hard error**: `serve` and `check` refuse to start rather than silently loading a smaller rule set than intended.
 - `WARDRYX_APPROVAL_SECRET` unset fails every mint/verify closed; there is no fallback to an unsigned or always-valid token.
 - `WARDRYX_APPROVAL_SINGLE_USE=true` with no `-db`/`WARDRYX_DB` only enforces single-use within that one process, not across multiple wardryx instances sharing the load; `serve` warns about this combination at startup rather than silently giving weaker guarantees than the name implies.
+- `/v1/policies` grants whoever holds an admin bearer key the ability to change enforcement rules at runtime, same trust level `/v1/approvals/{id}/decide` already requires -- there is no separate, narrower role for policy management. A leaked admin key is a policy-tampering risk, not just an approvals-tampering one.
 
 ---
 
@@ -328,12 +357,13 @@ Wardryx is itself a security-relevant component, so a few of its own defaults ar
 - [x] Declarative policy model (YAML/JSON, `agent://` glob targeting, stable `PolicyVersion`)
 - [x] Deterministic decision engine: `deny_tool`, `deny_if_unattested`, `max_steps`, `allow_domains`, `require_human_above_usd`
 - [x] Stateless human-in-the-loop: HMAC-signed approval tokens, configurable TTL, optional single-use redemption (`WARDRYX_APPROVAL_SINGLE_USE`)
-- [x] HTTP API: `/v1/decide`, `/v1/approvals/{id}/decide`, `/v1/approvals`, `/healthz`, bearer-key auth with org/role scoping
-- [x] Storage: Postgres (`pgx/v5`, embedded schema) and in-memory, behind one `Store` interface
-- [x] `agent-event` NDJSON output (`policy_allow` / `policy_deny` / `approval_*`)
+- [x] HTTP API: `/v1/decide`, `/v1/approvals/{id}/decide`, `/v1/approvals`, `/v1/policies` (admin policy-as-code, see [Policy-as-code](#policy-as-code)), `/healthz`, bearer-key auth with org/role scoping
+- [x] Storage: Postgres (`pgx/v5`, embedded schema) and in-memory, behind one `Store` interface; approvals and policy-as-code documents
+- [x] `agent-event` NDJSON output (`policy_allow` / `policy_deny` / `approval_*` / `policy_updated`)
 - [x] CLI: `serve`, `check` (offline dry-run), `approvals`, `version`
 - [x] OTLP exporter: one span per `/v1/decide` outcome to `WARDRYX_OTLP_ENDPOINT`/`-otlp-endpoint`, fire-and-forget, no-op when unset (`internal/otel`)
-- [ ] Policies as code via terraform-provider-taipan (planned, not yet wired)
+- [x] Policy-as-code admin API (`/v1/policies`, this repo's side): file-loaded policies stay a permanent floor, store-managed policies layer on top, validate-then-apply, live-swapped with no restart
+- [ ] Policies as code via terraform-provider-taipan (a `wardryx_policy` Terraform resource driving the API above; not yet wired)
 
 ## License
 

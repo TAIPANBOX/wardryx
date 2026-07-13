@@ -7,6 +7,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/TAIPANBOX/wardryx/internal/policy"
 )
 
 func TestMemoryCreateAndGet(t *testing.T) {
@@ -240,5 +242,144 @@ func TestMemoryTryRedeemManyKeysConcurrentlyAreIndependent(t *testing.T) {
 		if !ok {
 			t.Errorf("TryRedeem(key-%d) = false, want true: distinct keys must not contend with each other", i)
 		}
+	}
+}
+
+// ------------------------------------------------------------------
+// Policy CRUD (PutPolicy/GetPolicy/ListPolicies/DeletePolicy)
+// ------------------------------------------------------------------
+
+func TestMemoryPutAndGetPolicy(t *testing.T) {
+	m := NewMemory()
+	ctx := context.Background()
+	p := policy.Policy{Name: "finance-guardrail", Target: "agent://acme.example/finance/*", DenyTool: []string{"send_wire_transfer"}}
+	updatedAt := time.Date(2026, 7, 13, 12, 0, 0, 0, time.UTC)
+
+	if err := m.PutPolicy(ctx, "finance", p, updatedAt); err != nil {
+		t.Fatalf("PutPolicy: %v", err)
+	}
+	got, err := m.GetPolicy(ctx, "finance")
+	if err != nil {
+		t.Fatalf("GetPolicy: %v", err)
+	}
+	if got.ID != "finance" || got.Policy.Target != p.Target || len(got.Policy.DenyTool) != 1 || got.Policy.DenyTool[0] != "send_wire_transfer" {
+		t.Errorf("GetPolicy = %+v, want id=finance matching %+v", got, p)
+	}
+	if !got.UpdatedAt.Equal(updatedAt) {
+		t.Errorf("UpdatedAt = %v, want %v", got.UpdatedAt, updatedAt)
+	}
+}
+
+func TestMemoryGetPolicyNotFound(t *testing.T) {
+	m := NewMemory()
+	if _, err := m.GetPolicy(context.Background(), "does-not-exist"); !errors.Is(err, ErrNotFound) {
+		t.Errorf("GetPolicy(missing) = %v, want ErrNotFound", err)
+	}
+}
+
+// TestMemoryPutPolicyReplacesExisting proves PutPolicy is upsert semantics,
+// not create-only: a second Put under the same id overwrites the first
+// rather than erroring (contrast CreateApproval, which does error on a
+// duplicate id).
+func TestMemoryPutPolicyReplacesExisting(t *testing.T) {
+	m := NewMemory()
+	ctx := context.Background()
+	first := policy.Policy{Name: "v1", Target: "agent://x/*", MaxSteps: 5}
+	second := policy.Policy{Name: "v2", Target: "agent://x/*", MaxSteps: 10}
+
+	if err := m.PutPolicy(ctx, "p1", first, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.PutPolicy(ctx, "p1", second, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	got, err := m.GetPolicy(ctx, "p1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Policy.Name != "v2" || got.Policy.MaxSteps != 10 {
+		t.Errorf("GetPolicy after replace = %+v, want the second write (v2, MaxSteps=10)", got.Policy)
+	}
+}
+
+func TestMemoryPolicyIsDeepCopied(t *testing.T) {
+	m := NewMemory()
+	ctx := context.Background()
+	tools := []string{"send_wire_transfer"}
+	p := policy.Policy{Name: "x", Target: "agent://x/*", DenyTool: tools}
+	if err := m.PutPolicy(ctx, "p1", p, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+
+	// Mutate the caller's slice after Put returns; the stored copy must be
+	// unaffected, the same protection deepCopyContext gives Approval.Context.
+	tools[0] = "mutated"
+
+	got, err := m.GetPolicy(ctx, "p1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Policy.DenyTool[0] != "send_wire_transfer" {
+		t.Errorf("DenyTool[0] = %q, want the original value unaffected by the caller's later mutation", got.Policy.DenyTool[0])
+	}
+}
+
+func TestMemoryListPoliciesOrderedByID(t *testing.T) {
+	m := NewMemory()
+	ctx := context.Background()
+	for _, id := range []string{"zebra", "alpha", "mid"} {
+		if err := m.PutPolicy(ctx, id, policy.Policy{Target: "agent://x/*"}, time.Now()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	list, err := m.ListPolicies(ctx)
+	if err != nil {
+		t.Fatalf("ListPolicies: %v", err)
+	}
+	if len(list) != 3 {
+		t.Fatalf("ListPolicies len = %d, want 3", len(list))
+	}
+	var ids []string
+	for _, r := range list {
+		ids = append(ids, r.ID)
+	}
+	want := []string{"alpha", "mid", "zebra"}
+	for i, id := range ids {
+		if id != want[i] {
+			t.Errorf("ListPolicies order = %v, want %v", ids, want)
+			break
+		}
+	}
+}
+
+func TestMemoryListPoliciesEmpty(t *testing.T) {
+	m := NewMemory()
+	list, err := m.ListPolicies(context.Background())
+	if err != nil {
+		t.Fatalf("ListPolicies: %v", err)
+	}
+	if len(list) != 0 {
+		t.Errorf("ListPolicies on an empty store = %+v, want empty", list)
+	}
+}
+
+func TestMemoryDeletePolicy(t *testing.T) {
+	m := NewMemory()
+	ctx := context.Background()
+	if err := m.PutPolicy(ctx, "p1", policy.Policy{Target: "agent://x/*"}, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.DeletePolicy(ctx, "p1"); err != nil {
+		t.Fatalf("DeletePolicy: %v", err)
+	}
+	if _, err := m.GetPolicy(ctx, "p1"); !errors.Is(err, ErrNotFound) {
+		t.Errorf("GetPolicy after delete = %v, want ErrNotFound", err)
+	}
+}
+
+func TestMemoryDeletePolicyNotFound(t *testing.T) {
+	m := NewMemory()
+	if err := m.DeletePolicy(context.Background(), "does-not-exist"); !errors.Is(err, ErrNotFound) {
+		t.Errorf("DeletePolicy(missing) = %v, want ErrNotFound", err)
 	}
 }

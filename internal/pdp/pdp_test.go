@@ -2,6 +2,7 @@ package pdp
 
 import (
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -462,6 +463,111 @@ func TestPolicyVersionSurfacedOnEveryDecision(t *testing.T) {
 			t.Errorf("PolicyVersion = %q, want %q", got, want)
 		}
 	}
+}
+
+func TestSetPoliciesChangesPolicyVersion(t *testing.T) {
+	engine := testEngine(t)
+	before := engine.PolicyVersion()
+
+	replacement, err := policy.Compile([]policy.Policy{
+		{Name: "new-rule", Target: "agent://acme.example/*", DenyTool: []string{"anything"}},
+	})
+	if err != nil {
+		t.Fatalf("policy.Compile: %v", err)
+	}
+	engine.SetPolicies(replacement)
+
+	after := engine.PolicyVersion()
+	if after == before {
+		t.Errorf("PolicyVersion unchanged after SetPolicies: %q", after)
+	}
+	if after != replacement.Version() {
+		t.Errorf("PolicyVersion = %q, want %q (the swapped-in set's own version)", after, replacement.Version())
+	}
+}
+
+// TestSetPoliciesChangesDecideOutcome proves the swap is live, not just a
+// version-string bookkeeping change: a request denied under the old policy
+// must allow once SetPolicies removes the rule that denied it, and a fresh
+// deny_tool rule introduced by the swap must start denying immediately.
+func TestSetPoliciesChangesDecideOutcome(t *testing.T) {
+	engine := testEngine(t)
+	req := DecideRequest{
+		AgentID: "agent://acme.example/finance/bot1", RunID: "r1",
+		ToolNames: []string{"send_wire_transfer"}, AttestationMethod: "spiffe-svid",
+	}
+	if got := engine.Decide(req).Decision; got != Deny {
+		t.Fatalf("before SetPolicies: Decision = %q, want deny (send_wire_transfer denied by the fixture policy)", got)
+	}
+
+	empty, err := policy.Compile(nil)
+	if err != nil {
+		t.Fatalf("policy.Compile(nil): %v", err)
+	}
+	engine.SetPolicies(empty)
+
+	if got := engine.Decide(req).Decision; got != Allow {
+		t.Errorf("after SetPolicies(empty): Decision = %q, want allow (zero policies loaded)", got)
+	}
+}
+
+func TestSetPoliciesNilResetsToEmpty(t *testing.T) {
+	engine := testEngine(t)
+	engine.SetPolicies(nil)
+	if got, want := engine.PolicyVersion(), policy.Empty().Version(); got != want {
+		t.Errorf("PolicyVersion after SetPolicies(nil) = %q, want %q (policy.Empty())", got, want)
+	}
+	req := DecideRequest{AgentID: "agent://acme.example/finance/bot1", RunID: "r1", ToolNames: []string{"send_wire_transfer"}}
+	if got := engine.Decide(req).Decision; got != Allow {
+		t.Errorf("Decision after SetPolicies(nil) = %q, want allow", got)
+	}
+}
+
+// TestSetPoliciesConcurrentWithDecide is a race-detector stress test:
+// SetPolicies from one goroutine while many others call Decide, proving the
+// atomic.Pointer swap (not a plain field) is what makes Engine safe for
+// concurrent use once policies stop being fixed at construction time. Run
+// with -race; this test asserts no panic/race, not a specific outcome.
+func TestSetPoliciesConcurrentWithDecide(t *testing.T) {
+	engine := testEngine(t)
+	altSet, err := policy.Compile([]policy.Policy{
+		{Name: "alt", Target: "agent://acme.example/*", DenyTool: []string{"x"}},
+	})
+	if err != nil {
+		t.Fatalf("policy.Compile: %v", err)
+	}
+
+	stop := make(chan struct{})
+	setterDone := make(chan struct{})
+	go func() {
+		defer close(setterDone)
+		toggle := false
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				if toggle {
+					engine.SetPolicies(altSet)
+				} else {
+					engine.SetPolicies(policy.Empty())
+				}
+				toggle = !toggle
+			}
+		}
+	}()
+
+	var deciders sync.WaitGroup
+	for range 50 {
+		deciders.Add(1)
+		go func() {
+			defer deciders.Done()
+			engine.Decide(DecideRequest{AgentID: "agent://acme.example/finance/bot1", RunID: "r1"})
+		}()
+	}
+	deciders.Wait()
+	close(stop)
+	<-setterDone
 }
 
 // TestDecideCacheable covers Cacheable directly: false whenever a matched

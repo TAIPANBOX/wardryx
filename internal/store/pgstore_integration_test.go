@@ -10,9 +10,12 @@ import (
 	"context"
 	"errors"
 	"os"
+	"reflect"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/TAIPANBOX/wardryx/internal/policy"
 )
 
 func testDB(t *testing.T) *Postgres {
@@ -25,7 +28,7 @@ func testDB(t *testing.T) *Postgres {
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
-	if _, err := p.db.Exec(`TRUNCATE approvals, approval_redemptions`); err != nil {
+	if _, err := p.db.Exec(`TRUNCATE approvals, approval_redemptions, policies`); err != nil {
 		t.Fatalf("truncate: %v", err)
 	}
 	t.Cleanup(func() { p.Close() })
@@ -209,5 +212,137 @@ func TestPgTryRedeemRaceSafe(t *testing.T) {
 	}
 	if wins != 1 {
 		t.Errorf("concurrent TryRedeem(pg-contended-key) across %d goroutines: %d observed true, want exactly 1", n, wins)
+	}
+}
+
+// ------------------------------------------------------------------
+// Policy CRUD against a real Postgres, mirroring the Memory coverage in
+// memory_test.go so both Store implementations are proven to behave
+// identically, per store.go's documented contract.
+// ------------------------------------------------------------------
+
+func TestPgPutAndGetPolicy(t *testing.T) {
+	p := testDB(t)
+	ctx := context.Background()
+	pol := policy.Policy{Name: "finance-guardrail", Target: "agent://acme.example/finance/*", DenyTool: []string{"send_wire_transfer"}, RequireHumanAboveUSD: 500}
+	updatedAt := time.Date(2026, 7, 13, 12, 0, 0, 0, time.UTC)
+
+	if err := p.PutPolicy(ctx, "finance", pol, updatedAt); err != nil {
+		t.Fatalf("PutPolicy: %v", err)
+	}
+	got, err := p.GetPolicy(ctx, "finance")
+	if err != nil {
+		t.Fatalf("GetPolicy: %v", err)
+	}
+	if got.ID != "finance" || got.Policy.Target != pol.Target || got.Policy.RequireHumanAboveUSD != 500 {
+		t.Errorf("GetPolicy = %+v, want id=finance matching %+v", got, pol)
+	}
+	if len(got.Policy.DenyTool) != 1 || got.Policy.DenyTool[0] != "send_wire_transfer" {
+		t.Errorf("DenyTool = %v, want [send_wire_transfer]", got.Policy.DenyTool)
+	}
+	if !got.UpdatedAt.Equal(updatedAt) {
+		t.Errorf("UpdatedAt = %v, want %v", got.UpdatedAt, updatedAt)
+	}
+}
+
+func TestPgGetPolicyNotFound(t *testing.T) {
+	p := testDB(t)
+	if _, err := p.GetPolicy(context.Background(), "does-not-exist"); !errors.Is(err, ErrNotFound) {
+		t.Errorf("GetPolicy(missing) = %v, want ErrNotFound", err)
+	}
+}
+
+// TestPgPutPolicyReplacesExisting proves the ON CONFLICT DO UPDATE upsert
+// works against a real Postgres, not just Memory's map assignment.
+func TestPgPutPolicyReplacesExisting(t *testing.T) {
+	p := testDB(t)
+	ctx := context.Background()
+	if err := p.PutPolicy(ctx, "p1", policy.Policy{Name: "v1", Target: "agent://x/*", MaxSteps: 5}, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.PutPolicy(ctx, "p1", policy.Policy{Name: "v2", Target: "agent://x/*", MaxSteps: 10}, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	got, err := p.GetPolicy(ctx, "p1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Policy.Name != "v2" || got.Policy.MaxSteps != 10 {
+		t.Errorf("GetPolicy after replace = %+v, want the second write (v2, MaxSteps=10)", got.Policy)
+	}
+
+	// Exactly one row for this id, not two -- ON CONFLICT DO UPDATE, not a
+	// second INSERT that would violate the primary key or silently duplicate.
+	list, err := p.ListPolicies(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(list) != 1 {
+		t.Errorf("ListPolicies after replace = %+v, want exactly 1 row for policy_id=p1", list)
+	}
+}
+
+func TestPgListPoliciesOrderedByID(t *testing.T) {
+	p := testDB(t)
+	ctx := context.Background()
+	for _, id := range []string{"zebra", "alpha", "mid"} {
+		if err := p.PutPolicy(ctx, id, policy.Policy{Target: "agent://x/*"}, time.Now()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	list, err := p.ListPolicies(ctx)
+	if err != nil {
+		t.Fatalf("ListPolicies: %v", err)
+	}
+	if len(list) != 3 || list[0].ID != "alpha" || list[1].ID != "mid" || list[2].ID != "zebra" {
+		t.Fatalf("ListPolicies = %+v, want [alpha, mid, zebra]", list)
+	}
+}
+
+func TestPgDeletePolicy(t *testing.T) {
+	p := testDB(t)
+	ctx := context.Background()
+	if err := p.PutPolicy(ctx, "p1", policy.Policy{Target: "agent://x/*"}, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.DeletePolicy(ctx, "p1"); err != nil {
+		t.Fatalf("DeletePolicy: %v", err)
+	}
+	if _, err := p.GetPolicy(ctx, "p1"); !errors.Is(err, ErrNotFound) {
+		t.Errorf("GetPolicy after delete = %v, want ErrNotFound", err)
+	}
+}
+
+func TestPgDeletePolicyNotFound(t *testing.T) {
+	p := testDB(t)
+	if err := p.DeletePolicy(context.Background(), "does-not-exist"); !errors.Is(err, ErrNotFound) {
+		t.Errorf("DeletePolicy(missing) = %v, want ErrNotFound", err)
+	}
+}
+
+// TestPgPolicyRoundTripsFullPolicyShape proves every Policy field survives
+// the JSONB round trip, not just the fields the other tests happen to set.
+func TestPgPolicyRoundTripsFullPolicyShape(t *testing.T) {
+	p := testDB(t)
+	ctx := context.Background()
+	full := policy.Policy{
+		Name:                 "full",
+		Target:               "agent://acme.example/*",
+		DenyTool:             []string{"a", "b"},
+		AllowDomains:         []string{"good.example.com"},
+		RequireHumanAboveUSD: 500,
+		DenyAboveUSD:         5000,
+		MaxSteps:             40,
+		DenyIfUnattested:     true,
+	}
+	if err := p.PutPolicy(ctx, "full", full, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	got, err := p.GetPolicy(ctx, "full")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got.Policy, full) {
+		t.Errorf("round-tripped policy = %+v, want %+v", got.Policy, full)
 	}
 }
