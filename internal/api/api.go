@@ -21,6 +21,7 @@ import (
 
 	"github.com/TAIPANBOX/agent-stack-go/event"
 	"github.com/TAIPANBOX/wardryx/internal/approval"
+	wotel "github.com/TAIPANBOX/wardryx/internal/otel"
 	"github.com/TAIPANBOX/wardryx/internal/pdp"
 	"github.com/TAIPANBOX/wardryx/internal/store"
 )
@@ -41,6 +42,7 @@ type Server struct {
 	engine            *pdp.Engine
 	store             store.Store
 	events            *event.Writer
+	otel              *wotel.Exporter
 	keys              map[string]Principal
 	approvalSecret    []byte
 	approvalTTL       time.Duration
@@ -48,16 +50,19 @@ type Server struct {
 }
 
 // New returns a Server. events may be nil, which makes event emission a
-// silent no-op (opt-in, per WARDRYX_EVENTS_PATH). keys should come from
-// ParseKeys, which never returns an empty map. approvalSingleUse is
-// WARDRYX_APPROVAL_SINGLE_USE (internal/config): false preserves the
+// silent no-op (opt-in, per WARDRYX_EVENTS_PATH). otel may also be nil,
+// which makes OTLP span export a silent no-op (opt-in, per
+// WARDRYX_OTLP_ENDPOINT; see internal/otel and exportSpan). keys should
+// come from ParseKeys, which never returns an empty map. approvalSingleUse
+// is WARDRYX_APPROVAL_SINGLE_USE (internal/config): false preserves the
 // original behavior of a granted approval_token staying reusable for its
 // full TTL; see handleDecide.
-func New(engine *pdp.Engine, st store.Store, events *event.Writer, keys map[string]Principal, approvalSecret []byte, approvalSingleUse bool) *Server {
+func New(engine *pdp.Engine, st store.Store, events *event.Writer, otel *wotel.Exporter, keys map[string]Principal, approvalSecret []byte, approvalSingleUse bool) *Server {
 	return &Server{
 		engine:            engine,
 		store:             st,
 		events:            events,
+		otel:              otel,
 		keys:              keys,
 		approvalSecret:    approvalSecret,
 		approvalTTL:       approval.DefaultTTL,
@@ -205,10 +210,12 @@ func (s *Server) handleDecide(w http.ResponseWriter, r *http.Request, principal 
 	case pdp.Allow:
 		s.emit(evPolicyAllow, event.SeverityInfo, req.AgentID, req.RunID, req.OnBehalfOf,
 			map[string]any{"reason": resp.Reason, "tool_names": req.ToolNames})
+		s.exportSpan(req.AgentID, req.RunID, resp.Decision, resp.Reason, resp.PolicyVersion, req.ToolNames)
 
 	case pdp.Deny:
 		s.emit(evPolicyDeny, event.SeverityHigh, req.AgentID, req.RunID, req.OnBehalfOf,
 			map[string]any{"reason": resp.Reason, "tool_names": req.ToolNames})
+		s.exportSpan(req.AgentID, req.RunID, resp.Decision, resp.Reason, resp.PolicyVersion, req.ToolNames)
 		// A presented-but-expired approval_token is a more specific signal
 		// than a generic deny: the human-in-the-loop window closed before
 		// the agent redeemed it. Surfaced as its own event on top of the
@@ -239,6 +246,7 @@ func (s *Server) handleDecide(w http.ResponseWriter, r *http.Request, principal 
 		resp.ApprovalID = held.ApprovalID
 		s.emit(evApprovalRequested, event.SeverityMedium, req.AgentID, req.RunID, req.OnBehalfOf,
 			map[string]any{"approval_id": held.ApprovalID, "reason": resp.Reason})
+		s.exportSpan(req.AgentID, req.RunID, resp.Decision, resp.Reason, resp.PolicyVersion, req.ToolNames)
 	}
 
 	writeJSON(w, http.StatusOK, decideResponseDTO{
@@ -405,4 +413,23 @@ func (s *Server) emit(evType, severity, agentID, runID string, onBehalfOf []stri
 	if err := s.events.Write(e); err != nil {
 		log.Printf("wardryx: failed to write %s event: %v", evType, err)
 	}
+}
+
+// exportSpan posts one OTLP span for a /v1/decide outcome. A nil otel
+// exporter (WARDRYX_OTLP_ENDPOINT unset) makes this a no-op, matching
+// emit's contract for a nil events Writer. Export itself is fire-and-forget
+// (see internal/otel), so this never blocks handleDecide.
+func (s *Server) exportSpan(agentID, runID, decision, reason, policyVersion string, toolNames []string) {
+	if s.otel == nil {
+		return
+	}
+	s.otel.Export(wotel.Span{
+		AgentID:       agentID,
+		RunID:         runID,
+		Decision:      decision,
+		Reason:        reason,
+		PolicyVersion: policyVersion,
+		ToolNames:     toolNames,
+		TimestampNs:   time.Now().UnixNano(),
+	})
 }

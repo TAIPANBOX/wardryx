@@ -41,9 +41,10 @@ type Config struct {
 	// full TTL -- unset (or any value that does not parse as a bool) is
 	// always false, never a fail-open/fail-closed ambiguity.
 	ApprovalSingleUse bool
-	// OTLPEndpoint is WARDRYX_OTLP_ENDPOINT. Read and carried on Config
-	// for forward compatibility; nothing in this build exports traces or
-	// metrics yet, so it is not otherwise consulted today.
+	// OTLPEndpoint is WARDRYX_OTLP_ENDPOINT (or -otlp-endpoint): the
+	// OTLP/HTTP endpoint internal/otel.Exporter posts one span to per
+	// /v1/decide outcome. Empty disables OTLP export entirely -- see
+	// internal/otel and internal/api.Server.exportSpan.
 	OTLPEndpoint string
 }
 

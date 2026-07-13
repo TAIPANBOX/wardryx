@@ -160,6 +160,16 @@ Single-use redemption tracking has the same durability split as approval holds t
 
 ---
 
+## OTLP export
+
+`WARDRYX_OTLP_ENDPOINT` (or `-otlp-endpoint`) turns on one exported span per `/v1/decide` outcome -- allow, deny, or hold -- posted to `<endpoint>/v1/traces`. `internal/otel` builds the OTLP/HTTP-JSON payload directly (no OpenTelemetry SDK dependency), mirroring TokenFuse's own exporter (`crates/gateway/src/otel.rs`): small, hand-rolled, and a fire-and-forget POST from a background goroutine, so a slow or unreachable collector never adds latency to `/v1/decide` and a delivery failure is dropped silently, never surfaced to the caller.
+
+Every decision belonging to one `run_id` shares a trace id (derived from `run_id` alone, SHA-256-based), so a run's `hold` followed later by an `allow` once approved shows up as one trace with two spans in Grafana/Datadog/Honeycomb, not two unrelated traces. Each span carries `wardryx.agent_id`, `wardryx.run_id`, `wardryx.decision`, and, when present, `wardryx.reason`, `wardryx.policy_version`, and `wardryx.tool_names`. The trace id derivation is Wardryx-internal, not shared with TokenFuse's own (Rust's hasher has no portable Go equivalent), so spans from the two services for the same `run_id` correlate today via the shared `run_id` attribute, not automatic trace grouping across services.
+
+Empty (the default): zero cost, no goroutines, no allocation beyond the config read at startup -- identical to the exporter never having been added.
+
+---
+
 ## Enforcement modes (at the PEP)
 
 <div align="center">
@@ -190,7 +200,8 @@ Beyond the decision engine and the approval flow above, Wardryx ships:
 1. **HTTP API** (`internal/api`): `POST /v1/decide`, `POST /v1/approvals/{id}/decide` (admin only), `GET /v1/approvals` (org-scoped), `GET /healthz`. Bearer-key auth mirrors the Cloud plane's `key:org[:role]` convention (TokenFuse `crates/cloud/src/keys.rs`), reimplemented in Go for the same wire format.
 2. **Storage** (`internal/store`): Postgres via `pgx/v5` with an embedded, idempotent `schema.sql`, or an in-memory store when no DSN is configured. Both implementations satisfy the same `Store` interface.
 3. **Events** (`source: wardryx`): optional NDJSON `agent-event` output (`WARDRYX_EVENTS_PATH`) via `agent-stack-go/event`: `policy_allow`, `policy_deny`, `approval_requested`, `approval_granted`, `approval_denied`, `approval_timeout`.
-4. **CLI** (`cmd/wardryx`): `serve`, `check` (an offline dry-run over a directory of Agent Passports), `approvals` (list from Postgres), `version`.
+4. **OTLP export** (`internal/otel`): optional one-span-per-decision export to an OTLP/HTTP collector (`WARDRYX_OTLP_ENDPOINT`), see [OTLP export](#otlp-export).
+5. **CLI** (`cmd/wardryx`): `serve`, `check` (an offline dry-run over a directory of Agent Passports), `approvals` (list from Postgres), `version`.
 
 ---
 
@@ -204,6 +215,7 @@ internal/approval       approval_token minting/verification (HMAC-SHA256) + hold
 internal/store          Store interface; Postgres (pgx/v5, embedded schema.sql) + in-memory
 internal/api            net/http API: bearer auth, /v1/decide, /v1/approvals, /healthz
 internal/passports      directory loader for the offline `check` command (agent-stack-go/passport)
+internal/otel           OTLP/HTTP-JSON span export, one per /v1/decide outcome
 internal/config         WARDRYX_* environment variables, read once at startup
 ```
 
@@ -231,7 +243,7 @@ make build
 
 # serve: HTTP policy decision API
 ./bin/wardryx serve                                    # :8090, in-memory store, no policy (allows everything)
-./bin/wardryx serve -addr :9000 -policy ./policies -db "$DSN" -events ./events.ndjson
+./bin/wardryx serve -addr :9000 -policy ./policies -db "$DSN" -events ./events.ndjson -otlp-endpoint http://localhost:4318
 
 # check: offline dry-run over a directory of Agent Passports
 ./bin/wardryx check ./passports ./policies/finance.yaml
@@ -280,7 +292,7 @@ Every `WARDRYX_*` variable is read once at process startup (`internal/config`), 
 | `WARDRYX_EVENTS_PATH` | `-events` | NDJSON agent-event output path; empty disables events |
 | `WARDRYX_APPROVAL_SECRET` | (none) | HMAC key for approval tokens; unset fails closed on any mint/verify |
 | `WARDRYX_APPROVAL_SINGLE_USE` | (none) | `true` makes each granted token allow exactly one `/v1/decide` call; default `false` keeps a token reusable for its full TTL (see [Stateless human-in-the-loop](#stateless-human-in-the-loop)) |
-| `WARDRYX_OTLP_ENDPOINT` | (none) | Reserved for a future OTLP exporter; read into `Config` but not otherwise consulted by this build |
+| `WARDRYX_OTLP_ENDPOINT` | `-otlp-endpoint` | OTLP/HTTP endpoint for decision spans (see [OTLP export](#otlp-export)); empty disables it |
 
 The `[:role]` segment of a `WARDRYX_KEYS` entry is one of `admin` (every endpoint, including `POST /v1/approvals/{id}/decide`) or `viewer` (every other authenticated endpoint), and defaults to `admin` when the segment is omitted.
 
@@ -320,8 +332,8 @@ Wardryx is itself a security-relevant component, so a few of its own defaults ar
 - [x] Storage: Postgres (`pgx/v5`, embedded schema) and in-memory, behind one `Store` interface
 - [x] `agent-event` NDJSON output (`policy_allow` / `policy_deny` / `approval_*`)
 - [x] CLI: `serve`, `check` (offline dry-run), `approvals`, `version`
+- [x] OTLP exporter: one span per `/v1/decide` outcome to `WARDRYX_OTLP_ENDPOINT`/`-otlp-endpoint`, fire-and-forget, no-op when unset (`internal/otel`)
 - [ ] Policies as code via terraform-provider-taipan (planned, not yet wired)
-- [ ] OTLP exporter (`WARDRYX_OTLP_ENDPOINT` is reserved; not yet consulted by this build)
 
 ## License
 

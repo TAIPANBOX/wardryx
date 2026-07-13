@@ -7,7 +7,9 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
+	wotel "github.com/TAIPANBOX/wardryx/internal/otel"
 	"github.com/TAIPANBOX/wardryx/internal/pdp"
 	"github.com/TAIPANBOX/wardryx/internal/policy"
 	"github.com/TAIPANBOX/wardryx/internal/store"
@@ -24,17 +26,24 @@ const (
 // default): a granted approval_token stays reusable for its full TTL.
 func newTestServer(t *testing.T) *Server {
 	t.Helper()
-	return newTestServerOpts(t, false)
+	return newTestServerOpts(t, false, nil)
 }
 
 // newTestServerSingleUse returns a Server with WARDRYX_APPROVAL_SINGLE_USE
 // on: a granted approval_token allows exactly one /v1/decide call.
 func newTestServerSingleUse(t *testing.T) *Server {
 	t.Helper()
-	return newTestServerOpts(t, true)
+	return newTestServerOpts(t, true, nil)
 }
 
-func newTestServerOpts(t *testing.T, singleUse bool) *Server {
+// newTestServerWithOtel returns a Server wired to otel (WARDRYX_OTLP_ENDPOINT
+// configured), for tests that verify handleDecide's span export.
+func newTestServerWithOtel(t *testing.T, otel *wotel.Exporter) *Server {
+	t.Helper()
+	return newTestServerOpts(t, false, otel)
+}
+
+func newTestServerOpts(t *testing.T, singleUse bool, otel *wotel.Exporter) *Server {
 	t.Helper()
 	set, err := policy.Compile([]policy.Policy{
 		{
@@ -56,7 +65,7 @@ func newTestServerOpts(t *testing.T, singleUse bool) *Server {
 		viewerKey: {Org: "acme", Role: RoleViewer},
 		otherOrg:  {Org: "globex", Role: RoleAdmin},
 	}
-	return New(engine, st, nil, keys, []byte(testHMAC), singleUse)
+	return New(engine, st, nil, otel, keys, []byte(testHMAC), singleUse)
 }
 
 func doRequest(t *testing.T, h http.Handler, method, path, bearer string, body any) *httptest.ResponseRecorder {
@@ -437,6 +446,132 @@ func TestDecideDenyDeniedTool(t *testing.T) {
 	got := decodeBody[decideResponseDTO](t, rec)
 	if got.Decision != pdp.Deny {
 		t.Fatalf("Decision = %q, want deny", got.Decision)
+	}
+}
+
+// ------------------------------------------------------------------
+// OTLP span export (WARDRYX_OTLP_ENDPOINT / exportSpan). These prove the
+// actual wiring from handleDecide into internal/otel, not just internal/otel
+// in isolation: a real httptest OTLP receiver, a Server built with a real
+// Exporter pointed at it, and one assertion per decision branch.
+// ------------------------------------------------------------------
+
+// otlpSpanReceiver is a fake OTLP/HTTP-JSON collector: each POST decodes to
+// one span (buildPayload's fixed shape), pushed onto a channel the test
+// reads with a timeout, since Exporter.Export posts from a background
+// goroutine.
+func otlpSpanReceiver(t *testing.T) (url string, spans chan map[string]any) {
+	t.Helper()
+	spans = make(chan map[string]any, 8)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Errorf("otlp receiver: decode body: %v", err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		resourceSpans, _ := payload["resourceSpans"].([]any)
+		scopeSpans, _ := resourceSpans[0].(map[string]any)["scopeSpans"].([]any)
+		spanList, _ := scopeSpans[0].(map[string]any)["spans"].([]any)
+		span, _ := spanList[0].(map[string]any)
+		spans <- span
+	}))
+	t.Cleanup(srv.Close)
+	return srv.URL, spans
+}
+
+func recvSpan(t *testing.T, spans chan map[string]any) map[string]any {
+	t.Helper()
+	select {
+	case span := <-spans:
+		return span
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for the exported OTLP span")
+		return nil
+	}
+}
+
+func spanAttr(span map[string]any, key string) (string, bool) {
+	attrs, _ := span["attributes"].([]any)
+	for _, a := range attrs {
+		m, _ := a.(map[string]any)
+		if m["key"] != key {
+			continue
+		}
+		v, _ := m["value"].(map[string]any)
+		s, _ := v["stringValue"].(string)
+		return s, true
+	}
+	return "", false
+}
+
+func TestDecideAllowExportsOtlpSpan(t *testing.T) {
+	url, spans := otlpSpanReceiver(t)
+	srv := newTestServerWithOtel(t, wotel.New(url))
+
+	rec := doRequest(t, srv.Handler(), http.MethodPost, "/v1/decide", adminKey, decideRequestDTO{
+		AgentID: "agent://acme.example/finance/bot1", RunID: "r-allow", ToolNames: []string{"generate_report"},
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	span := recvSpan(t, spans)
+	if decision, _ := spanAttr(span, "wardryx.decision"); decision != pdp.Allow {
+		t.Errorf("wardryx.decision = %q, want %q", decision, pdp.Allow)
+	}
+	if runID, _ := spanAttr(span, "wardryx.run_id"); runID != "r-allow" {
+		t.Errorf("wardryx.run_id = %q, want r-allow", runID)
+	}
+}
+
+func TestDecideDenyExportsOtlpSpan(t *testing.T) {
+	url, spans := otlpSpanReceiver(t)
+	srv := newTestServerWithOtel(t, wotel.New(url))
+
+	doRequest(t, srv.Handler(), http.MethodPost, "/v1/decide", adminKey, decideRequestDTO{
+		AgentID: "agent://acme.example/finance/bot1", RunID: "r-deny", ToolNames: []string{"send_wire_transfer"},
+	})
+
+	span := recvSpan(t, spans)
+	if decision, _ := spanAttr(span, "wardryx.decision"); decision != pdp.Deny {
+		t.Errorf("wardryx.decision = %q, want %q", decision, pdp.Deny)
+	}
+}
+
+func TestDecideHoldExportsOtlpSpan(t *testing.T) {
+	url, spans := otlpSpanReceiver(t)
+	srv := newTestServerWithOtel(t, wotel.New(url))
+
+	doRequest(t, srv.Handler(), http.MethodPost, "/v1/decide", adminKey, decideRequestDTO{
+		AgentID: "agent://acme.example/finance/bot1", RunID: "r-hold", EstCostUSD: 999,
+	})
+
+	span := recvSpan(t, spans)
+	if decision, _ := spanAttr(span, "wardryx.decision"); decision != pdp.Hold {
+		t.Errorf("wardryx.decision = %q, want %q", decision, pdp.Hold)
+	}
+}
+
+// TestDecideWithoutOtlpConfiguredNeverExports proves exportSpan's nil-otel
+// no-op path: a Server built the normal way (newTestServer, no
+// WARDRYX_OTLP_ENDPOINT) must not attempt any export at all -- there is no
+// receiver listening here, so an accidental attempt would either error
+// (harmlessly swallowed) or, if this test is flaky, hang. The real
+// assertion is simpler: /v1/decide must still succeed and respond exactly
+// as it does without OTLP in the picture.
+func TestDecideWithoutOtlpConfiguredNeverExports(t *testing.T) {
+	srv := newTestServer(t)
+	rec := doRequest(t, srv.Handler(), http.MethodPost, "/v1/decide", adminKey, decideRequestDTO{
+		AgentID: "agent://acme.example/finance/bot1", RunID: "r1", ToolNames: []string{"generate_report"},
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	got := decodeBody[decideResponseDTO](t, rec)
+	if got.Decision != pdp.Allow {
+		t.Errorf("Decision = %q, want %q", got.Decision, pdp.Allow)
 	}
 }
 

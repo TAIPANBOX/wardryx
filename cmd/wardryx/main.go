@@ -21,6 +21,7 @@ import (
 	"github.com/TAIPANBOX/agent-stack-go/event"
 	"github.com/TAIPANBOX/wardryx/internal/api"
 	"github.com/TAIPANBOX/wardryx/internal/config"
+	wotel "github.com/TAIPANBOX/wardryx/internal/otel"
 	"github.com/TAIPANBOX/wardryx/internal/passports"
 	"github.com/TAIPANBOX/wardryx/internal/pdp"
 	"github.com/TAIPANBOX/wardryx/internal/policy"
@@ -67,9 +68,9 @@ commands:
   approvals  list pending/decided approvals from Postgres (-db)
   version    print version
 
-Every serve flag (-addr, -policy, -db, -events) falls back to its
-WARDRYX_* environment variable when the flag itself is unset; WARDRYX_KEYS,
-WARDRYX_APPROVAL_SECRET, and WARDRYX_APPROVAL_SINGLE_USE are
+Every serve flag (-addr, -policy, -db, -events, -otlp-endpoint) falls back
+to its WARDRYX_* environment variable when the flag itself is unset;
+WARDRYX_KEYS, WARDRYX_APPROVAL_SECRET, and WARDRYX_APPROVAL_SINGLE_USE are
 environment-only (no flag).`)
 }
 
@@ -82,6 +83,7 @@ func runServe(args []string) error {
 	policyPath := fs.String("policy", cfg.Policy, "policy file or directory, YAML or JSON (WARDRYX_POLICY); empty allows every request")
 	dbDSN := fs.String("db", cfg.DB, "Postgres DSN (WARDRYX_DB); empty uses an in-memory approval store")
 	eventsPath := fs.String("events", cfg.EventsPath, "NDJSON path for agent-event output (WARDRYX_EVENTS_PATH); empty disables events")
+	otlpEndpoint := fs.String("otlp-endpoint", cfg.OTLPEndpoint, "OTLP/HTTP endpoint for decision spans (WARDRYX_OTLP_ENDPOINT); empty disables OTLP export")
 	fs.Usage = func() {
 		fmt.Fprintf(os.Stderr, "usage: wardryx serve [flags]\n\nflags:\n")
 		fs.PrintDefaults()
@@ -129,9 +131,15 @@ func runServe(args []string) error {
 		events = ew
 	}
 
+	var otelExporter *wotel.Exporter
+	if *otlpEndpoint != "" {
+		otelExporter = wotel.New(*otlpEndpoint)
+		fmt.Fprintf(os.Stderr, "wardryx: exporting OTLP decision spans to %s\n", *otlpEndpoint)
+	}
+
 	keys := api.ParseKeys(cfg.Keys)
 	engine := pdp.New(policies, []byte(cfg.ApprovalSecret))
-	srv := api.New(engine, st, events, keys, []byte(cfg.ApprovalSecret), cfg.ApprovalSingleUse)
+	srv := api.New(engine, st, events, otelExporter, keys, []byte(cfg.ApprovalSecret), cfg.ApprovalSingleUse)
 
 	fmt.Fprintf(os.Stderr, "wardryx: serving on http://%s\n", displayAddr(*addr))
 	httpSrv := &http.Server{
