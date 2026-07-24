@@ -7,10 +7,13 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/TAIPANBOX/agent-stack-go/event"
 	wotel "github.com/TAIPANBOX/wardryx/internal/otel"
 	"github.com/TAIPANBOX/wardryx/internal/pdp"
 	"github.com/TAIPANBOX/wardryx/internal/policy"
@@ -918,5 +921,118 @@ func TestPutPolicyMissingIDSegmentRejected(t *testing.T) {
 	rec := doRequest(t, srv.Handler(), http.MethodPut, "/v1/policies/", adminKey, policy.Policy{Target: "agent://x/*"})
 	if rec.Code == http.StatusOK {
 		t.Fatalf("PUT /v1/policies/ (no id) succeeded, want a client error")
+	}
+}
+
+// ------------------------------------------------------------------
+// Event chain (agent-stack-go event.ChainedWriter, SPEC 6.5 prev_hash).
+// These prove the wiring from handleDecide's real emit calls into a real
+// ChainedWriter on disk, not just event.ChainedWriter in isolation: a
+// temp-file chain, a Server built with it, decisions driven over HTTP the
+// same way every other /v1/decide test does, then the file re-opened
+// (simulating a process restart) and verified end to end.
+// ------------------------------------------------------------------
+
+// newTestServerWithEvents returns a Server whose events writer is a real
+// *event.ChainedWriter appending to path, alongside the writer itself so a
+// test can inspect ResumedFrom() or Close it early to exercise a reopen.
+func newTestServerWithEvents(t *testing.T, path string) (*Server, *event.ChainedWriter) {
+	t.Helper()
+	ew, err := event.NewChainedWriter(path)
+	if err != nil {
+		t.Fatalf("NewChainedWriter: %v", err)
+	}
+	set, err := policy.Compile([]policy.Policy{
+		{
+			Name:                 "finance-guardrail",
+			Target:               "agent://acme.example/finance/*",
+			DenyTool:             []string{"send_wire_transfer"},
+			AllowDomains:         []string{"good.example.com"},
+			RequireHumanAboveUSD: 500,
+			MaxSteps:             5,
+		},
+	})
+	if err != nil {
+		t.Fatalf("policy.Compile: %v", err)
+	}
+	engine := pdp.New(set, []byte(testHMAC))
+	keys := map[string]Principal{adminKey: {Org: "acme", Role: RoleAdmin}}
+	return New(engine, store.NewMemory(), ew, nil, keys, []byte(testHMAC), false, set.Policies()), ew
+}
+
+// TestEmittedEventsChainAcrossDecisionsAndResume drives two /v1/decide
+// calls (an allow and a deny) through one ChainedWriter, closes it, reopens
+// against the same file (a fresh Server, standing in for a process
+// restart), emits once more, and finally checks the whole file with
+// event.VerifyChain: exactly one head, no restart, no break.
+func TestEmittedEventsChainAcrossDecisionsAndResume(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "events.ndjson")
+
+	srv, ew := newTestServerWithEvents(t, path)
+	if ew.ResumedFrom() != "" {
+		t.Fatalf("fresh file must start a fresh chain, got %q", ew.ResumedFrom())
+	}
+	doRequest(t, srv.Handler(), http.MethodPost, "/v1/decide", adminKey, decideRequestDTO{
+		AgentID: "agent://acme.example/finance/bot1", RunID: "r1", ToolNames: []string{"generate_report"},
+	})
+	doRequest(t, srv.Handler(), http.MethodPost, "/v1/decide", adminKey, decideRequestDTO{
+		AgentID: "agent://acme.example/finance/bot1", RunID: "r2", ToolNames: []string{"send_wire_transfer"},
+	})
+	if err := ew.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	events, err := event.ReadFile(path)
+	if err != nil {
+		t.Fatalf("event.ReadFile: %v", err)
+	}
+	if len(events) != 2 {
+		t.Fatalf("got %d events, want 2 (policy_allow + policy_deny)", len(events))
+	}
+	if events[0].PrevHash != "" {
+		t.Fatalf("head event must carry no prev_hash, got %q", events[0].PrevHash)
+	}
+	wantH1, err := event.ChainHash(events[0])
+	if err != nil {
+		t.Fatalf("ChainHash: %v", err)
+	}
+	if events[1].PrevHash != wantH1 {
+		t.Fatalf("event[1].PrevHash = %q, want %q (hash of event[0])", events[1].PrevHash, wantH1)
+	}
+
+	// Reopen against the same file through a fresh Server: the chain must
+	// CONTINUE from event[1]'s hash, not restart a second head.
+	srv2, ew2 := newTestServerWithEvents(t, path)
+	wantH2, err := event.ChainHash(events[1])
+	if err != nil {
+		t.Fatalf("ChainHash: %v", err)
+	}
+	if ew2.ResumedFrom() != wantH2 {
+		t.Fatalf("resume: got %q want %q", ew2.ResumedFrom(), wantH2)
+	}
+	doRequest(t, srv2.Handler(), http.MethodPost, "/v1/decide", adminKey, decideRequestDTO{
+		AgentID: "agent://acme.example/finance/bot1", RunID: "r3", ToolNames: []string{"generate_report"},
+	})
+	if err := ew2.Close(); err != nil {
+		t.Fatalf("close 2: %v", err)
+	}
+
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer f.Close()
+	report, err := event.VerifyChain(f)
+	if err != nil {
+		t.Fatalf("VerifyChain: %v", err)
+	}
+	if !report.Ok() {
+		t.Fatalf("VerifyChain reported a break: %+v", report)
+	}
+	if len(report.HeadLines) != 1 {
+		t.Fatalf("expected exactly 1 chain head (no restart across the reopen), got %+v", report.HeadLines)
+	}
+	if report.Chained != 2 {
+		t.Fatalf("expected 2 chained events, got %+v", report)
 	}
 }

@@ -121,14 +121,19 @@ func runServe(args []string) error {
 		fmt.Fprintln(os.Stderr, warn)
 	}
 
-	var events *event.Writer
+	var events *event.ChainedWriter
 	if *eventsPath != "" {
-		ew, err := event.NewWriter(*eventsPath)
+		ew, err := event.NewChainedWriter(*eventsPath)
 		if err != nil {
 			return fmt.Errorf("open events writer: %w", err)
 		}
 		defer ew.Close()
 		events = ew
+		if resumed := ew.ResumedFrom(); resumed != "" {
+			fmt.Fprintf(os.Stderr, "wardryx: resumed the event chain in %s from %s\n", *eventsPath, chainPreview(resumed))
+		} else {
+			fmt.Fprintf(os.Stderr, "wardryx: starting a fresh event chain in %s\n", *eventsPath)
+		}
 	}
 
 	var otelExporter *wotel.Exporter
@@ -193,6 +198,17 @@ func orDefault(v, def string) string {
 		return def
 	}
 	return v
+}
+
+// chainPreview returns a short, log-safe preview of a SPEC 6.5 chain hash
+// ("sha256:" plus its first 12 hex characters): enough to eyeball a resume
+// across restarts in server output, never the full digest.
+func chainPreview(hash string) string {
+	const n = len(event.ChainHashPrefix) + 12
+	if len(hash) <= n {
+		return hash
+	}
+	return hash[:n]
 }
 
 // --- check ---
