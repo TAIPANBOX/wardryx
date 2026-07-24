@@ -71,7 +71,7 @@ const systemAgentID = "agent://wardryx.internal/admin/policy-api"
 type Server struct {
 	engine            *pdp.Engine
 	store             store.Store
-	events            *event.Writer
+	events            *event.ChainedWriter
 	otel              *wotel.Exporter
 	keys              map[string]Principal
 	approvalSecret    []byte
@@ -96,7 +96,7 @@ type Server struct {
 // or empty is valid and means the file path (-policy unset, or set to an
 // empty policy set) contributes no fixed floor, so the admin policy API
 // alone determines what Engine decides against.
-func New(engine *pdp.Engine, st store.Store, events *event.Writer, otel *wotel.Exporter, keys map[string]Principal, approvalSecret []byte, approvalSingleUse bool, basePolicies []policy.Policy) *Server {
+func New(engine *pdp.Engine, st store.Store, events *event.ChainedWriter, otel *wotel.Exporter, keys map[string]Principal, approvalSecret []byte, approvalSingleUse bool, basePolicies []policy.Policy) *Server {
 	return &Server{
 		engine:            engine,
 		store:             st,
@@ -621,11 +621,12 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	_ = enc.Encode(v)
 }
 
-// emit writes one agent-event, source "wardryx". A nil Writer (events
+// emit writes one agent-event, source "wardryx", chained via the SPEC 6.5
+// prev_hash the ChainedWriter stamps on it. A nil ChainedWriter (events
 // disabled: WARDRYX_EVENTS_PATH unset) makes this a no-op. A write failure
-// is logged and dropped, fail-open, matching event.Writer's own contract
-// and TokenFuse's exporter: event delivery never blocks or fails the
-// decision path it is describing.
+// is logged and dropped, fail-open, matching event.ChainedWriter's own
+// contract and TokenFuse's exporter: event delivery never blocks or fails
+// the decision path it is describing.
 func (s *Server) emit(evType, severity, agentID, runID string, onBehalfOf []string, data map[string]any) {
 	if s.events == nil {
 		return

@@ -1,9 +1,11 @@
-github.com/TAIPANBOX/agent-stack-go v0.2.0 h1:JPM37QNjT5XB/WRb3atpK+FVJVi7MLwjNw8osQWIqyY=
-github.com/TAIPANBOX/agent-stack-go v0.2.0/go.mod h1:/Se7sgVn3JWkr1gUVIlUKLg5UdxpjG0wb+5QpBqzCDk=
+github.com/TAIPANBOX/agent-stack-go v0.4.0 h1:yDOFcUMJpsj+RwT86aWC4MSMTJVa9JWbNQkkQqiQjk8=
+github.com/TAIPANBOX/agent-stack-go v0.4.0/go.mod h1:WAcjEEK0eSxHfklrT/lmN297/WCnNGoD3SnqwxEIkK4=
 github.com/creack/pty v1.1.9/go.mod h1:oKZEueFk5CKHvIhNR5MUki03XCEU+Q6VDXinZuGJ33E=
 github.com/davecgh/go-spew v1.1.0/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
 github.com/davecgh/go-spew v1.1.1 h1:vj9j/u1bqnvCEfJOwUhtlOARqs3+rkHYY13jYWTU97c=
 github.com/davecgh/go-spew v1.1.1/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
+github.com/gowebpki/jcs v1.0.1 h1:Qjzg8EOkrOTuWP7DqQ1FbYtcpEbeTzUoTN9bptp8FOU=
+github.com/gowebpki/jcs v1.0.1/go.mod h1:CID1cNZ+sHp1CCpAR8mPf6QRtagFBgPJE0FCUQ6+BrI=
 github.com/jackc/pgpassfile v1.0.0 h1:/6Hmqy13Ss2zCq62VdNG8tM1wchn8zjSGOBJ6icpsIM=
 github.com/jackc/pgpassfile v1.0.0/go.mod h1:CEx0iS5ambNFdcRtxPj5JhEz+xB6uRky5eyVu/W2HEg=
 github.com/jackc/pgservicefile v0.0.0-20240606120523-5a60cdf6a761 h1:iCEnooe7UlwOQYpKFhBabPMi4aNAfoODPEFNiAnClxo=
