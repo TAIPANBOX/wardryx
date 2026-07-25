@@ -1036,3 +1036,61 @@ func TestEmittedEventsChainAcrossDecisionsAndResume(t *testing.T) {
 		t.Fatalf("expected 2 chained events, got %+v", report)
 	}
 }
+
+// --- /v1/status -------------------------------------------------------------
+
+// The whole point of /v1/status: a file-loaded rule is enforced but never
+// appears in /v1/policies, so a caller that reads only that list concludes
+// enforcement is off while it is on. These two must not agree.
+func TestStatusCountsFilePoliciesThatListPoliciesCannotSee(t *testing.T) {
+	srv := newTestServer(t)
+
+	rec := doRequest(t, srv.Handler(), http.MethodGet, "/v1/policies", adminKey, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /v1/policies: %d", rec.Code)
+	}
+	var listed []policyDTO
+	if err := json.Unmarshal(rec.Body.Bytes(), &listed); err != nil {
+		t.Fatalf("decode policies: %v", err)
+	}
+	if len(listed) != 0 {
+		t.Fatalf("the store starts empty; got %d policy(ies)", len(listed))
+	}
+
+	rec = doRequest(t, srv.Handler(), http.MethodGet, "/v1/status", adminKey, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /v1/status: %d", rec.Code)
+	}
+	var st statusDTO
+	if err := json.Unmarshal(rec.Body.Bytes(), &st); err != nil {
+		t.Fatalf("decode status: %v", err)
+	}
+	if st.BasePolicies != 1 {
+		t.Errorf("base_policies = %d, want the 1 file-loaded rule", st.BasePolicies)
+	}
+	if st.StorePolicies != 0 {
+		t.Errorf("store_policies = %d, want 0", st.StorePolicies)
+	}
+	if st.EffectivePolicies != 1 {
+		t.Errorf("effective_policies = %d: this is the number a posture check must read, "+
+			"and reading /v1/policies instead reports enforcement as off while it is on",
+			st.EffectivePolicies)
+	}
+	if st.PolicyVersion == "" {
+		t.Error("policy_version is empty; every decision carries it and status must agree")
+	}
+}
+
+// A viewer may read status: knowing whether anything is enforced at all is not
+// a privileged act, and gating it behind admin would leave the least-privileged
+// reader unable to tell a guarded fleet from an unguarded one.
+func TestStatusIsReadableByAViewer(t *testing.T) {
+	srv := newTestServer(t)
+
+	if rec := doRequest(t, srv.Handler(), http.MethodGet, "/v1/status", viewerKey, nil); rec.Code != http.StatusOK {
+		t.Fatalf("viewer GET /v1/status: %d, want 200", rec.Code)
+	}
+	if rec := doRequest(t, srv.Handler(), http.MethodGet, "/v1/status", "", nil); rec.Code != http.StatusUnauthorized {
+		t.Errorf("unauthenticated GET /v1/status: %d, want 401", rec.Code)
+	}
+}

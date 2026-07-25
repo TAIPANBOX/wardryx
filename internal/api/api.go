@@ -117,6 +117,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/decide", s.requireAuth(s.handleDecide))
 	mux.HandleFunc("POST /v1/approvals/{id}/decide", s.requireAdmin(s.handleApprovalDecide))
 	mux.HandleFunc("GET /v1/approvals", s.requireAuth(s.handleListApprovals))
+	mux.HandleFunc("GET /v1/status", s.requireAuth(s.handleStatus))
 	mux.HandleFunc("GET /v1/policies", s.requireAdmin(s.handleListPolicies))
 	mux.HandleFunc("GET /v1/policies/{id}", s.requireAdmin(s.handleGetPolicy))
 	mux.HandleFunc("PUT /v1/policies/{id}", s.requireAdmin(s.handlePutPolicy))
@@ -459,6 +460,44 @@ func ComputePolicySet(ctx context.Context, st store.Store, basePolicies []policy
 		all = append(all, r.Policy)
 	}
 	return policy.Compile(all)
+}
+
+// statusDTO is what /v1/status answers: how many rules are actually being
+// enforced, and where they came from.
+//
+// This exists because /v1/policies answers a narrower question than it looks
+// like it does. It lists the STORE's operator-managed policies only, so a
+// deployment whose rules come from a -policy file sees an empty list there
+// while every one of those rules is being enforced on /v1/decide. A console
+// reading only that list concludes "no policies, everything is allowed" and
+// says so, which is the most damaging thing a posture check can do: it
+// reports enforcement as off while it is on, and an operator who verifies
+// that claim once stops trusting the other warnings beside it.
+type statusDTO struct {
+	// The effective set's version, the same value every decision carries.
+	PolicyVersion string `json:"policy_version"`
+	// Rules loaded from the -policy file or directory at startup. These never
+	// appear in /v1/policies and cannot be edited through the API.
+	BasePolicies int `json:"base_policies"`
+	// Operator-managed rules held in the store, layered on top of the base.
+	StorePolicies int `json:"store_policies"`
+	// What /v1/decide actually evaluates against. Zero here, and only here,
+	// means every request really is allowed.
+	EffectivePolicies int `json:"effective_policies"`
+}
+
+func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request, _ Principal) {
+	stored, err := s.store.ListPolicies(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, statusDTO{
+		PolicyVersion:     s.engine.PolicyVersion(),
+		BasePolicies:      len(s.basePolicies),
+		StorePolicies:     len(stored),
+		EffectivePolicies: len(s.basePolicies) + len(stored),
+	})
 }
 
 func (s *Server) handleListPolicies(w http.ResponseWriter, r *http.Request, _ Principal) {
