@@ -63,7 +63,18 @@ burst - including two real enforcement gaps that only concurrent traffic exposed
 
 ![Wardryx PDP: 176 decisions, per-agent differentiated rights (analyst denied wire_transfer, treasury allowed, scraper gated on attestation)](assets/09-wardryx.png)
 
-Full write-up and both bugs live testing found (and fixed): [`VALIDATION.md`](VALIDATION.md).
+Then measured at cluster scale on Hetzner, AWS and GCP (six five-node k3s clusters, 25 to 27 July 2026):
+**about 2,450 decisions per second per pod at a p50 of 3.2ms**, with no throughput cliff out to 256
+concurrent callers on dedicated cores, a freeze reaching live traffic in one PDP round trip, and
+**426 bytes of audit for every decision** because every decision is audited rather than a sample.
+That last number is the one to plan against: it is 614 MB a day at a thousand calls a minute, and it is
+the only part of running this that grows without anyone deciding to grow it.
+
+The same runs made us withdraw a published conclusion: we had written that throughput collapses past 64
+concurrent callers. It does not. That was a shared-vCPU instance, not this software.
+
+Full write-up, the cluster numbers, the retraction, and both bugs live testing found (and fixed):
+[`VALIDATION.md`](VALIDATION.md).
 
 ---
 
