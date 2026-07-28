@@ -1,0 +1,68 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="-18 -18 996 376" width="996" height="376" role="img" aria-label="Wardryx: the PEP asks per request, the PDP answers allow, deny or hold">
+  <title>Wardryx: the PEP asks per request, the PDP answers allow, deny or hold</title>
+  <rect x="-18" y="-18" width="996" height="376" rx="16" fill="#0A0E13"/>
+  <rect x="-17.5" y="-17.5" width="995" height="375" rx="15.5" fill="none" stroke="rgba(255,255,255,.09)"/>
+
+        <defs><marker id="a2" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0 L8 4 L0 8 z" fill="#5A6675"/></marker></defs>
+        <g font-family="ui-monospace,Menlo" text-anchor="middle">
+          <rect x="10" y="120" width="118" height="58" rx="12" fill="#141C27" stroke="#F4B23E" stroke-width="1.4"/>
+          <text x="69" y="146" fill="#F4B23E" font-size="12.5" font-weight="700">TokenFuse PEP</text>
+          <text x="69" y="163" fill="#8A97A6" font-size="10.5">asks per request</text>
+          <text x="165" y="140" fill="#5A6675" font-size="10">/v1/decide</text>
+
+          <rect x="210" y="46" width="300" height="200" rx="16" fill="#10161F" stroke="#2DD4BF" stroke-width="1.4"><animate attributeName="stroke-opacity" values="1;.45;1" dur="3.4s" repeatCount="indefinite"/></rect>
+          <text x="360" y="74" fill="#2DD4BF" font-size="14" font-weight="700">wardryx PDP :8090</text>
+          <g font-size="10.5" fill="#8A97A6">
+            <rect x="228" y="90" width="128" height="42" rx="8" fill="#141C27" stroke="#2a3547"/>
+            <text x="292" y="108" fill="#E9EFF6">policy set</text>
+            <text x="292" y="123" font-size="9.5">YAML &#183; agent:// globs</text>
+            <rect x="364" y="90" width="128" height="42" rx="8" fill="#141C27" stroke="#2a3547"/>
+            <text x="428" y="108" fill="#E9EFF6">rule order</text>
+            <text x="428" y="123" font-size="9.5">deny_above_usd wins</text>
+            <rect x="228" y="140" width="128" height="42" rx="8" fill="#141C27" stroke="#2a3547"/>
+            <text x="292" y="158" fill="#E9EFF6">attestation</text>
+            <text x="292" y="173" font-size="9.5">&#8220;None&#8221; never passes</text>
+            <rect x="364" y="140" width="128" height="42" rx="8" fill="#141C27" stroke="#2a3547"/>
+            <text x="428" y="158" fill="#E9EFF6">decision cache</text>
+            <text x="428" y="173" font-size="9.5">agent+tools+attest</text>
+            <text x="360" y="208" fill="#5A6675" font-size="10.5">deterministic: same request, same verdict</text>
+            <text x="360" y="224" fill="#5A6675" font-size="10.5">no LLM anywhere in the decision path</text>
+          </g>
+
+          <rect x="570" y="118" width="140" height="62" rx="12" fill="#141C27" stroke="#2a3547"/>
+          <text x="640" y="140" fill="#E9EFF6" font-size="12.5" font-weight="700">verdict</text>
+          <text x="640" y="156" fill="#2DD4BF" font-size="10.5">allow &#183; deny &#183; hold</text>
+          <text x="640" y="170" fill="#8A97A6" font-size="10.5">+ cacheable flag</text>
+
+          <rect x="742" y="28" width="200" height="112" rx="14" fill="#10161F" stroke="#2a3547"/>
+          <text x="842" y="54" fill="#E9EFF6" font-size="12.5" font-weight="700">approval tokens</text>
+          <text x="842" y="76" fill="#8A97A6" font-size="10.5">HMAC-signed &#183; short-lived</text>
+          <text x="842" y="92" fill="#8A97A6" font-size="10.5">cost-bound &#183; single-use</text>
+          <text x="842" y="108" fill="#F4B23E" font-size="10.5">a hold resolves out of band</text>
+
+          <rect x="742" y="196" width="200" height="96" rx="14" fill="#10161F" stroke="#2a3547"/>
+          <text x="842" y="222" fill="#E9EFF6" font-size="12.5" font-weight="700">agent-event bus</text>
+          <text x="842" y="240" fill="#2DD4BF" font-size="10.5">source: wardryx</text>
+          <text x="842" y="256" fill="#8A97A6" font-size="10">policy_allow &#183; policy_deny</text>
+          <text x="842" y="272" fill="#8A97A6" font-size="10.5">+ one OTLP span per decision</text>
+
+          <rect x="210" y="286" width="300" height="40" rx="10" fill="#141C27" stroke="#93A8C4"/>
+          <text x="360" y="304" fill="#93A8C4" font-size="10.5" font-weight="700">policies as code &#183; terraform-provider-taipan</text>
+          <text x="360" y="318" fill="#8A97A6" font-size="10">PUT /v1/policies/{id}</text>
+        </g>
+        <g stroke="#5A6675" stroke-width="1.5" class="flow">
+          <line x1="128" y1="149" x2="202" y2="149" marker-end="url(#a2)"/>
+          <line x1="510" y1="149" x2="562" y2="149" marker-end="url(#a2)"/>
+          <line x1="710" y1="132" x2="734" y2="92" marker-end="url(#a2)"/>
+          <line x1="710" y1="166" x2="734" y2="230" marker-end="url(#a2)"/>
+          <line x1="360" y1="284" x2="360" y2="254" marker-end="url(#a2)"/>
+        </g>
+      
+  <g fill="none">
+  <line x1="128" y1="149" x2="202" y2="149" pathLength="100" stroke="#2DD4BF" stroke-width="2.6" stroke-linecap="round" stroke-dasharray="7 100" stroke-dashoffset="7"><animate attributeName="stroke-dashoffset" from="7" to="-100" dur="2.4s" begin="-0.00s" repeatCount="indefinite"/></line>
+  <line x1="510" y1="149" x2="562" y2="149" pathLength="100" stroke="#2DD4BF" stroke-width="2.6" stroke-linecap="round" stroke-dasharray="7 100" stroke-dashoffset="7"><animate attributeName="stroke-dashoffset" from="7" to="-100" dur="2.4s" begin="-0.37s" repeatCount="indefinite"/></line>
+  <line x1="710" y1="132" x2="734" y2="92" pathLength="100" stroke="#2DD4BF" stroke-width="2.6" stroke-linecap="round" stroke-dasharray="7 100" stroke-dashoffset="7"><animate attributeName="stroke-dashoffset" from="7" to="-100" dur="2.4s" begin="-0.74s" repeatCount="indefinite"/></line>
+  <line x1="710" y1="166" x2="734" y2="230" pathLength="100" stroke="#2DD4BF" stroke-width="2.6" stroke-linecap="round" stroke-dasharray="7 100" stroke-dashoffset="7"><animate attributeName="stroke-dashoffset" from="7" to="-100" dur="2.4s" begin="-1.11s" repeatCount="indefinite"/></line>
+  <line x1="360" y1="284" x2="360" y2="254" pathLength="100" stroke="#2DD4BF" stroke-width="2.6" stroke-linecap="round" stroke-dasharray="7 100" stroke-dashoffset="7"><animate attributeName="stroke-dashoffset" from="7" to="-100" dur="2.4s" begin="-1.48s" repeatCount="indefinite"/></line>
+  </g>
+</svg>

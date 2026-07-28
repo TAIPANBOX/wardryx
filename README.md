@@ -15,6 +15,14 @@
 
 Wardryx protects the operator by governing its own agents' actions: it blocks or holds, it never acts. Given a proposed action from one of the operator's own AI agents (a tool call, a spend, a delegated step), it decides `allow`, `deny`, or `hold` and returns that decision to whatever enforces it, an MCP gateway, a tool-calling runtime, or TokenFuse's proxy. Every decision is a deterministic function of the loaded policy set and the request: no LLM anywhere in the decision path, so the same policy and the same request always return the same answer.
 
+<div align="center">
+
+<img src="assets/diagram.svg" alt="Wardryx architecture: TokenFuse posts /v1/decide as the enforcement point, the Wardryx PDP answers allow, deny or hold with a cacheable flag, holds resolve through signed approval tokens, and every decision lands on the agent-event bus" width="960">
+
+<sub>The same service as its room on <a href="https://it-rat.com/services/wardryx.html">it-rat.com</a> draws it, where the diagram sits next to a simulation you can scrub back and forth.</sub>
+
+</div>
+
 ---
 
 ## Where this fits in the stack
