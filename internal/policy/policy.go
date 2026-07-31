@@ -12,10 +12,13 @@
 package policy
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -250,13 +253,63 @@ func decode(path string, data []byte) ([]Policy, error) {
 	}
 }
 
+// isUnknownFieldError reports whether err is a decoder complaining about a
+// field name it does not recognize, as opposed to a shape mismatch.
+//
+// The distinction matters because both decoders try the list shape first and
+// fall through to the single-document shape. A single document legitimately
+// fails the list attempt with a type error, so falling through is correct
+// there. A LIST carrying an unknown field must not fall through: the second
+// attempt would fail with "cannot unmarshal !!seq into policy.Policy", which
+// hides a misspelled field behind a shape error and sends the reader looking in
+// the wrong place.
+func isUnknownFieldError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	// gopkg.in/yaml.v3 with KnownFields: "field X not found in type ..."
+	// encoding/json with DisallowUnknownFields: "unknown field \"X\""
+	return strings.Contains(msg, "not found in type") || strings.Contains(msg, "unknown field")
+}
+
+// strictJSON and strictYAML refuse a field the Policy struct does not declare.
+//
+// Without this, a misspelled field is silently dropped. A policy written with
+// `deny_tools` instead of `deny_tool` parses, compiles, matches its agents and
+// denies nothing, while the decision reads "allowed: request satisfies all
+// matched policy rules". The operator sees a loaded policy, a matched agent and
+// an allow, and concludes the guardrail works. An enforcement control that
+// forgets is worse than no control, because it is believed.
+func strictJSON(data []byte, into any) error {
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.DisallowUnknownFields()
+	return dec.Decode(into)
+}
+
+func strictYAML(data []byte, into any) error {
+	dec := yaml.NewDecoder(bytes.NewReader(data))
+	dec.KnownFields(true)
+	if err := dec.Decode(into); err != nil {
+		if errors.Is(err, io.EOF) {
+			return nil // an empty document is an empty policy set, not an error
+		}
+		return err
+	}
+	return nil
+}
+
 func decodeJSON(data []byte) ([]Policy, error) {
 	var list []Policy
-	if err := json.Unmarshal(data, &list); err == nil {
+	err := strictJSON(data, &list)
+	if err == nil {
 		return list, nil
 	}
+	if isUnknownFieldError(err) {
+		return nil, err
+	}
 	var one Policy
-	if err := json.Unmarshal(data, &one); err != nil {
+	if err := strictJSON(data, &one); err != nil {
 		return nil, err
 	}
 	return []Policy{one}, nil
@@ -264,11 +317,15 @@ func decodeJSON(data []byte) ([]Policy, error) {
 
 func decodeYAML(data []byte) ([]Policy, error) {
 	var list []Policy
-	if err := yaml.Unmarshal(data, &list); err == nil {
+	err := strictYAML(data, &list)
+	if err == nil {
 		return list, nil
 	}
+	if isUnknownFieldError(err) {
+		return nil, err
+	}
 	var one Policy
-	if err := yaml.Unmarshal(data, &one); err != nil {
+	if err := strictYAML(data, &one); err != nil {
 		return nil, err
 	}
 	return []Policy{one}, nil
