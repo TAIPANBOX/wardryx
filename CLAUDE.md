@@ -108,18 +108,26 @@ an absent invariant.
 4. **An approval token is always HMAC-signed and never falls back to unsigned.**
    The key is `WARDRYX_APPROVAL_SECRET`. If the secret is absent the service
    must refuse to mint a token, not mint an unsigned one. An unsigned approval
-   is an approval anyone can forge. *(not enforced)*
+   is an approval anyone can forge.
+   *(test: `TestMintAndVerifyFailClosedWithNoSecret`,
+   `TestDecideGrantFailsClosedWithNoSecretAndLeavesApprovalPending`)*
 5. **An approval token is single-use.** A redeemed token allows exactly one
    `/v1/decide` call for the approval it was minted for; a second presentation
    of the same token is rejected. Replay of an approval is the whole attack.
-   *(not enforced)*
+   *(test: `TestSingleUseOnSecondDecideWithSameTokenHolds`,
+   `TestApprovalDecideTwiceReturns409`, and `TryRedeem`'s own atomicity and
+   race-safety suites in `internal/store` for both backends)*
 6. **`POST /v1/approvals/{id}/decide` is admin-only.** Granting an approval is
    the privileged operation in this service; every widening of who may call it
-   is a security decision, not a routing change. *(not enforced)*
+   is a security decision, not a routing change.
+   *(test: `TestApprovalDecideRequiresAdminRole`, and
+   `TestListPoliciesRequiresAdmin` for the other admin-only route)*
 7. **A hold is stateless.** Do not add server-side session state to carry a
    hold between the decision and its resolution. The signed token is the state,
    which is what lets any instance resolve a hold minted by any other.
-   *(not enforced)*
+   *(partly gated: `TestFullHoldGrantThenDecideAllowsWithToken` proves the
+   round trip works through the token, but nothing asserts the ABSENCE of
+   session state, which is the part that would decay)*
 8. **`agent-stack-go` is pinned by tag and is the only source of the wire
    types.** Never hand-roll a local copy of a passport, event, or chain type.
    If the shared type is wrong, widen it there. *(not enforced)*
@@ -128,17 +136,27 @@ an absent invariant.
 
 This list is debt, and it is here to stay visible rather than to be tidy.
 
-**Held by this file alone: invariants 4, 5, 6, 7 and 8.**
+**Held by this file alone: invariant 8. Invariant 7 is half held.**
 
-Invariants 4, 5 and 6 are security properties and are the strongest candidates
-for a test that must fail first: mint without a secret, present a token twice,
-call the decide route as a non-admin. Each should assert the refusal, and each
-should be written by breaking the code first to confirm the test can see it.
-Until then they are prose.
+**A correction worth keeping, because it is the mirror of the usual mistake.**
+This section previously said invariants 4, 5 and 6 were held by prose alone and
+were "the strongest candidates for a test that must fail first". That was wrong:
+all three are among the best-tested things in this repository. Invariant 5 alone
+has five tests, including atomicity and race safety against both store backends.
 
-Invariant 7 is judgement about design shape. Invariant 8 is mechanically
-checkable in principle, by asserting no local type duplicates a shared one, but
-the check is only worth writing if a duplicate ever appears.
+The cause is worth naming. The invariants were derived by reading the code and
+its comments, and the test suite was never opened. A marker set from assumption
+is wrong in whichever direction the assumption ran, and the harm of the direction
+that ran here is quieter: an invariant labelled weaker than reality hides real
+coverage and sends the next person to write a test that already exists.
+
+**Set a marker from evidence, both ways.** Before writing `(not enforced)`, grep
+the suite for the property. Before writing `(test: ...)`, open the test and
+check it asserts what the invariant claims.
+
+Invariant 8 is mechanically checkable, by asserting no local type duplicates a
+shared one, but there are no duplicates today and the check is only worth
+writing if one ever appears.
 
 ## Standing rule
 
