@@ -26,6 +26,8 @@ jobs:
         run: go test -race ./...
       - name: build
         run: go build ./...
+      - name: decision path stays deterministic
+        run: ./scripts/decision-path-purity.sh
 
   security:
     runs-on: ubuntu-latest
