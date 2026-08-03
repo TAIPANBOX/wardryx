@@ -8,6 +8,7 @@ package config
 import (
 	"os"
 	"strconv"
+	"time"
 )
 
 // Config holds every WARDRYX_* environment variable. Fields are the raw
@@ -41,6 +42,16 @@ type Config struct {
 	// full TTL -- unset (or any value that does not parse as a bool) is
 	// always false, never a fail-open/fail-closed ambiguity.
 	ApprovalSingleUse bool
+	// ApprovalUnanswered is WARDRYX_APPROVAL_UNANSWERED_AFTER: how long a
+	// hold may sit undecided before wardryx raises `approval_unanswered`
+	// for it. Env-only, a Go duration ("15m", "1h"). Unset uses
+	// api.DefaultUnansweredAfter; "0" disables the sweep, which is a real
+	// choice for an operator who watches the queue themselves.
+	//
+	// Unparsable input is a zero duration and therefore OFF, not a default:
+	// a typo that silently enabled a background sweep would be worse than
+	// one that silently did not, since the sweep writes events.
+	ApprovalUnanswered time.Duration
 	// OTLPEndpoint is WARDRYX_OTLP_ENDPOINT (or -otlp-endpoint): the
 	// OTLP/HTTP endpoint internal/otel.Exporter posts one span to per
 	// /v1/decide outcome. Empty disables OTLP export entirely -- see
@@ -53,14 +64,15 @@ type Config struct {
 // result through as a value.
 func FromEnv() Config {
 	return Config{
-		Addr:              os.Getenv("WARDRYX_ADDR"),
-		Keys:              os.Getenv("WARDRYX_KEYS"),
-		DB:                os.Getenv("WARDRYX_DB"),
-		Policy:            os.Getenv("WARDRYX_POLICY"),
-		EventsPath:        os.Getenv("WARDRYX_EVENTS_PATH"),
-		ApprovalSecret:    os.Getenv("WARDRYX_APPROVAL_SECRET"),
-		ApprovalSingleUse: parseBool(os.Getenv("WARDRYX_APPROVAL_SINGLE_USE")),
-		OTLPEndpoint:      os.Getenv("WARDRYX_OTLP_ENDPOINT"),
+		Addr:               os.Getenv("WARDRYX_ADDR"),
+		Keys:               os.Getenv("WARDRYX_KEYS"),
+		DB:                 os.Getenv("WARDRYX_DB"),
+		Policy:             os.Getenv("WARDRYX_POLICY"),
+		EventsPath:         os.Getenv("WARDRYX_EVENTS_PATH"),
+		ApprovalSecret:     os.Getenv("WARDRYX_APPROVAL_SECRET"),
+		ApprovalSingleUse:  parseBool(os.Getenv("WARDRYX_APPROVAL_SINGLE_USE")),
+		ApprovalUnanswered: parseDuration(os.Getenv("WARDRYX_APPROVAL_UNANSWERED_AFTER")),
+		OTLPEndpoint:       os.Getenv("WARDRYX_OTLP_ENDPOINT"),
 	}
 }
 
@@ -69,6 +81,14 @@ func FromEnv() Config {
 // unparsable input is treated as false rather than an error, matching every
 // other field in this package: FromEnv never fails on a missing or
 // malformed environment variable, it just falls back to the zero value.
+// parseDuration reports a Go duration, or zero when the variable is unset or
+// unparsable. The caller distinguishes "unset" from "0" by checking the raw
+// environment, since both arrive here as the zero value.
+func parseDuration(s string) time.Duration {
+	d, _ := time.ParseDuration(s)
+	return d
+}
+
 func parseBool(s string) bool {
 	b, _ := strconv.ParseBool(s)
 	return b

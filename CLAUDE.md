@@ -132,6 +132,25 @@ an absent invariant.
    types.** Never hand-roll a local copy of a passport, event, or chain type.
    If the shared type is wrong, widen it there. *(not enforced)*
 
+9. **This plane reports what it observes and decides only what a policy says.**
+   The unanswered-approval sweep raises `approval_unanswered` for a hold nobody
+   has decided, and leaves the hold exactly as it was. It must never grant,
+   deny or expire one on a timer.
+
+   The distinction is the whole reason a human-in-the-loop gate exists: a
+   timeout that silently becomes a denial is a decision made by a clock, and
+   one that silently becomes an allow is worse. Either would be a behaviour
+   change hiding inside an observability feature, which is the shape nobody
+   reviews.
+
+   The sweep is also why this is a background loop rather than a check on the
+   request path: the condition is defined by the ABSENCE of requests, so a
+   check that runs when one arrives cannot see the case it exists for.
+   *(test: `TestTheSweepNeverDecidesTheHoldItReports`,
+   `TestAHoldNobodyDecidedIsReportedOncePerHold` (verified by removing the
+   marker, which reports three times), `TestAFreshHoldIsNotReported`,
+   `TestZeroDisablesTheSweep`, `TestMarkersForDecidedHoldsAreDropped`)*
+
 ## Decisions that have no gate yet
 
 This list is debt, and it is here to stay visible rather than to be tidy.

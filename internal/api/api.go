@@ -36,6 +36,7 @@ import (
 	"net/http"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/TAIPANBOX/agent-stack-go/event"
@@ -55,7 +56,14 @@ const (
 	evApprovalGranted   = "approval_granted"
 	evApprovalDenied    = "approval_denied"
 	evApprovalTimeout   = "approval_timeout"
-	evPolicyUpdated     = "policy_updated"
+	// A hold that nobody has decided. Named for what happened rather than
+	// for a clock: `approval_timeout` is already taken and means something
+	// else entirely (an agent redeeming a token whose window had closed,
+	// which usually means a human DID decide and the agent came back late),
+	// and `approval_stale` would say the approval decayed when in fact
+	// nothing decayed: nobody answered.
+	evApprovalUnanswered = "approval_unanswered"
+	evPolicyUpdated      = "policy_updated"
 )
 
 // systemAgentID is the agent_id agent-event's schema requires on every
@@ -82,6 +90,18 @@ type Server struct {
 	// the store's operator-managed policies on top of. See the package doc
 	// comment's "Policy-as-code" section.
 	basePolicies []policy.Policy
+
+	// How long a hold may sit undecided before it is worth telling somebody,
+	// and which holds have already been reported.
+	//
+	// The marker is in memory on purpose. Persisting it would mean a schema
+	// change to carry a bit that only prevents a repeat, and a restart
+	// re-announcing "these holds are still unanswered" is not noise: it is
+	// the current truth, said again by a process that has just lost its
+	// memory of saying it. Consumers that dedup by condition absorb it.
+	unansweredAfter time.Duration
+	unansweredMu    sync.Mutex
+	unansweredSeen  map[string]bool
 }
 
 // New returns a Server. events may be nil, which makes event emission a
@@ -107,6 +127,108 @@ func New(engine *pdp.Engine, st store.Store, events *event.ChainedWriter, otel *
 		approvalTTL:       approval.DefaultTTL,
 		approvalSingleUse: approvalSingleUse,
 		basePolicies:      basePolicies,
+		unansweredAfter:   DefaultUnansweredAfter,
+		unansweredSeen:    map[string]bool{},
+	}
+}
+
+// DefaultUnansweredAfter is how long a hold may sit undecided before wardryx
+// says so. Fifteen minutes, because a granted approval_token lives ten
+// (approval.DefaultTTL): a hold that has outlived a whole token window has
+// already cost the agent any chance of acting promptly on a yes.
+//
+// Override with WARDRYX_APPROVAL_UNANSWERED_AFTER.
+const DefaultUnansweredAfter = 15 * time.Minute
+
+// SetUnansweredAfter overrides [DefaultUnansweredAfter]. Zero or negative
+// disables the sweep entirely, which is a real choice: an operator who watches
+// the approval queue themselves does not need to be told about it.
+func (s *Server) SetUnansweredAfter(d time.Duration) { s.unansweredAfter = d }
+
+// WatchUnansweredApprovals reports a hold that nobody has decided.
+//
+// A SWEEP rather than a check on the request path, and that is the whole
+// design: this condition is defined by the ABSENCE of activity, so a check
+// that only runs when a request arrives cannot see the case it exists for. The
+// hold that nobody answered is exactly the hold nobody is asking about.
+//
+// It REPORTS and never decides. An event that quietly converted an unanswered
+// hold into a denial would be a behaviour change hiding inside an
+// observability feature, and the agent's action stays held exactly as the
+// policy engine left it.
+//
+// One event per hold per process lifetime; see the note on `unansweredSeen`.
+// Blocks until ctx is done, so callers run it in a goroutine.
+func (s *Server) WatchUnansweredApprovals(ctx context.Context) {
+	if s.unansweredAfter <= 0 {
+		return
+	}
+	// Often enough that the report is timely, rarely enough that an idle
+	// wardryx is not listing approvals every second.
+	interval := s.unansweredAfter / 4
+	if interval > time.Minute {
+		interval = time.Minute
+	}
+	if interval < time.Second {
+		interval = time.Second
+	}
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			s.sweepUnansweredApprovals(ctx, time.Now())
+		}
+	}
+}
+
+func (s *Server) sweepUnansweredApprovals(ctx context.Context, now time.Time) {
+	all, err := s.store.ListApprovals(ctx)
+	if err != nil {
+		// A store that cannot be listed is already reported elsewhere, and a
+		// sweep that logs on every tick would drown it.
+		return
+	}
+	pending := make(map[string]bool, len(all))
+	for _, a := range all {
+		if a.Pending() {
+			pending[a.ApprovalID] = true
+		}
+		if !a.Pending() || now.Sub(a.RequestedAt) < s.unansweredAfter {
+			continue
+		}
+		s.unansweredMu.Lock()
+		seen := s.unansweredSeen[a.ApprovalID]
+		if !seen {
+			s.unansweredSeen[a.ApprovalID] = true
+		}
+		s.unansweredMu.Unlock()
+		if seen {
+			continue
+		}
+		s.emit(evApprovalUnanswered, event.SeverityHigh, a.AgentID, a.RunID, nil,
+			map[string]any{
+				"approval_id": a.ApprovalID,
+				"waiting_s":   int(now.Sub(a.RequestedAt).Seconds()),
+				"threshold_s": int(s.unansweredAfter.Seconds()),
+			})
+	}
+	s.forgetDecidedApprovals(pending)
+}
+
+// forgetDecidedApprovals drops markers for approvals that are no longer
+// pending, so the map cannot grow for the life of the process. Done at the end
+// of each sweep rather than when this replica decides one, because a hold can
+// also be decided by another replica or straight in the store.
+func (s *Server) forgetDecidedApprovals(pending map[string]bool) {
+	s.unansweredMu.Lock()
+	defer s.unansweredMu.Unlock()
+	for id := range s.unansweredSeen {
+		if !pending[id] {
+			delete(s.unansweredSeen, id)
+		}
 	}
 }
 
