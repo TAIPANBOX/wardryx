@@ -163,6 +163,23 @@ func runServe(args []string) error {
 		engine.SetPolicies(restored)
 	}
 
+	// The hold nobody decides. A sweep rather than a check on the request
+	// path, because the case is defined by the absence of requests: see
+	// api.WatchUnansweredApprovals. Unset means the default; an explicit "0"
+	// turns it off, and an unparsable value is treated as off rather than as
+	// the default, since this writes events.
+	if raw, set := os.LookupEnv("WARDRYX_APPROVAL_UNANSWERED_AFTER"); set {
+		srv.SetUnansweredAfter(cfg.ApprovalUnanswered)
+		if cfg.ApprovalUnanswered <= 0 {
+			fmt.Fprintf(os.Stderr, "wardryx: unanswered-approval reporting OFF (WARDRYX_APPROVAL_UNANSWERED_AFTER=%q)\n", raw)
+		}
+	}
+	if cfg.ApprovalUnanswered > 0 || !envSet("WARDRYX_APPROVAL_UNANSWERED_AFTER") {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		go srv.WatchUnansweredApprovals(ctx)
+	}
+
 	fmt.Fprintf(os.Stderr, "wardryx: serving on http://%s\n", displayAddr(*addr))
 	httpSrv := &http.Server{
 		Addr:              *addr,
@@ -386,4 +403,12 @@ func orDash(s string) string {
 		return "-"
 	}
 	return s
+}
+
+// envSet reports whether a variable is present at all, which is how the
+// unanswered-approval sweep tells "unset, use the default" from an explicit
+// "0" meaning off.
+func envSet(name string) bool {
+	_, ok := os.LookupEnv(name)
+	return ok
 }

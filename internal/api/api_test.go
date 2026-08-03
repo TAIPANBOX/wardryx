@@ -1094,3 +1094,166 @@ func TestStatusIsReadableByAViewer(t *testing.T) {
 		t.Errorf("unauthenticated GET /v1/status: %d, want 401", rec.Code)
 	}
 }
+
+// ------------------------------------------------------------------
+// The hold nobody decided.
+//
+// Reported by a SWEEP rather than on the request path, because the case is
+// defined by the absence of requests: the hold nobody answered is exactly the
+// hold nobody is asking about. These drive the sweep directly with a fixed
+// `now`, which is the only way to test a time-based condition without
+// sleeping.
+// ------------------------------------------------------------------
+
+// A hold younger than the threshold is not a complaint. Half the value of this
+// detector is the events it does NOT write: an operator who is answering their
+// queue at a normal pace must never hear from it.
+func TestAFreshHoldIsNotReported(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "events.ndjson")
+	srv, ew := newTestServerWithEvents(t, path)
+	now := time.Now()
+
+	if err := srv.store.CreateApproval(context.Background(), store.Approval{
+		ApprovalID: "a1", AgentID: "agent://acme.example/finance/bot", RunID: "r1",
+		RequestedAt: now.Add(-time.Minute),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	srv.sweepUnansweredApprovals(context.Background(), now)
+	_ = ew.Close()
+
+	if n := countEventsOfType(t, path, "approval_unanswered"); n != 0 {
+		t.Fatalf("a one-minute-old hold was reported %d time(s)", n)
+	}
+}
+
+func TestAHoldNobodyDecidedIsReportedOncePerHold(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "events.ndjson")
+	srv, ew := newTestServerWithEvents(t, path)
+	now := time.Now()
+
+	if err := srv.store.CreateApproval(context.Background(), store.Approval{
+		ApprovalID: "a1", AgentID: "agent://acme.example/finance/bot", RunID: "r1",
+		RequestedAt: now.Add(-time.Hour),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Three sweeps, one hold: the operator is told once, not every tick. A
+	// detector that repeats on a condition that stays true is how somebody
+	// learns to filter the sender.
+	for range 3 {
+		srv.sweepUnansweredApprovals(context.Background(), now)
+	}
+	_ = ew.Close()
+
+	if n := countEventsOfType(t, path, "approval_unanswered"); n != 1 {
+		t.Fatalf("want exactly one report, got %d", n)
+	}
+}
+
+// It reports and never decides. An event that quietly converted an unanswered
+// hold into a denial would be a behaviour change hiding inside an
+// observability feature.
+func TestTheSweepNeverDecidesTheHoldItReports(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "events.ndjson")
+	srv, ew := newTestServerWithEvents(t, path)
+	now := time.Now()
+
+	if err := srv.store.CreateApproval(context.Background(), store.Approval{
+		ApprovalID: "a1", AgentID: "agent://acme.example/finance/bot", RunID: "r1",
+		RequestedAt: now.Add(-time.Hour),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	srv.sweepUnansweredApprovals(context.Background(), now)
+	_ = ew.Close()
+
+	got, err := srv.store.GetApproval(context.Background(), "a1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.Pending() {
+		t.Fatalf("the sweep decided the hold: decision %q by %q", got.Decision, got.DecidedBy)
+	}
+}
+
+// Zero disables it, and that is a real choice rather than a misconfiguration:
+// an operator who watches the queue themselves does not need to be told.
+func TestZeroDisablesTheSweep(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "events.ndjson")
+	srv, ew := newTestServerWithEvents(t, path)
+	srv.SetUnansweredAfter(0)
+	now := time.Now()
+
+	if err := srv.store.CreateApproval(context.Background(), store.Approval{
+		ApprovalID: "a1", AgentID: "agent://acme.example/finance/bot", RunID: "r1",
+		RequestedAt: now.Add(-24 * time.Hour),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// WatchUnansweredApprovals returns immediately rather than ticking, and
+	// a direct sweep with the threshold at zero would report everything, so
+	// the disable has to be checked where it is decided.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	srv.WatchUnansweredApprovals(ctx)
+	_ = ew.Close()
+
+	if n := countEventsOfType(t, path, "approval_unanswered"); n != 0 {
+		t.Fatalf("disabled sweep reported %d time(s)", n)
+	}
+}
+
+// A decided hold stops being remembered, so the marker map cannot grow for the
+// life of the process.
+func TestMarkersForDecidedHoldsAreDropped(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "events.ndjson")
+	srv, ew := newTestServerWithEvents(t, path)
+	defer func() { _ = ew.Close() }()
+	now := time.Now()
+
+	if err := srv.store.CreateApproval(context.Background(), store.Approval{
+		ApprovalID: "a1", AgentID: "agent://acme.example/finance/bot", RunID: "r1",
+		RequestedAt: now.Add(-time.Hour),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	srv.sweepUnansweredApprovals(context.Background(), now)
+	if len(srv.unansweredSeen) != 1 {
+		t.Fatalf("want one marker, got %d", len(srv.unansweredSeen))
+	}
+
+	if _, err := srv.store.DecideApproval(context.Background(), "a1", "grant", "yurii", now); err != nil {
+		t.Fatal(err)
+	}
+	srv.sweepUnansweredApprovals(context.Background(), now)
+	if len(srv.unansweredSeen) != 0 {
+		t.Fatalf("marker for a decided hold survived: %v", srv.unansweredSeen)
+	}
+}
+
+// countEventsOfType counts NDJSON lines in path whose "type" is t.
+func countEventsOfType(t *testing.T, path, want string) int {
+	t.Helper()
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read events: %v", err)
+	}
+	n := 0
+	for _, line := range strings.Split(strings.TrimSpace(string(raw)), "\n") {
+		if line == "" {
+			continue
+		}
+		var e struct {
+			Type string `json:"type"`
+		}
+		if err := json.Unmarshal([]byte(line), &e); err != nil {
+			t.Fatalf("bad event line %q: %v", line, err)
+		}
+		if e.Type == want {
+			n++
+		}
+	}
+	return n
+}
