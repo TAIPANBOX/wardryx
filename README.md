@@ -183,6 +183,16 @@ By default a granted token stays valid for every `/v1/decide` call that presents
 
 Single-use redemption tracking has the same durability split as approval holds themselves: with `-db`/`WARDRYX_DB` set, `TryRedeem` is a Postgres `INSERT .. ON CONFLICT DO NOTHING` (atomic across every wardryx instance sharing that database); with no `-db`, redemptions live in one process's memory only, so single-use is enforced per-process, not across multiple wardryx instances behind a load balancer. `serve` prints a startup warning to stderr when `WARDRYX_APPROVAL_SINGLE_USE=true` is combined with no `-db`, so this caveat is never silent.
 
+### The hold nobody decided
+
+Resolving a hold out of band means its failure mode is silence: the approval sits pending, the agent's action stays blocked, and nothing anywhere says so. A background sweep reports exactly that. Once a hold has been pending longer than `WARDRYX_APPROVAL_UNANSWERED_AFTER` (a Go duration, default 15 minutes), Wardryx emits one `approval_unanswered` event for it, severity `high`, carrying the `approval_id`, how many seconds it has waited, and the threshold it crossed.
+
+A sweep rather than a check on the request path, and that is the design rather than an implementation detail: this condition is defined by the *absence* of activity, so a check that only runs when a request arrives cannot see the case it exists for. The hold nobody answered is exactly the hold nobody is asking about.
+
+It **reports and never decides.** The hold is left precisely as the engine left it: nothing here grants, denies or expires an approval on a timer. A timeout that quietly became a denial would be a decision made by a clock, and one that quietly became an allow would be worse; either is a behavior change hiding inside an observability feature.
+
+One event per hold per process lifetime, so an approval nobody answers all afternoon is reported once instead of on every tick. Setting the variable to `0` turns the sweep off entirely, a real choice for an operator who watches `GET /v1/approvals` themselves, and `serve` says so on stderr rather than going quiet about it. An unparsable value is treated as off rather than as the default, since this is the one feature here that writes events on its own initiative.
+
 ---
 
 ## Policy-as-code
@@ -251,7 +261,7 @@ Beyond the decision engine and the approval flow above, Wardryx ships:
 
 1. **HTTP API** (`internal/api`): `POST /v1/decide`, `POST /v1/approvals/{id}/decide` (admin only), `GET /v1/approvals` (org-scoped), the admin-only `/v1/policies` policy-as-code routes (see [Policy-as-code](#policy-as-code)), `GET /healthz`. Bearer-key auth mirrors the Cloud plane's `key:org[:role]` convention (TokenFuse `crates/cloud/src/keys.rs`), reimplemented in Go for the same wire format.
 2. **Storage** (`internal/store`): Postgres via `pgx/v5` with an embedded, idempotent `schema.sql`, or an in-memory store when no DSN is configured. Both implementations satisfy the same `Store` interface.
-3. **Events** (`source: wardryx`): optional NDJSON `agent-event` output (`WARDRYX_EVENTS_PATH`) via `agent-stack-go/event`: `policy_allow`, `policy_deny`, `approval_requested`, `approval_granted`, `approval_denied`, `approval_timeout`. Events now carry the SPEC §6.5 `prev_hash` chain; verify a stream with `agent-conform -chain <file>`.
+3. **Events** (`source: wardryx`): optional NDJSON `agent-event` output (`WARDRYX_EVENTS_PATH`) via `agent-stack-go/event`: `policy_allow`, `policy_deny`, `approval_requested`, `approval_granted`, `approval_denied`, `approval_timeout` (an agent presenting an approval token whose window had already closed, so usually a human did decide and the agent came back late), `approval_unanswered` (a hold nobody decided, see [The hold nobody decided](#the-hold-nobody-decided)), and `policy_updated` (a runtime `/v1/policies` write). Events now carry the SPEC §6.5 `prev_hash` chain; verify a stream with `agent-conform -chain <file>`.
 4. **OTLP export** (`internal/otel`): optional one-span-per-decision export to an OTLP/HTTP collector (`WARDRYX_OTLP_ENDPOINT`), see [OTLP export](#otlp-export).
 5. **CLI** (`cmd/wardryx`): `serve`, `check` (an offline dry-run over a directory of Agent Passports), `approvals` (list from Postgres), `version`.
 
@@ -345,6 +355,7 @@ Every `WARDRYX_*` variable is read once at process startup (`internal/config`), 
 | `WARDRYX_EVENTS_PATH` | `-events` | NDJSON agent-event output path; empty disables events |
 | `WARDRYX_APPROVAL_SECRET` | (none) | HMAC key for approval tokens; unset fails closed on any mint/verify |
 | `WARDRYX_APPROVAL_SINGLE_USE` | (none) | `true` makes each granted token allow exactly one `/v1/decide` call; default `false` keeps a token reusable for its full TTL (see [Stateless human-in-the-loop](#stateless-human-in-the-loop)) |
+| `WARDRYX_APPROVAL_UNANSWERED_AFTER` | (none) | How long a hold may sit undecided before one `approval_unanswered` event is raised for it; a Go duration, unset means 15m, `0` turns the sweep off (see [The hold nobody decided](#the-hold-nobody-decided)) |
 | `WARDRYX_OTLP_ENDPOINT` | `-otlp-endpoint` | OTLP/HTTP endpoint for decision spans (see [OTLP export](#otlp-export)); empty disables it |
 
 The `[:role]` segment of a `WARDRYX_KEYS` entry is one of `admin` (every endpoint, including `POST /v1/approvals/{id}/decide`) or `viewer` (every other authenticated endpoint), and defaults to `admin` when the segment is omitted.
@@ -360,7 +371,7 @@ make lint        # go vet + staticcheck + gofmt check
 make test-integration   # Postgres-backed internal/store tests; needs DATABASE_URL
 ```
 
-The decision engine's table tests (`internal/pdp/pdp_test.go`) cover: allow; deny (denied tool); deny (unattested); hold (over threshold); allow with a valid approval token; and deny with an expired or wrong-binding token, plus `PolicyVersion` stability and the offline `check` path.
+The decision engine's table tests (`internal/pdp/pdp_test.go`) cover every rule and its boundary: allow; deny on a denied tool, on an unattested agent, at and over `max_steps`, and on a domain outside `allow_domains`; the empty-`domains` no-op; hold over `require_human_above_usd`; allow with a valid approval token; deny with an expired or wrong-binding one; and `deny_above_usd` as a hard ceiling that a cleanly-verifying token still cannot cross and that fires before the hold. Separate suites pin the normalization traps (a `deny_tool` entry matched whatever the case or trailing whitespace, an `attestation_method` of `none`, `NONE`, `n/a` or a bare space treated as unattested), the `cacheable` rule field by field, `PolicyVersion` stability, and the offline `check` path.
 
 ---
 
@@ -385,6 +396,7 @@ Wardryx is itself a security-relevant component, so a few of its own defaults ar
 - [x] HTTP API: `/v1/decide`, `/v1/approvals/{id}/decide`, `/v1/approvals`, `/v1/policies` (admin policy-as-code, see [Policy-as-code](#policy-as-code)), `/healthz`, bearer-key auth with org/role scoping
 - [x] Storage: Postgres (`pgx/v5`, embedded schema) and in-memory, behind one `Store` interface; approvals and policy-as-code documents
 - [x] `agent-event` NDJSON output (`policy_allow` / `policy_deny` / `approval_*` / `policy_updated`)
+- [x] Unanswered-approval sweep: one `approval_unanswered` per hold nobody decided (`WARDRYX_APPROVAL_UNANSWERED_AFTER`, default 15m), which reports and never decides
 - [x] CLI: `serve`, `check` (offline dry-run), `approvals`, `version`
 - [x] OTLP exporter: one span per `/v1/decide` outcome to `WARDRYX_OTLP_ENDPOINT`/`-otlp-endpoint`, fire-and-forget, no-op when unset (`internal/otel`)
 - [x] Policy-as-code admin API (`/v1/policies`, this repo's side): file-loaded policies stay a permanent floor, store-managed policies layer on top, validate-then-apply, live-swapped with no restart
