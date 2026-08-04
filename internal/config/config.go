@@ -76,11 +76,6 @@ func FromEnv() Config {
 	}
 }
 
-// parseBool reports whether s parses as a true-ish value (strconv.ParseBool:
-// "1", "t", "T", "TRUE", "true", "True", and so on). Unset, empty, or
-// unparsable input is treated as false rather than an error, matching every
-// other field in this package: FromEnv never fails on a missing or
-// malformed environment variable, it just falls back to the zero value.
 // parseDuration reports a Go duration, or zero when the variable is unset or
 // unparsable. The caller distinguishes "unset" from "0" by checking the raw
 // environment, since both arrive here as the zero value.
@@ -89,6 +84,11 @@ func parseDuration(s string) time.Duration {
 	return d
 }
 
+// parseBool reports whether s parses as a true-ish value (strconv.ParseBool:
+// "1", "t", "T", "TRUE", "true", "True", and so on). Unset, empty, or
+// unparsable input is treated as false rather than an error, matching every
+// other field in this package: FromEnv never fails on a missing or
+// malformed environment variable, it just falls back to the zero value.
 func parseBool(s string) bool {
 	b, _ := strconv.ParseBool(s)
 	return b
