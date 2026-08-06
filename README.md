@@ -6,7 +6,7 @@
 
 [![CI](https://github.com/TAIPANBOX/wardryx/actions/workflows/ci.yml/badge.svg)](https://github.com/TAIPANBOX/wardryx/actions/workflows/ci.yml)
 ![Go](https://img.shields.io/badge/go-1.26-00ADD8.svg)
-![tests](https://img.shields.io/badge/tests-159-brightgreen.svg)
+![tests](https://img.shields.io/badge/tests-160-brightgreen.svg)
 ![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)
 ![Status](https://img.shields.io/badge/status-deterministic%20PDP-2dd4bf.svg)
 
@@ -186,7 +186,9 @@ Response (a hold, in this example, because `send_wire_transfer`'s cost is above 
 
 No connection is ever parked waiting for the human: the agent (or its orchestrator) polls `GET /v1/approvals` or is notified out of band, and the eventual grant is proven by the signed token, not by wardryx remembering an open request. This mirrors the stateless kill-switch pattern already used elsewhere in the TAIPANBOX stack (TokenFuse).
 
-The token is a compact `base64url(claims) + "." + hex(HMAC-SHA256)` string, where `claims` is `{agent_id, run_id, tools (sorted), exp}`. Verification recomputes the HMAC over the still-encoded payload before decoding anything, checks the expiry (default 10 minutes from grant), and checks that the agent/run/tool-set presented at `/v1/decide` exactly match what was granted. `WARDRYX_APPROVAL_SECRET` is fail-closed: unset, minting and verifying both refuse rather than accept, since there is no such thing as an unsigned or always-valid token.
+The token is a compact `base64url(claims) + "." + hex(HMAC-SHA256)` string, where `claims` is `{agent_id, run_id, tools (sorted), max_cost_usd, exp}`. Verification recomputes the HMAC over the still-encoded payload before decoding anything, checks the expiry (default 10 minutes from grant), checks that the agent/run/tool-set presented at `/v1/decide` exactly match what was granted, and checks that the presented `est_cost_usd` does not exceed `max_cost_usd`. `WARDRYX_APPROVAL_SECRET` is fail-closed: unset, minting and verifying both refuse rather than accept, since there is no such thing as an unsigned or always-valid token.
+
+`max_cost_usd` is a real ceiling, not a label carried along for reference: it is set to the exact `est_cost_usd` that triggered the hold (the amount a human is actually approving, not merely the policy's `require_human_above_usd` threshold it crossed), and `/v1/decide` rejects any later presentation of the token whose `est_cost_usd` exceeds it, even with a correct signature, an unexpired token, and a matching agent/run/tool set. A legitimate retry at the same or a lower cost still succeeds, since the check is "at or under the ceiling", not "exactly equal". This makes a granted approval narrower than it might look: it authorizes spend up to a specific dollar figure for that agent/run/tool set, not blanket permission for whatever the agent tries next under the same token. A token minted before `max_cost_usd` existed decodes it as `0`, and `0` is deliberately never treated as "no ceiling": such a token fails closed against any positive `est_cost_usd`, the same as a token whose ceiling was explicitly set to zero.
 
 By default a granted token stays valid for every `/v1/decide` call that presents it within the TTL window, steps 5-6 above can repeat. Setting `WARDRYX_APPROVAL_SINGLE_USE=true` tightens this: the first `/v1/decide` call that redeems a token records the redemption in the store (an atomic check-and-set, `Store.TryRedeem`, keyed by a hash of the token itself so a later, separately-granted token for the same `agent_id`/`run_id`/tool set is never mistaken for the earlier one); a second presentation of that *same* token no longer allows, it falls back to a fresh `hold` (a new `approval_id`), exactly as if no token had been presented, so the action can be re-approved out of band rather than silently allowed again. This is off by default, so with `WARDRYX_APPROVAL_SINGLE_USE` unset the decide path is byte-for-byte unchanged from before single-use existed.
 
@@ -229,6 +231,38 @@ curl localhost:8090/v1/policies -H "Authorization: Bearer $ADMIN_KEY"
 curl -X DELETE localhost:8090/v1/policies/ops-guard -H "Authorization: Bearer $ADMIN_KEY"
 ```
 
+### GET /v1/status
+
+`/v1/policies` answers a narrower question than it looks like it does: it lists the *store's*
+operator-managed policies only. A deployment whose rules come entirely from a `-policy` file sees an
+*empty* `/v1/policies` list, while every one of those file-loaded rules is being enforced on every
+`/v1/decide` call. A console or health check reading only `/v1/policies` concludes "no policies,
+everything is allowed" and reports enforcement as off while it is on - the most damaging thing a posture
+check can do, since an operator who catches that once stops trusting every other warning the same
+console shows.
+
+`GET /v1/status` exists to prevent exactly that drift. It answers how many rules are actually being
+enforced right now, and where they came from, independent of whether any of them are visible through
+`/v1/policies`:
+
+```json
+GET /v1/status
+Authorization: Bearer <key>
+
+{
+  "policy_version": "3f9a2b7c1d4e",
+  "base_policies": 3,
+  "store_policies": 1,
+  "effective_policies": 4
+}
+```
+
+`base_policies` is what `-policy`/`WARDRYX_POLICY` loaded at startup (never individually addressable
+through `/v1/policies`); `store_policies` is the same count `/v1/policies` would list; `effective_policies`
+is their sum, the combined set `/v1/decide` actually evaluates against. `effective_policies: 0`, and only
+that, means every request really is allowed. Any authenticated key can read it, admin or viewer, the same
+scoping as `GET /v1/approvals`.
+
 ---
 
 ## OTLP export
@@ -268,7 +302,7 @@ This mirrors Wardryx's own stated defaults for its *own* availability: with no `
 
 Beyond the decision engine and the approval flow above, Wardryx ships:
 
-1. **HTTP API** (`internal/api`): `POST /v1/decide`, `POST /v1/approvals/{id}/decide` (admin only), `GET /v1/approvals` (org-scoped), the admin-only `/v1/policies` policy-as-code routes (see [Policy-as-code](#policy-as-code)), `GET /healthz`. Bearer-key auth mirrors the Cloud plane's `key:org[:role]` convention (TokenFuse `crates/cloud/src/keys.rs`), reimplemented in Go for the same wire format.
+1. **HTTP API** (`internal/api`): `POST /v1/decide`, `POST /v1/approvals/{id}/decide` (admin only), `GET /v1/approvals` (org-scoped), `GET /v1/status` (see [GET /v1/status](#get-v1status)), the admin-only `/v1/policies` policy-as-code routes (see [Policy-as-code](#policy-as-code)), `GET /healthz`. Bearer-key auth mirrors the Cloud plane's `key:org[:role]` convention (TokenFuse `crates/cloud/src/keys.rs`), reimplemented in Go for the same wire format.
 2. **Storage** (`internal/store`): Postgres via `pgx/v5` with an embedded, idempotent `schema.sql`, or an in-memory store when no DSN is configured. Both implementations satisfy the same `Store` interface.
 3. **Events** (`source: wardryx`): optional NDJSON `agent-event` output (`WARDRYX_EVENTS_PATH`) via `agent-stack-go/event`: `policy_allow`, `policy_deny`, `approval_requested`, `approval_granted`, `approval_denied`, `approval_timeout` (an agent presenting an approval token whose window had already closed, so usually a human did decide and the agent came back late), `approval_unanswered` (a hold nobody decided, see [The hold nobody decided](#the-hold-nobody-decided)), and `policy_updated` (a runtime `/v1/policies` write). Events now carry the SPEC §6.5 `prev_hash` chain; verify a stream with `agent-conform -chain <file>`.
 4. **OTLP export** (`internal/otel`): optional one-span-per-decision export to an OTLP/HTTP collector (`WARDRYX_OTLP_ENDPOINT`), see [OTLP export](#otlp-export).
@@ -379,6 +413,10 @@ make test-race   # go test -race ./...
 make lint        # go vet + staticcheck + gofmt check
 make test-integration   # Postgres-backed internal/store tests; needs DATABASE_URL
 ```
+
+CI runs two more gates that have no local `make` target: `govulncheck ./...` (known-vulnerability
+scanning against the Go vulnerability database) and `gosec ./...` (static analysis for common Go security
+mistakes), both in the `security` job in `.github/workflows/ci.yml`.
 
 The decision engine's table tests (`internal/pdp/pdp_test.go`) cover every rule and its boundary: allow; deny on a denied tool, on an unattested agent, at and over `max_steps`, and on a domain outside `allow_domains`; the empty-`domains` no-op; hold over `require_human_above_usd`; allow with a valid approval token; deny with an expired or wrong-binding one; and `deny_above_usd` as a hard ceiling that a cleanly-verifying token still cannot cross and that fires before the hold. Separate suites pin the normalization traps (a `deny_tool` entry matched whatever the case or trailing whitespace, an `attestation_method` of `none`, `NONE`, `n/a` or a bare space treated as unattested), the `cacheable` rule field by field, `PolicyVersion` stability, and the offline `check` path.
 
