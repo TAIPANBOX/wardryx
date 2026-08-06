@@ -63,10 +63,11 @@ go build ./...
 ./scripts/decision-path-purity.sh
 ```
 
-CI additionally runs `govulncheck ./...` and a Postgres-backed store test
-(`go test -tags integration ./internal/store/`). The integration test needs a
-live database and is skipped locally by the build tag, so a green local run
-proves less than a green CI run. Do not treat the two as equivalent.
+CI additionally runs `govulncheck ./...`, `gosec ./...` (the `security` job in
+`.github/workflows/ci.yml`), and a Postgres-backed store test (`go test -tags
+integration ./internal/store/`). The integration test needs a live database
+and is skipped locally by the build tag, so a green local run proves less
+than a green CI run. Do not treat the two as equivalent.
 
 ## Hard invariants
 

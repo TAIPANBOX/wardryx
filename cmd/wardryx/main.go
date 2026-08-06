@@ -142,7 +142,10 @@ func runServe(args []string) error {
 		fmt.Fprintf(os.Stderr, "wardryx: exporting OTLP decision spans to %s\n", *otlpEndpoint)
 	}
 
-	keys := api.ParseKeys(cfg.Keys)
+	keys, keyWarnings := api.ParseKeys(cfg.Keys)
+	for _, warn := range keyWarnings {
+		fmt.Fprintln(os.Stderr, warn)
+	}
 	engine := pdp.New(policies, []byte(cfg.ApprovalSecret))
 	basePolicies := policies.Policies()
 	srv := api.New(engine, st, events, otelExporter, keys, []byte(cfg.ApprovalSecret), cfg.ApprovalSingleUse, basePolicies)

@@ -1,9 +1,9 @@
 # Live infrastructure validation
 
-Wardryx was run as a live policy decision point in front of a real Claude-backed gateway on disposable
-Hetzner infrastructure before any public launch, including under real concurrent multi-agent load - the
-first time its PEP had ever faced simultaneous, adversarial-shaped traffic rather than sequential test
-cases.
+Wardryx was run as a live policy decision point in front of a real Claude-backed gateway, TokenFuse (the
+PEP, the enforcement point that calls Wardryx's `/v1/decide`), on disposable Hetzner infrastructure before
+any public launch, including under real concurrent multi-agent load - the first time TokenFuse had ever
+faced simultaneous, adversarial-shaped traffic rather than sequential test cases.
 
 ## Policy decisions under real, concurrent load
 
@@ -23,16 +23,26 @@ Both were enforcement gaps invisible on sequential test traffic - only real conc
 them. Both fixed, covered by a regression test, and re-verified live before the numbers above were taken
 as final.
 
-1. **Declared-but-not-invoked tool bypass** - the PEP built its deny/allow decision from *invoked* tools
-   only, so a request that merely *declared* a forbidden tool without ever calling it reached the model,
-   bypassing a `deny_tool` policy. Fixed by unioning `taint::declared_tool_names_in` into the decision
-   path, with a unit test for the exact bypass case plus an end-to-end regression.
-2. **Decision-cache attestation gap** - the PEP's decision cache was keyed on `(agent_id, tool-set hash)`
-   but not `attestation_method`, so within the cache TTL an unattested agent could inherit a recently
-   attested `allow` (or vice versa), silently defeating `deny_if_unattested` in an order-dependent way.
-   Found by the 34-agent concurrency test specifically - it never showed up under sequential load. Fixed
-   by adding attestation to the cache key; re-verified live (unattested → 403 in both cache orderings and
-   under the full concurrent test).
+**Both bugs were entirely on the PEP's side, not Wardryx's.** The PEP in this run was TokenFuse's
+gateway (`crates/gateway/src/wardryx.rs`), which calls Wardryx's `/v1/decide` and then acts on the
+verdict. Wardryx returned a correct decision and a correct `cacheable` hint throughout; the defect in
+each case was in how TokenFuse's own code built its request and cached the result, not in anything
+Wardryx computed. This live testing genuinely found and fixed both, in TokenFuse - see that repository's
+`PROGRESS.md` (the Wardryx policy hook entry) for the fixes attributed to that file, and this repository's
+own [README](README.md#the-v1decide-contract) ("Wardryx never caches anything itself") for the same point
+made in the ongoing documentation rather than a point-in-time report.
+
+1. **Declared-but-not-invoked tool bypass** - TokenFuse's gateway built its deny/allow decision from
+   *invoked* tools only, so a request that merely *declared* a forbidden tool without ever calling it
+   reached the model, bypassing a `deny_tool` policy. Fixed in TokenFuse by unioning
+   `taint::declared_tool_names_in` into the decision path, with a unit test for the exact bypass case
+   plus an end-to-end regression.
+2. **Decision-cache attestation gap** - TokenFuse's decision cache was keyed on `(agent_id, tool-set
+   hash)` but not `attestation_method`, so within the cache TTL an unattested agent could inherit a
+   recently attested `allow` (or vice versa), silently defeating `deny_if_unattested` in an
+   order-dependent way. Found by the 34-agent concurrency test specifically - it never showed up under
+   sequential load. Fixed in TokenFuse by adding attestation to the cache key; re-verified live
+   (unattested → 403 in both cache orderings and under the full concurrent test).
 
 ## What this proves
 
