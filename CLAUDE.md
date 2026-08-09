@@ -61,7 +61,12 @@ staticcheck ./...
 go test -race ./...
 go build ./...
 ./scripts/decision-path-purity.sh
+./scripts/readme-numbers.sh
+./scripts/gates-have-teeth.sh   # invariant 10; needs a clean tree
 ```
+
+`readme-numbers.sh` was missing from this list until 2026-08-09 while CI ran
+it, so this instruction was strictly smaller than CI's.
 
 CI additionally runs `govulncheck ./...`, `gosec ./...` (the `security` job in
 `.github/workflows/ci.yml`), and a Postgres-backed store test (`go test -tags
@@ -151,6 +156,29 @@ an absent invariant.
    `TestAHoldNobodyDecidedIsReportedOncePerHold` (verified by removing the
    marker, which reports three times), `TestAFreshHoldIsNotReported`,
    `TestZeroDisablesTheSweep`, `TestMarkersForDecidedHoldsAreDropped`)*
+
+10. **A check must be able to tell "did not fail" from "did not run", and both
+    gates here have been made to fail on purpose to prove they can.**
+    `readme-numbers.sh` already refuses in two distinct ways when its subject
+    is absent. Both sentences were true, were established by hand once in the
+    session that wrote it, and nothing re-ran them.
+
+    `decision-path-purity.sh` is the one with the sharper edge. It reads `go
+    list` output and matches each import against two lists. A list that stops
+    being consulted, or a `go list` that returns nothing, produces exactly the
+    same output as a clean tree: silence, then OK. The decision path is where
+    this plane answers allow or deny, so a purity check that has quietly
+    stopped looking is worse here than almost anywhere in the estate: invariant
+    1 exists so a verdict can be reproduced from the same input, and a verdict
+    that cannot be reproduced is not evidence.
+    *(gate: `scripts/gates-have-teeth.sh`, 6 cases: four real faults, one
+    non-fault, and one subject taken away. The non-fault is the one worth
+    keeping: the decision path may still use the standard library for pure
+    work, and a gate that flagged that would be flagging the code it protects.)*
+
+    **What it does not cover.** It cannot test itself. It proves each gate
+    catches the faults named in it, not every fault of that kind. It found no
+    hole in either.
 
 ## Decisions that have no gate yet
 
