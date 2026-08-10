@@ -28,13 +28,17 @@ Wardryx protects the operator by governing its own agents' actions: it blocks or
 
 ## Where this fits in the stack
 
-Wardryx is the **policy plane**: given a proposed action from one of the operator's own agents, it decides `allow`, `deny`, or `hold`. TokenFuse (the spend plane) calls it per request as the enforcement point (PEP); Wardryx is the decision point (PDP).
+Wardryx is the **policy plane**: given a proposed action from one of the operator's own agents, it decides `allow`, `deny`, or `hold`. TokenFuse (the spend plane) calls it per request as the enforcement point (PEP), and Scopyx (the egress plane) calls it per destination and again per redirect; Wardryx is the decision point (PDP) for both. Two enforcement points, one decision point, which is the shape this design is for: a policy an operator wrote once is applied at every place an agent can act.
 
 ```mermaid
 flowchart TB
   Agent["AI agent (any framework)"] -->|"LLM call (base-URL swap)"| TF["TokenFuse proxy: spend + enforcement"]
   TF -->|"POST /v1/decide (PEP)"| WX["Wardryx: policy PDP"]
   WX -.->|"allow / deny / hold"| TF
+  SC["Scopyx: web egress PEP"] -->|"POST /v1/decide, per destination and per redirect"| WX
+  WX -.->|"allow / deny / hold"| SC
+  Agent -->|"browse / fetch_url"| SC
+  SC -->|"the fetch, if it was allowed"| WEB[("the public web")]
   TF -->|"cheapest model, budget OK"| LLM[("LLM provider")]
   TF -->|"CallRecords"| CL["TokenFuse Cloud: control plane, incidents, replay, evidence, kill-switch"]
   TF ==>|"agent-event NDJSON"| BUS{{"agent-event bus + Agent Passport"}}
