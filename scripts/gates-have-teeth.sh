@@ -185,6 +185,11 @@ run_case "decision-path-purity: the PDP takes randomness" fail \
 	"$(py 'edit("internal/pdp/pdp.go", "import (", "import (\n\t_ \"crypto/rand\"")')" \
 	"imports 'crypto/rand' directly"
 
+run_case "no-raw-error-in-response: a driver error written into a body" fail \
+	'./scripts/no-raw-error-in-response.sh' \
+	"$(py 'edit("internal/api/api.go", "writeInternalError(w, \"listing policies\", err)", "writeError(w, http.StatusInternalServerError, err.Error())")')" \
+	"err.Error()"
+
 run_case "readme-numbers: a stale test badge" fail \
 	'./scripts/readme-numbers.sh' \
 	"$(py 'import re
@@ -199,6 +204,13 @@ echo "=== and what they must NOT catch ==="
 
 # The decision path may still use the standard library for pure work. A gate
 # that flagged this would be flagging the code it exists to protect.
+# Logging an error is not returning one. The check is about what leaves the
+# process in a RESPONSE, and a gate that also refused the log line would push
+# people to stop logging, which is the opposite of what the fix did.
+run_case "no-raw-error-in-response: an error logged and not returned" pass \
+	'./scripts/no-raw-error-in-response.sh' \
+	"$(py 'edit("internal/api/api.go", "func writeError(w http.ResponseWriter", "func loggedNotReturned(err error) { log.Printf(\"x: %v\", err.Error()) }\n\nfunc writeError(w http.ResponseWriter")')"
+
 run_case "decision-path-purity: a pure stdlib import on the decision path" pass \
 	'./scripts/decision-path-purity.sh' \
 	"$(py 'edit("internal/pdp/pdp.go", "import (", "import (\n\t_ \"sort\"")')"
@@ -206,6 +218,11 @@ run_case "decision-path-purity: a pure stdlib import on the decision path" pass 
 echo
 echo "=== and the one this estate learned the hard way ==="
 echo "    a gate whose subject is gone must SAY so, not report OK on nothing"
+
+run_case "no-raw-error-in-response: no internal/api left to read" fail \
+	'./scripts/no-raw-error-in-response.sh' \
+	"$(py 'import shutil; shutil.rmtree("internal/api")')" \
+	"measured nothing"
 
 run_case "readme-numbers: no badge left to compare against" fail \
 	'./scripts/readme-numbers.sh' \
