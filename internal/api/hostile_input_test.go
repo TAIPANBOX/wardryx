@@ -90,14 +90,18 @@ func TestARequiredFieldLeftOutIsRefusedRatherThanDefaulted(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			rec := doRaw(t, srv.Handler(), http.MethodPost, c.path, adminKey, c.body)
-			if rec.Code == http.StatusOK {
-				t.Fatalf("%q was accepted. A hold decided by nobody, or decided "+
-					"with a word the store does not understand, is a governance "+
-					"record that cannot be audited", c.body)
-			}
-			if rec.Code >= 500 {
-				t.Fatalf("%q returned %d. The client's omission became an "+
-					"incident against wardryx", c.body, rec.Code)
+			// Exactly 400, not merely "not 200". The looser version passed
+			// against a build with the decided_by guard disabled: the request
+			// fell through to the store, which answered not-found, and 404
+			// satisfied "not 200 and under 500" while proving nothing about
+			// the guard the case exists for. Found by removing the guard and
+			// watching the test stay green.
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("%q returned %d, want 400. A hold decided by nobody, or "+
+					"decided with a word the store does not understand, is a "+
+					"governance record that cannot be audited, and it has to be "+
+					"refused HERE rather than further in",
+					c.body, rec.Code)
 			}
 		})
 	}
