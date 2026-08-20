@@ -62,8 +62,9 @@ go test -race ./...
 go build ./...
 ./scripts/decision-path-purity.sh
 ./scripts/no-raw-error-in-response.sh
+./scripts/store-hands-out-copies.sh
 ./scripts/readme-numbers.sh
-./scripts/gates-have-teeth.sh   # invariant 11; needs a clean tree
+./scripts/gates-have-teeth.sh   # invariant 12; needs a clean tree
 ```
 
 `readme-numbers.sh` was missing from this list until 2026-08-09 while CI ran
@@ -183,7 +184,37 @@ an absent invariant.
     `TestAStoreErrorDoesNotCarryTheDatabasePasswordIntoTheResponse`, which
     fails on the unfixed code across all six store-backed routes)*
 
-11. **A check must be able to tell "did not fail" from "did not run", and both
+11. **What the store hands out is never the store's own memory.** A struct
+    copy is not a copy of what the struct points at. `Approval.Context` is a
+    map and `Policy`'s `DenyTool` and `AllowDomains` are slices, so returning a
+    stored value by value hands the caller a live reference into a governance
+    record. An edit they make for their own reasons rewrites it, and nothing
+    anywhere sees a write.
+
+    The disarm case is the one worth naming: a reader editing the deny list
+    they were handed changes the deny list the engine consults.
+
+    **The write path had this from the start and the read path did not**, which
+    also made the two backends disagree. Postgres reconstructs from rows on
+    every read and cannot alias, so the same code against the same data behaved
+    differently depending on which store was configured. That is exactly what
+    `deepCopyContext`'s own comment says it exists to prevent, one direction
+    down from where it was written.
+
+    Five read methods were affected: `GetApproval`, `ListApprovals`,
+    `GetPolicy`, `DecideApproval` and `ListPolicies`. The last two were found
+    by the gate, while the gate was still wrong about four correct helpers.
+
+    **What the gate is for is the sixth**, a read method added later that never
+    copied. Its absence produces no symptom: it compiles, returns the right
+    values, and passes any test that reads them. No test would be missing,
+    because nobody would have written one.
+    *(gate: `scripts/store-hands-out-copies.sh`, which reads each read method's
+    BODY rather than the shape of its returns, with 4 cases in
+    `gates-have-teeth.sh`; plus six behavioural tests in
+    `internal/store/isolation_test.go`, each verified against the unfixed code)*
+
+12. **A check must be able to tell "did not fail" from "did not run", and both
     gates here have been made to fail on purpose to prove they can.**
     `readme-numbers.sh` already refuses in two distinct ways when its subject
     is absent. Both sentences were true, were established by hand once in the
