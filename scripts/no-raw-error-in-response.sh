@@ -3,8 +3,7 @@
 #
 # WHY THIS IS A GATE AND NOT A REVIEW NOTE
 #
-# CLAUDE.md has recorded for a long time that invariant 3's error-text half is
-# unchecked, and on 2026-08-20 it turned out to be unchecked AND broken: all
+# On 2026-08-20 this was found unchecked AND broken: all
 # ten internal-error paths in internal/api wrote err.Error() into the body,
 # and six of them were reachable by any admin-keyed request against a store
 # that was down.
@@ -44,7 +43,7 @@ if [ -n "$hits" ]; then
 	echo
 	echo "An error from outside this package is written into an HTTP response."
 	echo "Use writeInternalError, which logs the detail and answers with a"
-	echo "message wardryx composed itself. See CLAUDE.md invariant 3."
+	echo "message wardryx composed itself. See CLAUDE.md invariant 10."
 	exit 1
 fi
 

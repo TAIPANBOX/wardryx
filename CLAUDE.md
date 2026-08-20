@@ -61,8 +61,9 @@ staticcheck ./...
 go test -race ./...
 go build ./...
 ./scripts/decision-path-purity.sh
+./scripts/no-raw-error-in-response.sh
 ./scripts/readme-numbers.sh
-./scripts/gates-have-teeth.sh   # invariant 10; needs a clean tree
+./scripts/gates-have-teeth.sh   # invariant 11; needs a clean tree
 ```
 
 `readme-numbers.sh` was missing from this list until 2026-08-09 while CI ran
@@ -157,7 +158,32 @@ an absent invariant.
    marker, which reports three times), `TestAFreshHoldIsNotReported`,
    `TestZeroDisablesTheSweep`, `TestMarkersForDecidedHoldsAreDropped`)*
 
-10. **A check must be able to tell "did not fail" from "did not run", and both
+10. **An error from outside this package never reaches an HTTP response.**
+    Every internal-error path in `internal/api` wrote `err.Error()` into the
+    body until 2026-08-20, and six of them were reachable by any admin-keyed
+    request against a store that was down.
+
+    **What actually leaked, said precisely rather than dramatically.** pgx
+    keeps the password out of its own error text and puts the host, user and
+    database in, so what a client could read was internal topology and SQL,
+    not a credential. It is a defect anyway, and the reason is the one worth
+    remembering: the guarantee was being held by a third-party library's
+    formatting choices, which are revisited on every upgrade and are nobody's
+    promise to wardryx.
+
+    The operator loses nothing, since `writeInternalError` logs the detail.
+    The client gains an operation name wardryx wrote itself, so a 500 is
+    reportable instead of anonymous.
+
+    **What the gate cannot do**: it reads source text. A message built by hand
+    out of the same error, or one interpolated through a helper it does not
+    know about, walks past it. That stays a matter for review.
+    *(gate: `scripts/no-raw-error-in-response.sh`, with 3 cases in
+    `gates-have-teeth.sh`; and
+    `TestAStoreErrorDoesNotCarryTheDatabasePasswordIntoTheResponse`, which
+    fails on the unfixed code across all six store-backed routes)*
+
+11. **A check must be able to tell "did not fail" from "did not run", and both
     gates here have been made to fail on purpose to prove they can.**
     `readme-numbers.sh` already refuses in two distinct ways when its subject
     is absent. Both sentences were true, were established by hand once in the
