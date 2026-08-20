@@ -77,6 +77,39 @@ func (m *Memory) CreateApproval(_ context.Context, a Approval) error {
 	return nil
 }
 
+// copyOut is deepCopyContext on the way OUT, and it exists because a struct
+// copy is not a copy of what the struct points at. Approval.Context is a map,
+// so returning the stored value by value hands the caller the store's own map:
+// they hold a live reference into a governance record, and an edit made for
+// their own reasons rewrites it with nothing anywhere seeing a write.
+//
+// The write path had this from the start. The read path did not, which also
+// made the two backends disagree: Postgres reconstructs from rows on every
+// read and cannot alias, so the same code against the same data behaved
+// differently depending on which store was configured. That is precisely what
+// deepCopyContext's own comment says it exists to prevent.
+func copyOut(a Approval) (Approval, error) {
+	c, err := deepCopyContext(a.Context)
+	if err != nil {
+		return Approval{}, err
+	}
+	a.Context = c
+	return a, nil
+}
+
+// copyPolicyOut is the same for a policy's slice fields. A struct copy copies
+// the slice HEADER, so both sides share the array underneath and an index
+// write reaches the store: a caller could disarm a deny list by editing what
+// they were handed.
+func copyPolicyOut(r PolicyRecord) (PolicyRecord, error) {
+	p, err := deepCopyPolicy(r.Policy)
+	if err != nil {
+		return PolicyRecord{}, err
+	}
+	r.Policy = p
+	return r, nil
+}
+
 func (m *Memory) GetApproval(_ context.Context, id string) (Approval, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -84,7 +117,7 @@ func (m *Memory) GetApproval(_ context.Context, id string) (Approval, error) {
 	if !ok {
 		return Approval{}, fmt.Errorf("%w: %s", ErrNotFound, id)
 	}
-	return a, nil
+	return copyOut(a)
 }
 
 func (m *Memory) ListApprovals(_ context.Context) ([]Approval, error) {
@@ -92,7 +125,11 @@ func (m *Memory) ListApprovals(_ context.Context) ([]Approval, error) {
 	defer m.mu.Unlock()
 	out := make([]Approval, 0, len(m.order))
 	for _, id := range m.order {
-		out = append(out, m.byID[id])
+		a, err := copyOut(m.byID[id])
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, a)
 	}
 	sort.SliceStable(out, func(i, j int) bool {
 		return out[i].RequestedAt.Before(out[j].RequestedAt)
@@ -163,7 +200,7 @@ func (m *Memory) GetPolicy(_ context.Context, id string) (PolicyRecord, error) {
 	if !ok {
 		return PolicyRecord{}, fmt.Errorf("%w: %s", ErrNotFound, id)
 	}
-	return r, nil
+	return copyPolicyOut(r)
 }
 
 func (m *Memory) ListPolicies(_ context.Context) ([]PolicyRecord, error) {
