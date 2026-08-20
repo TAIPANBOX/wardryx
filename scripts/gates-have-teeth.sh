@@ -190,6 +190,27 @@ run_case "no-raw-error-in-response: a driver error written into a body" fail \
 	"$(py 'edit("internal/api/api.go", "writeInternalError(w, \"listing policies\", err)", "writeError(w, http.StatusInternalServerError, err.Error())")')" \
 	"err.Error()"
 
+run_case "store-hands-out-copies: a read method that stops copying" fail \
+	'./scripts/store-hands-out-copies.sh' \
+	"$(py 'edit("internal/store/memory.go", "\treturn copyOut(a)", "\treturn a, nil")')" \
+	"does not copy"
+
+# The one the gate exists for: not a method that stopped copying, but a NEW
+# one that never did. Nothing about it produces a symptom, and no test would
+# be missing, because nobody wrote one.
+run_case "store-hands-out-copies: a new read method that never copied" fail \
+	'./scripts/store-hands-out-copies.sh' \
+	"$(py 'p = "internal/store/memory.go"
+s = open(p).read()
+open(p, "w").write(s + """
+func (m *Memory) GetSomethingNew(id string) (Approval, error) {
+\tm.mu.Lock()
+\tdefer m.mu.Unlock()
+\treturn m.byID[id], nil
+}
+""")')" \
+	"does not copy"
+
 run_case "readme-numbers: a stale test badge" fail \
 	'./scripts/readme-numbers.sh' \
 	"$(py 'import re
@@ -201,6 +222,23 @@ open("README.md","w").write(s.replace(m.group(0), "badge/tests-%d-" % (int(m.gro
 
 echo
 echo "=== and what they must NOT catch ==="
+
+# A new read method that DOES copy must pass. The first version of this gate
+# matched the shape of a return statement and fired on the two copy helpers,
+# which are exactly right. A gate that is wrong about correct code is a gate
+# somebody deletes.
+run_case "store-hands-out-copies: a new read method that copies properly" pass \
+	'./scripts/store-hands-out-copies.sh' \
+	"$(py 'p = "internal/store/memory.go"
+s = open(p).read()
+open(p, "w").write(s + """
+func (m *Memory) GetSomethingNew(id string) (Approval, error) {
+\tm.mu.Lock()
+\tdefer m.mu.Unlock()
+\treturn copyOut(m.byID[id])
+}
+""")')"
+
 
 # The decision path may still use the standard library for pure work. A gate
 # that flagged this would be flagging the code it exists to protect.
@@ -222,6 +260,11 @@ echo "    a gate whose subject is gone must SAY so, not report OK on nothing"
 run_case "no-raw-error-in-response: no internal/api left to read" fail \
 	'./scripts/no-raw-error-in-response.sh' \
 	"$(py 'import shutil; shutil.rmtree("internal/api")')" \
+	"measured nothing"
+
+run_case "store-hands-out-copies: no memory store left to read" fail \
+	'./scripts/store-hands-out-copies.sh' \
+	"$(py 'import os; os.remove("internal/store/memory.go")')" \
 	"measured nothing"
 
 run_case "readme-numbers: no badge left to compare against" fail \
