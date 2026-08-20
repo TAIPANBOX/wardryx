@@ -482,7 +482,7 @@ func (s *Server) handleApprovalDecide(w http.ResponseWriter, r *http.Request, _ 
 		writeError(w, http.StatusInternalServerError, "WARDRYX_APPROVAL_SECRET is not configured; cannot grant")
 		return
 	case err != nil:
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeInternalError(w, "deciding the approval", err)
 		return
 	}
 
@@ -523,7 +523,7 @@ type approvalDTO struct {
 func (s *Server) handleListApprovals(w http.ResponseWriter, r *http.Request, principal Principal) {
 	all, err := s.store.ListApprovals(r.Context())
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeInternalError(w, "listing approvals", err)
 		return
 	}
 	out := make([]approvalDTO, 0, len(all))
@@ -622,7 +622,7 @@ type statusDTO struct {
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request, _ Principal) {
 	stored, err := s.store.ListPolicies(r.Context())
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeInternalError(w, "reading status", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, statusDTO{
@@ -636,7 +636,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request, _ Principa
 func (s *Server) handleListPolicies(w http.ResponseWriter, r *http.Request, _ Principal) {
 	all, err := s.store.ListPolicies(r.Context())
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeInternalError(w, "listing policies", err)
 		return
 	}
 	out := make([]policyDTO, 0, len(all))
@@ -654,7 +654,7 @@ func (s *Server) handleGetPolicy(w http.ResponseWriter, r *http.Request, _ Princ
 		return
 	}
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeInternalError(w, "reading the policy", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, policyRecordToDTO(rec))
@@ -686,7 +686,7 @@ func (s *Server) handlePutPolicy(w http.ResponseWriter, r *http.Request, princip
 	ctx := r.Context()
 	stored, err := s.store.ListPolicies(ctx)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeInternalError(w, "writing the policy", err)
 		return
 	}
 	candidate := make([]policy.Policy, 0, len(s.basePolicies)+len(stored)+1)
@@ -712,7 +712,7 @@ func (s *Server) handlePutPolicy(w http.ResponseWriter, r *http.Request, princip
 
 	now := time.Now().UTC()
 	if err := s.store.PutPolicy(ctx, id, p, now); err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeInternalError(w, "writing the policy", err)
 		return
 	}
 	s.engine.SetPolicies(newSet)
@@ -721,7 +721,7 @@ func (s *Server) handlePutPolicy(w http.ResponseWriter, r *http.Request, princip
 
 	rec, err := s.store.GetPolicy(ctx, id)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeInternalError(w, "writing the policy", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, policyRecordToDTO(rec))
@@ -740,7 +740,7 @@ func (s *Server) handleDeletePolicy(w http.ResponseWriter, r *http.Request, prin
 
 	stored, err := s.store.ListPolicies(ctx)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeInternalError(w, "deleting the policy", err)
 		return
 	}
 	found := false
@@ -765,7 +765,7 @@ func (s *Server) handleDeletePolicy(w http.ResponseWriter, r *http.Request, prin
 	}
 
 	if err := s.store.DeletePolicy(ctx, id); err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeInternalError(w, "deleting the policy", err)
 		return
 	}
 	s.engine.SetPolicies(newSet)
@@ -779,6 +779,24 @@ func (s *Server) handleDeletePolicy(w http.ResponseWriter, r *http.Request, prin
 
 type errorDTO struct {
 	Error string `json:"error"`
+}
+
+// writeInternalError answers a failure that is wardryx's own: a fixed message
+// to the client, the detail in the log where the operator can read it.
+//
+// The detail is not the client's business, and more to the point it is not
+// wardryx's string to give away. It comes from a driver, and what a driver
+// puts in an error text is the driver's choice, revisited on every upgrade.
+// pgx today keeps the password out of its connection errors and puts the
+// host, user and database in. Passing that through means invariant 3 is held
+// by somebody else's formatting decisions rather than by this code.
+//
+// The op is named in the response on purpose. It is a string wardryx wrote,
+// so it reveals nothing, and without it a client has a 500 with nothing to
+// report to anybody.
+func writeInternalError(w http.ResponseWriter, op string, err error) {
+	log.Printf("wardryx: %s: %v", op, err)
+	writeError(w, http.StatusInternalServerError, "internal error while "+op)
 }
 
 func writeError(w http.ResponseWriter, status int, msg string) {
