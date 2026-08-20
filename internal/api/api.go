@@ -163,16 +163,7 @@ func (s *Server) WatchUnansweredApprovals(ctx context.Context) {
 	if s.unansweredAfter <= 0 {
 		return
 	}
-	// Often enough that the report is timely, rarely enough that an idle
-	// wardryx is not listing approvals every second.
-	interval := s.unansweredAfter / 4
-	if interval > time.Minute {
-		interval = time.Minute
-	}
-	if interval < time.Second {
-		interval = time.Second
-	}
-	t := time.NewTicker(interval)
+	t := time.NewTicker(sweepInterval(s.unansweredAfter))
 	defer t.Stop()
 	for {
 		select {
@@ -182,6 +173,26 @@ func (s *Server) WatchUnansweredApprovals(ctx context.Context) {
 			s.sweepUnansweredApprovals(ctx, time.Now())
 		}
 	}
+}
+
+// sweepInterval is how often the watcher looks, given the threshold it is
+// watching for. Often enough that the report is timely, rarely enough that an
+// idle wardryx is not listing approvals every second.
+//
+// Extracted from the loop so the two clamps can be read and tested without
+// waiting for a ticker. Both of them are the kind of arithmetic that is
+// obviously right until the day it is not: a threshold under four seconds
+// would otherwise tick faster than once a second, and a threshold of a day
+// would sweep every six hours and report a hold long after anybody cared.
+func sweepInterval(threshold time.Duration) time.Duration {
+	interval := threshold / 4
+	if interval > time.Minute {
+		interval = time.Minute
+	}
+	if interval < time.Second {
+		interval = time.Second
+	}
+	return interval
 }
 
 func (s *Server) sweepUnansweredApprovals(ctx context.Context, now time.Time) {
