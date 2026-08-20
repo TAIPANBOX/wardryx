@@ -151,7 +151,7 @@ func (m *Memory) DecideApproval(_ context.Context, id, decision, decidedBy strin
 	a.DecidedBy = decidedBy
 	a.DecidedAt = decidedAt
 	m.byID[id] = a
-	return a, nil
+	return copyOut(a)
 }
 
 func (m *Memory) TryRedeem(_ context.Context, key string) (bool, error) {
@@ -213,7 +213,11 @@ func (m *Memory) ListPolicies(_ context.Context) ([]PolicyRecord, error) {
 	sort.Strings(ids)
 	out := make([]PolicyRecord, 0, len(ids))
 	for _, id := range ids {
-		out = append(out, m.policyByID[id])
+		r, err := copyPolicyOut(m.policyByID[id])
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, r)
 	}
 	return out, nil
 }
