@@ -18,6 +18,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/TAIPANBOX/agent-stack-go/chain"
 	"io"
 	"os"
 	"path/filepath"
@@ -76,6 +77,37 @@ type Policy struct {
 	// DenyIfUnattested denies any request from an agent with no live
 	// attestation (attestation method "" or "none").
 	DenyIfUnattested bool `yaml:"deny_if_unattested,omitempty" json:"deny_if_unattested,omitempty"`
+	// DenyIfChainUnproven denies a request whose delegation chain is present
+	// and was not PROVED (agent-passport SPEC 5.2).
+	//
+	// Until 2026-08-26 a chain was a list of names an agent typed into a
+	// header: this service validated its shape and believed its contents.
+	// With vouchryx issuing RFC 8693 tokens and enforcement points verifying
+	// them, a policy can finally require the difference.
+	//
+	// It is about a chain that IS present. An agent acting autonomously is
+	// not delegating and has nothing to prove, so this rule does not fire on
+	// it; the rule for "must be acting for somebody" is
+	// [Policy.RequireRootPrincipal], and the two are separate precisely so an
+	// operator can say either without saying both.
+	DenyIfChainUnproven bool `yaml:"deny_if_chain_unproven,omitempty" json:"deny_if_chain_unproven,omitempty"`
+	// MaxChainDepth caps how many entries a delegation chain may carry.
+	//
+	// agent-passport SPEC 5.1 already caps every chain at chain.MaxDepth (32)
+	// stack-wide and this service refuses a longer one independent of policy.
+	// This is a policy saying a LOWER number: a support bot three delegations
+	// deep is a fan-out somebody should have to justify. Zero (the default)
+	// means no cap, consistent with MaxSteps.
+	MaxChainDepth int `yaml:"max_chain_depth,omitempty" json:"max_chain_depth,omitempty"`
+	// RequireRootPrincipal is a glob the chain's ROOT must match, in the same
+	// syntax as Target.
+	//
+	// The root is the first entry (SPEC 5), usually a human. A policy setting
+	// this is saying "this agent only ever acts for X", and an EMPTY chain has
+	// no root, so it denies: without that, an agent satisfies the rule by
+	// dropping its chain and having nothing to check. Empty (the default)
+	// means no requirement.
+	RequireRootPrincipal string `yaml:"require_root_principal,omitempty" json:"require_root_principal,omitempty"`
 }
 
 // compiled pairs a normalized Policy with its compiled glob matcher.
@@ -363,6 +395,23 @@ func validate(p Policy) error {
 	if p.MaxSteps < 0 {
 		return fmt.Errorf("policy %q: max_steps must not be negative", p.Name)
 	}
+	if p.MaxChainDepth < 0 {
+		return fmt.Errorf("policy %q: max_chain_depth must not be negative", p.Name)
+	}
+	if p.MaxChainDepth > chain.MaxDepth {
+		// A cap above the stack-wide one can never fire, and a rule that can
+		// never fire reads as a control and is not. SPEC 5.1 refuses a longer
+		// chain before any policy is consulted.
+		return fmt.Errorf(
+			"policy %q: max_chain_depth %d is above the stack-wide cap of %d, so it could never fire",
+			p.Name, p.MaxChainDepth, chain.MaxDepth)
+	}
+	if p.RequireRootPrincipal != "" {
+		if _, err := compileGlob(p.RequireRootPrincipal); err != nil {
+			return fmt.Errorf("policy %q: require_root_principal %q is not a valid glob: %w",
+				p.Name, p.RequireRootPrincipal, err)
+		}
+	}
 	return nil
 }
 
@@ -444,4 +493,23 @@ func compileGlob(pattern string) (*regexp.Regexp, error) {
 		return nil, fmt.Errorf("invalid target glob %q: %w", pattern, err)
 	}
 	return re, nil
+}
+
+// MatchesGlob reports whether `value` matches `pattern` in the same syntax
+// Target uses.
+//
+// Exported because the PDP matches a chain's ROOT against
+// [Policy.RequireRootPrincipal], and a second glob implementation over there
+// would be two answers to "does this pattern match", which is the same class of
+// drift a second signature verifier would be.
+func MatchesGlob(pattern, value string) bool {
+	re, err := compileGlob(pattern)
+	if err != nil {
+		// A pattern that does not compile was refused at validate time, so
+		// reaching here means the set was built without validation. Matching
+		// nothing is the safe answer: a rule that matches nothing denies,
+		// because every caller of this treats "no match" as a refusal.
+		return false
+	}
+	return re.MatchString(value)
 }

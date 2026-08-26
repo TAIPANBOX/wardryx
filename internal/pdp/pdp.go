@@ -86,6 +86,20 @@ type DecideRequest struct {
 	// "spiffe-svid"), or "" / "none" for no live attestation. Checked
 	// against every matched policy's DenyIfUnattested.
 	AttestationMethod string
+	// ChainProven says the enforcement point VERIFIED the delegation proof
+	// on this request (agent-passport SPEC 5.2) before calling.
+	//
+	// This service does not verify it and must not. Verification is a library
+	// call at the enforcement point (agent-stack-go/delegation): wardryx
+	// decides at a 3.2 ms p50 and audits every decision, and a signature check
+	// per decision taxes every decision in the estate. What arrives here is a
+	// FACT somebody else established.
+	//
+	// So the trust boundary is the same one AttestationMethod already has: a
+	// caller that lies about this is believed. That is not a weakness of this
+	// field, it is where the boundary is, and it is why the enforcement points
+	// verify rather than assert.
+	ChainProven bool
 	// ApprovalToken, if non-empty, is presented as proof that a human
 	// already approved this exact (agent_id, run_id, tool-set) after an
 	// earlier hold. A valid token turns what would be a "hold" into an
@@ -282,6 +296,38 @@ func (e *Engine) Decide(req DecideRequest) DecideResponse {
 		return resp
 	}
 
+	// The chain rules, before the cost ones and after the shape check. A
+	// delegation nobody proved is refused before anything is priced: an
+	// estimate is work the caller chose, and pricing a request that was never
+	// going to be allowed is work an attacker chooses.
+	if pol, ok := chainDepthExceeded(matched, req.OnBehalfOf); ok {
+		resp.Decision = Deny
+		resp.Reason = fmt.Sprintf(
+			"policy %q max_chain_depth %d exceeded: the chain carries %d",
+			pol.Name, pol.MaxChainDepth, len(req.OnBehalfOf))
+		return resp
+	}
+
+	if pol, ok := rootPrincipalRefused(matched, req.OnBehalfOf); ok {
+		root := "(no chain)"
+		if len(req.OnBehalfOf) > 0 {
+			root = req.OnBehalfOf[0]
+		}
+		resp.Decision = Deny
+		resp.Reason = fmt.Sprintf(
+			"policy %q require_root_principal %q is not matched by %s",
+			pol.Name, pol.RequireRootPrincipal, root)
+		return resp
+	}
+
+	if pol, ok := chainUnproven(matched, req.OnBehalfOf, req.ChainProven); ok {
+		resp.Decision = Deny
+		resp.Reason = fmt.Sprintf(
+			"policy %q requires a proved delegation and this chain is unproven",
+			pol.Name)
+		return resp
+	}
+
 	if pol, ok := unattestedDenied(matched, req.AttestationMethod); ok {
 		resp.Decision = Deny
 		resp.Reason = fmt.Sprintf("policy %q requires a live attestation; agent attestation is %q", pol.Name, attestationLabel(req.AttestationMethod))
@@ -362,7 +408,15 @@ func (e *Engine) Decide(req DecideRequest) DecideResponse {
 // as if it were as stable as the tool set.
 func requestSpecific(matched []policy.Policy) bool {
 	for _, p := range matched {
-		if p.MaxSteps > 0 || p.RequireHumanAboveUSD > 0 || p.DenyAboveUSD > 0 || len(p.AllowDomains) > 0 {
+		// The three chain fields join this list for the reason the others are
+		// on it: `OnBehalfOf` and `ChainProven` are per-REQUEST values, not
+		// stable per-agent facts. A cached chain deny would be reused for a
+		// call presenting a different chain, and a cached chain ALLOW is
+		// worse: it would let an unproven chain through on the strength of a
+		// proven one.
+		if p.MaxSteps > 0 || p.RequireHumanAboveUSD > 0 || p.DenyAboveUSD > 0 ||
+			len(p.AllowDomains) > 0 || p.DenyIfChainUnproven ||
+			p.MaxChainDepth > 0 || p.RequireRootPrincipal != "" {
 			return true
 		}
 	}
@@ -551,4 +605,53 @@ func attestationLabel(method string) string {
 		return "none"
 	}
 	return method
+}
+
+// chainDepthExceeded reports the first policy whose max_chain_depth this
+// chain is longer than.
+func chainDepthExceeded(policies []policy.Policy, chain []string) (policy.Policy, bool) {
+	for _, p := range policies {
+		if p.MaxChainDepth > 0 && len(chain) > p.MaxChainDepth {
+			return p, true
+		}
+	}
+	return policy.Policy{}, false
+}
+
+// rootPrincipalRefused reports the first policy whose require_root_principal
+// this chain's root does not match.
+//
+// An EMPTY chain has no root and is refused by any policy that sets this: a
+// rule saying "this agent only ever acts for a person" is not satisfied by an
+// agent acting for nobody, and reading it the other way would mean an agent
+// satisfies the rule by dropping its chain.
+func rootPrincipalRefused(policies []policy.Policy, chain []string) (policy.Policy, bool) {
+	for _, p := range policies {
+		if p.RequireRootPrincipal == "" {
+			continue
+		}
+		if len(chain) == 0 {
+			return p, true
+		}
+		if !policy.MatchesGlob(p.RequireRootPrincipal, chain[0]) {
+			return p, true
+		}
+	}
+	return policy.Policy{}, false
+}
+
+// chainUnproven reports the first policy that requires a proved delegation
+// where this request carries an unproved one.
+//
+// No chain is not this rule's business: see the field's own doc comment.
+func chainUnproven(policies []policy.Policy, chain []string, proven bool) (policy.Policy, bool) {
+	if len(chain) == 0 || proven {
+		return policy.Policy{}, false
+	}
+	for _, p := range policies {
+		if p.DenyIfChainUnproven {
+			return p, true
+		}
+	}
+	return policy.Policy{}, false
 }
