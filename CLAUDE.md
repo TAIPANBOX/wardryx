@@ -237,6 +237,44 @@ an absent invariant.
     catches the faults named in it, not every fault of that kind. It found no
     hole in either.
 
+13. **The PDP reads a proof it did not verify, and that is the design.**
+   `DecideRequest.ChainProven` is a FACT the enforcement point established with
+   `agent-stack-go/delegation` before calling. This service must not verify it
+   itself: it decides at a 3.2 ms p50 and audits every decision, and a signature
+   check per decision taxes every decision in the estate. The trust boundary is
+   exactly the one `AttestationMethod` already has, and a caller that lies is
+   believed. That is where the boundary IS, not a weakness of the field.
+
+   **Absent means not verified, never "verified and unsaid".** A default of
+   true would make every enforcement point that has not been upgraded look like
+   one that verifies, which is a fleet mid-upgrade silently satisfying a rule
+   none of it implements. *(test:
+   `TestAnAbsentChainProvenMeansNotVerified`,
+   `TestTheWireCarriesWhetherAnybodyVerifiedTheProof`, both of which exist
+   because a planted mutant hardcoding `ChainProven: true` in the HTTP layer
+   survived the entire suite: every other API test either sends no chain or
+   uses a policy with no chain rule, so nothing observed the field at all. That
+   is the failure that looks exactly like the feature working.)*
+
+   **`deny_if_chain_unproven` and `require_root_principal` are two rules on
+   purpose.** The first is about a chain that IS present: an agent acting
+   autonomously is not delegating and has nothing to prove. The second denies an
+   EMPTY chain, because a rule saying "this agent only ever acts for a person"
+   is not satisfied by an agent acting for nobody. Fold them into one and an
+   operator loses the ability to say either without the other; read the first
+   the second way and an agent satisfies it by dropping its chain.
+
+   **A decision that read the chain is never cacheable.** `OnBehalfOf` and
+   `ChainProven` are per-REQUEST values like `Steps` and `Domains`. A cached
+   chain deny would be reused for a call presenting a different chain, and a
+   cached chain ALLOW is worse: it would let an unproven chain through on the
+   strength of a proven one. *(test: `TestAChainDecisionIsNeverCached`)*
+
+   **`max_chain_depth` above the stack-wide cap is refused at load.** SPEC 5.1
+   caps every chain at 32 and this service already refuses a longer one
+   independent of policy, so a higher number is a rule that can never fire,
+   which reads as a control and is not.
+
 ## Decisions that have no gate yet
 
 This list is debt, and it is here to stay visible rather than to be tidy.
