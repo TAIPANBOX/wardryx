@@ -315,7 +315,12 @@ type decideRequestDTO struct {
 	Model             string   `json:"model,omitempty"`
 	EstCostUSD        float64  `json:"est_cost_usd,omitempty"`
 	AttestationMethod string   `json:"attestation_method,omitempty"`
-	ApprovalToken     string   `json:"approval_token,omitempty"`
+	// ChainProven: the enforcement point VERIFIED this request's delegation
+	// proof (agent-passport SPEC 5.2) before calling. Absent means it did
+	// not, never "it did and forgot to say": a default of true would make
+	// every caller that has not been upgraded look like one that verifies.
+	ChainProven   bool   `json:"chain_proven,omitempty"`
+	ApprovalToken string `json:"approval_token,omitempty"`
 }
 
 type decideResponseDTO struct {
@@ -354,6 +359,7 @@ func (s *Server) handleDecide(w http.ResponseWriter, r *http.Request, principal 
 		Model:             dto.Model,
 		EstCostUSD:        dto.EstCostUSD,
 		AttestationMethod: dto.AttestationMethod,
+		ChainProven:       dto.ChainProven,
 		ApprovalToken:     dto.ApprovalToken,
 	}
 	resp := s.engine.Decide(req)
@@ -414,6 +420,7 @@ func (s *Server) handleDecide(w http.ResponseWriter, r *http.Request, principal 
 			"est_cost_usd":       req.EstCostUSD,
 			"attestation_method": req.AttestationMethod,
 			"on_behalf_of":       req.OnBehalfOf,
+			"chain_proven":       req.ChainProven,
 			"reason":             resp.Reason,
 			"policy_version":     resp.PolicyVersion,
 		})
