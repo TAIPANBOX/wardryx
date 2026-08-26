@@ -224,28 +224,34 @@ func (e *Engine) SetPolicies(policies *policy.Set) {
 //  1. an invalid on_behalf_of delegation chain denies, independent of any
 //     policy;
 //  2. a requested tool in a matched policy's deny_tool denies;
-//  3. a matched policy's deny_if_unattested with no live attestation
+//  3. a matched policy's max_chain_depth, reached or exceeded by the length
+//     of req.OnBehalfOf, denies;
+//  4. a matched policy's require_root_principal, with a chain whose root is
+//     not one it names, denies;
+//  5. a matched policy's deny_if_chain_unproven, with req.ChainProven
+//     false, denies;
+//  6. a matched policy's deny_if_unattested with no live attestation
 //     denies;
-//  4. a matched policy's max_steps, reached or exceeded by req.Steps,
+//  7. a matched policy's max_steps, reached or exceeded by req.Steps,
 //     denies;
-//  5. a matched policy's allow_domains, missing an entry from req.Domains,
+//  8. a matched policy's allow_domains, missing an entry from req.Domains,
 //     denies;
-//  6. a matched policy's deny_above_usd, exceeded by EstCostUSD, denies
+//  9. a matched policy's deny_above_usd, exceeded by EstCostUSD, denies
 //     outright: this is a hard ceiling, not an approval gate, so no
 //     ApprovalToken -- however validly minted -- is even inspected, unlike
-//     rule 7 below;
-//  7. a matched policy's require_human_above_usd, exceeded by EstCostUSD,
+//     rule 10 below;
+//  10. a matched policy's require_human_above_usd, exceeded by EstCostUSD,
 //     resolves to Hold, unless a valid ApprovalToken was presented (then
 //     Allow) or an *invalid* one was presented (then Deny);
-//  8. otherwise, Allow.
+//  11. otherwise, Allow.
 //
 // A deny from any rule wins outright: it short-circuits every later rule
 // and Decide never has to reconcile a deny against a later hold or allow.
-// Rules 1-6 are all deny-or-continue and carry no state, so their relative
+// Rules 1-9 are all deny-or-continue and carry no state, so their relative
 // order only changes which single Reason string is reported when a request
 // happens to violate more than one of them at once -- it never changes
-// whether the final Decision is Deny. Rule 6 is deliberately placed before
-// rule 7: a policy that sets both deny_above_usd and
+// whether the final Decision is Deny. Rule 9 is deliberately placed before
+// rule 10: a policy that sets both deny_above_usd and
 // require_human_above_usd, with a cost that exceeds both, must Deny rather
 // than Hold -- the hard ceiling always wins over the approval gate, and
 // require_human_above_usd's threshold is never even reached, so no

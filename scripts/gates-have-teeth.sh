@@ -257,6 +257,30 @@ echo
 echo "=== and the one this estate learned the hard way ==="
 echo "    a gate whose subject is gone must SAY so, not report OK on nothing"
 
+run_case "decide-order: a rule is added to the code and not to the comment" fail \
+	'./scripts/decide-order-is-documented.sh' \
+	"$(py 'edit("internal/pdp/pdp.go",
+        "\tif pol, ok := unattestedDenied(",
+        "\tif pol, ok := brandNewRule(matched); ok {\n\t\t_ = pol\n\t}\n\tif pol, ok := unattestedDenied(")')" \
+	"no policy-field name for it"
+
+run_case "decide-order: the comment loses a rule and renumbers over it" fail \
+	'./scripts/decide-order-is-documented.sh' \
+	"$(py 'import re
+s = open("internal/pdp/pdp.go").read()
+before = s
+s = re.sub(r"//  4\. a matched policy.s require_root_principal, with a chain whose root is\n//     not one it names, denies;\n", "", s, count=1)
+assert s != before, "the require_root_principal item is not where this expects it"
+open("internal/pdp/pdp.go", "w").write(s)')" \
+	"and the comment"
+
+run_case "decide-order: the doc comment is gone" fail \
+	'./scripts/decide-order-is-documented.sh' \
+	"$(py 'edit("internal/pdp/pdp.go",
+        "// Decide evaluates req against",
+        "// Decide handles the request")')" \
+	"measured nothing"
+
 run_case "no-raw-error-in-response: no internal/api left to read" fail \
 	'./scripts/no-raw-error-in-response.sh' \
 	"$(py 'import shutil; shutil.rmtree("internal/api")')" \

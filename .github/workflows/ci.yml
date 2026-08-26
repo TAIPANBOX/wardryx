@@ -29,6 +29,14 @@ jobs:
       - name: decision path stays deterministic
         run: ./scripts/decision-path-purity.sh
 
+      # The order Decide DOCUMENTS against the order it RUNS. Three chain
+      # rules landed on 2026-08-26 and the doc comment kept numbering without
+      # them, so every item after the second named the wrong rule. A renumbered
+      # list looks complete, which is why this reads the order and not the
+      # membership.
+      - name: the documented decision order is the real one
+        run: ./scripts/decide-order-is-documented.sh
+
       # A number in a README is a claim with no owner: it is right the day it
       # is written and the suite grows in a commit that never opens the file.
       # On 2026-08-05 four of seven such figures on it-rat.com were found
