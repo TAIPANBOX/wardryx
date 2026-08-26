@@ -63,6 +63,7 @@ go build ./...
 ./scripts/decision-path-purity.sh
 ./scripts/no-raw-error-in-response.sh
 ./scripts/store-hands-out-copies.sh
+./scripts/decide-order-is-documented.sh
 ./scripts/readme-numbers.sh
 ./scripts/gates-have-teeth.sh   # invariant 12; needs a clean tree
 ```
@@ -329,3 +330,25 @@ decision outcome and every exported signature identical.
 - Nothing paid or metered gets enabled without telling the user first and
   getting agreement. This includes anything that would start metering CI.
 - Do not delete or revoke keys, tokens, or certificates on your own initiative.
+
+14. **The order `Decide` documents is the order `Decide` runs.** A caller reads
+    that order to know which `reason` it gets when two rules would both deny,
+    and `reason` is what an operator sees first, what a dashboard groups by,
+    and what somebody debugging a refusal reads before anything else.
+
+    `deny_if_chain_unproven`, `max_chain_depth` and `require_root_principal`
+    landed on 2026-08-26 in the code and in this file, and in neither the
+    README nor `Decide`'s own doc comment. The comment did not merely omit
+    them: it went on NUMBERING, so it said "3. deny_if_unattested" while three
+    chain rules ran between rule 2 and it. Every number after the second was
+    wrong, each by exactly the count of the rules nobody had mentioned.
+
+    That is worse than an omission, and it is why the gate reads the ORDER
+    rather than the membership. A missing entry is visible to anybody looking
+    for it. A renumbered list looks complete.
+    *(gate: `scripts/decide-order-is-documented.sh`, which reads the numbered
+    items out of the doc comment and the deny predicates out of the function
+    and compares them position by position. Its limit is in the script: it
+    knows the `if ... ok {` shape those checks have always had, so a rule
+    added by some other shape is invisible to it.)*
+
