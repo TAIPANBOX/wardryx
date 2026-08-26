@@ -5,7 +5,7 @@ go 1.26
 toolchain go1.26.7
 
 require (
-	github.com/TAIPANBOX/agent-stack-go v0.7.0
+	github.com/TAIPANBOX/agent-stack-go v0.8.0
 	github.com/jackc/pgx/v5 v5.9.2
 	gopkg.in/yaml.v3 v3.0.1
 )
@@ -18,5 +18,5 @@ require (
 	github.com/kr/text v0.2.0 // indirect
 	github.com/rogpeppe/go-internal v1.15.0 // indirect
 	golang.org/x/sync v0.22.0 // indirect
-	golang.org/x/text v0.40.0 // indirect
+	golang.org/x/text v0.41.0 // indirect
 )
