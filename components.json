@@ -1,0 +1,76 @@
+{
+  "$comment": [
+    "What this repository contributes to a running stack, and what a check may",
+    "believe about it. `checked` is proved against this repository by",
+    "internal/manifest/manifest_test.go in this repository's own CI; `declared` is",
+    "a statement nobody can verify and carries its own `why`.",
+    "",
+    "THE CLAIM WORTH READING HERE IS `refuses_unauthenticated_v1`, AND IT EXISTS",
+    "BECAUSE THE OPPOSITE WAS WRITTEN DOWN. vouchryx's own manifest test says, in",
+    "a comment, that wardryx `starts happily with an empty environment and",
+    "installs a built-in admin key`. The first half is true and is declared here.",
+    "The second half is false: ParseKeys(\"\") returns an empty map, there is no",
+    "built-in key of any kind, and every /v1 route answers 401 without one.",
+    "Measured 2026-08-28 by starting it with `env -i`.",
+    "",
+    "A false sentence about authentication, living in a comment in another",
+    "repository, is exactly what a per-repo manifest is for: the only place that",
+    "can settle it is the repository that owns the behaviour, and the only way to",
+    "settle it is to run the thing."
+  ],
+  "schema": "taipanbox.dev/components/v1",
+  "repo": "TAIPANBOX/wardryx",
+  "components": [
+    {
+      "name": "wardryx",
+      "class": "service",
+      "checked": {
+        "package": "github.com/TAIPANBOX/wardryx/cmd/wardryx",
+        "listen_default": ":8090",
+        "health_path": "/healthz",
+        "env": {
+          "WARDRYX_ADDR": {
+            "required": false,
+            "default": ":8090"
+          },
+          "WARDRYX_APPROVAL_SECRET": {
+            "required": false
+          },
+          "WARDRYX_APPROVAL_SINGLE_USE": {
+            "required": false
+          },
+          "WARDRYX_APPROVAL_UNANSWERED_AFTER": {
+            "required": false
+          },
+          "WARDRYX_DB": {
+            "required": false
+          },
+          "WARDRYX_EVENTS_PATH": {
+            "required": false
+          },
+          "WARDRYX_KEYS": {
+            "required": false
+          },
+          "WARDRYX_OTLP_ENDPOINT": {
+            "required": false
+          },
+          "WARDRYX_POLICY": {
+            "required": false
+          }
+        },
+        "starts_with_empty_environment": true,
+        "refuses_unauthenticated_v1": true
+      },
+      "declared": {
+        "zero_policies_allows_every_request": {
+          "value": "no -policy given; running with zero policies, every request will be allowed",
+          "why": "It says this at startup, and it is a policy-plane default rather than an authentication one: a caller still needs a bearer key to ask, and with no policy loaded the answer to what it asks is allow. Declared rather than checked because what a launcher SHOULD supply is a deployment decision, not a fact about this repository."
+        },
+        "no_db_means_approvals_are_lost_on_restart": {
+          "value": "no -db given; using an in-memory approval store (state is lost on restart)",
+          "why": "Also said at startup. Not checked here because proving it would mean restarting the process and asserting an absence, and the sentence the process prints is the honest form of the same claim."
+        }
+      }
+    }
+  ]
+}
