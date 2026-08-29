@@ -5,10 +5,16 @@
 
         <defs><marker id="a2" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0 L8 4 L0 8 z" fill="#5A6675"/></marker></defs>
         <g font-family="ui-monospace,Menlo" text-anchor="middle">
-          <rect x="10" y="120" width="118" height="58" rx="12" fill="#141C27" stroke="#F4B23E" stroke-width="1.4"/>
-          <text x="69" y="146" fill="#F4B23E" font-size="12.5" font-weight="700">TokenFuse PEP</text>
-          <text x="69" y="163" fill="#8A97A6" font-size="10.5">asks per request</text>
-          <text x="165" y="140" fill="#5A6675" font-size="10">/v1/decide</text>
+          <rect x="10" y="92" width="118" height="52" rx="12" fill="#141C27" stroke="#F4B23E" stroke-width="1.4"/>
+          <text x="69" y="114" fill="#F4B23E" font-size="12" font-weight="700">TokenFuse PEP</text>
+          <text x="69" y="130" fill="#8A97A6" font-size="10">the money path</text>
+
+          <rect x="10" y="156" width="118" height="52" rx="12" fill="#141C27" stroke="#F0ABFC" stroke-width="1.4"/>
+          <text x="69" y="178" fill="#F0ABFC" font-size="12" font-weight="700">Scopyx PEP</text>
+          <text x="69" y="194" fill="#8A97A6" font-size="10">the web path</text>
+
+          <text x="168" y="134" fill="#5A6675" font-size="10">/v1/decide</text>
+          <text x="168" y="147" fill="#5A6675" font-size="9.5">from both</text>
 
           <rect x="210" y="46" width="300" height="200" rx="16" fill="#10161F" stroke="#2DD4BF" stroke-width="1.4"><animate attributeName="stroke-opacity" values="1;.45;1" dur="3.4s" repeatCount="indefinite"/></rect>
           <text x="360" y="74" fill="#2DD4BF" font-size="14" font-weight="700">wardryx PDP :8090</text>
