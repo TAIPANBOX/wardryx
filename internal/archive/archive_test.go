@@ -242,3 +242,72 @@ func TestAFailedPlacementIsReportedNotSwallowed(t *testing.T) {
 		t.Errorf("a failed Keep left %v archived", versions)
 	}
 }
+
+// TestACorruptedArchiveFileIsAnErrorNotAnEmptySet. The dangerous reading of
+// a damaged file is the permissive one: Decide treats no policy in force as
+// allow, so an archive entry that fails to parse must reach the caller as a
+// failure and never as zero rules.
+func TestACorruptedArchiveFileIsAnErrorNotAnEmptySet(t *testing.T) {
+	dir := t.TempDir()
+	a, err := New(dir)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	s := set(t, "good.example.com")
+	if err := a.Keep(s); err != nil {
+		t.Fatalf("Keep: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, s.Version()+".json"), []byte("{not json"), 0o600); err != nil {
+		t.Fatalf("corrupt: %v", err)
+	}
+
+	got, err := a.Get(s.Version())
+	if err == nil {
+		t.Fatalf("want an error for a damaged entry, got %d policies", len(got))
+	}
+	if got != nil {
+		t.Fatalf("a damaged entry must yield no policies, got %+v", got)
+	}
+	if !strings.Contains(err.Error(), "is not a policy set") {
+		t.Errorf("the error does not say what is wrong: %v", err)
+	}
+}
+
+// TestKeepingNothingIsRefused. A nil set is a caller bug, and the permissive
+// reading again is the harmful one: silently keeping an empty set under some
+// version would archive "no policy in force" as if it were a decision's rules.
+func TestKeepingNothingIsRefused(t *testing.T) {
+	if err := newTemp(t).Keep(nil); err == nil {
+		t.Fatal("Keep(nil) must refuse")
+	}
+}
+
+// TestAnArchiveDirectoryThatCannotExistIsReportedAtOpen, rather than at the
+// first swap hours later, when the failure would block a policy change an
+// operator is watching.
+func TestAnArchiveDirectoryThatCannotExistIsReportedAtOpen(t *testing.T) {
+	file := filepath.Join(t.TempDir(), "a-file")
+	if err := os.WriteFile(file, []byte("x"), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if _, err := New(filepath.Join(file, "archive")); err == nil {
+		t.Fatal("opening an archive under a regular file must fail at New")
+	}
+}
+
+// TestListingAVanishedArchiveReportsRatherThanReadsEmpty. An archive
+// directory removed under a running process must not look like one that has
+// kept nothing.
+func TestListingAVanishedArchiveReportsRatherThanReadsEmpty(t *testing.T) {
+	dir := t.TempDir()
+	a, err := New(dir)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := os.RemoveAll(dir); err != nil {
+		t.Fatalf("remove: %v", err)
+	}
+	if _, err := a.Versions(); err == nil {
+		t.Fatal("listing a vanished archive must report, not read as empty")
+	}
+}
