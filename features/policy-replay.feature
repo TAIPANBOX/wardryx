@@ -58,3 +58,29 @@ Feature: A recorded decision carries the question it answered
     When a replay asks the archive for it
     Then it is told the version is not archived, and handed no policies at all
     # -> internal/archive:TestAnUnknownVersionIsDistinguishableFromABrokenArchive
+
+  Scenario: an operator sees what a policy change would have done before making it
+    Given decisions that have already been taken and recorded
+    When a candidate policy set is replayed over them
+    Then each decision is first reproduced against the version it was taken under
+    And only the decisions that reproduced carry an answer under the candidate
+    # -> internal/replay:TestADecisionThatReproducesCarriesTheCounterfactual
+
+  Scenario: a decision that cannot be replayed is counted, never skipped
+    Given a decision whose policy version was never archived
+    When the history is replayed
+    Then it still counts in the total, and the report says it could not be examined
+    # -> internal/replay:TestAnUnarchivedVersionIsCountedNotSkipped
+    # -> internal/replay:TestTheReportNamesWhatItCouldNotExamine
+
+  Scenario: the record and the code disagreeing about the past is said out loud
+    Given a decision that does not reproduce against the version it names
+    When the history is replayed
+    Then it is reported as diverged and carries no answer under the candidate
+    # -> internal/replay:TestADivergentReplayIsReportedLoudly
+
+  Scenario: an allowance a human granted is not mistaken for a disagreement
+    Given a decision the policy point held and a person then approved
+    When the history is replayed without the approval token, which is never recorded
+    Then replay reaches the hold rather than the answer, and says so
+    # -> internal/replay:TestAnAllowGrantedByAHumanIsNotADivergence

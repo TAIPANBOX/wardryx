@@ -97,6 +97,12 @@ func TestDecisionInputCoversEveryDecideRequestField(t *testing.T) {
 			t.Errorf("data[%q] missing or empty: a replay cannot say which set answered, or what it answered", key)
 		}
 	}
+	// Not a DecideRequest field and not a credential: the fact that an
+	// approval gate was reached. Without it a replay cannot tell an allow a
+	// human granted from the record and the code disagreeing about the past.
+	if _, ok := data["approval_token_required"]; !ok {
+		t.Error("data[\"approval_token_required\"] missing: an allow granted by a human would replay as a divergence")
+	}
 }
 
 // dataKey reports whether home names a data key, and which.
@@ -196,7 +202,8 @@ func TestEveryDecisionOutcomeRecordsTheQuestion(t *testing.T) {
 	}
 
 	want := []string{"tool_names", "domains", "steps", "model", "est_cost_usd",
-		"attestation_method", "chain_proven", "policy_version", "reason"}
+		"attestation_method", "chain_proven", "policy_version", "reason",
+		"approval_token_required"}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

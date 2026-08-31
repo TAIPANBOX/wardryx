@@ -420,3 +420,30 @@ decision outcome and every exported signature identical.
     that same version. Its limit: it proves the archive holds what THIS
     process made effective, not that a directory carried across a migration
     still holds what an older process did.)*
+
+18. **A counterfactual is offered only for a decision that reproduced, and
+    everything else is counted by name.** `wardryx replay` exists to answer
+    what a candidate policy would have done to decisions already taken, and
+    the answer is worthless unless the run first proves it can reproduce what
+    DID happen. `Decide` is deterministic, so a recorded question put back to
+    the version it names must return the same verdict and the same reason.
+
+    Four rows are not a plain reproduction and each is reported rather than
+    folded in: `not-archived` (invariant 17 was not honoured for it),
+    `unreadable` (recorded before invariant 15), `diverged` (the record and
+    this build disagree about the past, which fails the command), and
+    `approval-decided`, which is not a failure at all: the approval token is
+    deliberately never recorded, so replay reaches the hold a human then
+    answered, and the counterfactual is measured against that hold rather
+    than against the person's answer.
+
+    The counting rule is the invariant's teeth: a change tally never appears
+    without the tally of decisions the run could not examine. "2 of 4 change"
+    beside a silent four that were skipped reads as coverage it does not have,
+    which is the same silent shape as the defect that started this work.
+    *(tests: `TestAnUnarchivedVersionIsCountedNotSkipped`,
+    `TestADivergentReplayIsReportedLoudly`,
+    `TestAnAllowGrantedByAHumanIsNotADivergence` and
+    `TestTheReportNamesWhatItCouldNotExamine` in `internal/replay`. Its limit:
+    reproduction proves the PDP answers the same way, not that the recorded
+    question was the one the enforcement point actually asked.)*

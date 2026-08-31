@@ -26,6 +26,7 @@ import (
 	"github.com/TAIPANBOX/wardryx/internal/passports"
 	"github.com/TAIPANBOX/wardryx/internal/pdp"
 	"github.com/TAIPANBOX/wardryx/internal/policy"
+	"github.com/TAIPANBOX/wardryx/internal/replay"
 	"github.com/TAIPANBOX/wardryx/internal/store"
 )
 
@@ -51,6 +52,8 @@ func run(args []string) error {
 		return runCheck(args[1:])
 	case "approvals":
 		return runApprovals(args[1:])
+	case "replay":
+		return runReplay(args[1:])
 	case "version":
 		fmt.Println("wardryx", version)
 		return nil
@@ -67,12 +70,83 @@ commands:
   serve      run the HTTP policy decision API
   check      offline dry-run: evaluate a directory of agent passports against a policy
   approvals  list pending/decided approvals from Postgres (-db)
+  replay     put recorded decisions back to the PDP: what a candidate policy
+             would have done to a history that already happened
   version    print version
 
 Every serve flag (-addr, -policy, -db, -events, -otlp-endpoint) falls back
 to its WARDRYX_* environment variable when the flag itself is unset;
 WARDRYX_KEYS, WARDRYX_APPROVAL_SECRET, and WARDRYX_APPROVAL_SINGLE_USE are
 environment-only (no flag).`)
+}
+
+// --- replay ---
+
+func runReplay(args []string) error {
+	cfg := config.FromEnv()
+	fs := flag.NewFlagSet("replay", flag.ContinueOnError)
+	eventsPath := fs.String("events", cfg.EventsPath, "NDJSON agent-event file to replay (WARDRYX_EVENTS_PATH)")
+	archiveDir := fs.String("archive", cfg.PolicyArchive, "policy archive directory (WARDRYX_POLICY_ARCHIVE)")
+	candidatePath := fs.String("policy", "", "candidate policy file or directory to test; empty asks only whether the history can be replayed at all")
+	fs.Usage = func() {
+		fmt.Fprintf(os.Stderr, `usage: wardryx replay [flags]
+
+Replays every decision in an events file against the policy version it names,
+then against a candidate set, and reports which decisions would change.
+
+It reproduces the recorded answer FIRST on every row and offers a
+counterfactual only for the rows that reproduced; the rest are counted and
+named. It replays one decision, not the agent: if a candidate turns a refusal
+into an allowance, what the agent would have done next is a world nothing
+recorded.
+
+flags:
+`)
+		fs.PrintDefaults()
+	}
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *eventsPath == "" {
+		fs.Usage()
+		return fmt.Errorf("replay needs an events file: -events or WARDRYX_EVENTS_PATH")
+	}
+	if *archiveDir == "" {
+		return fmt.Errorf("replay needs the policy archive: -archive or WARDRYX_POLICY_ARCHIVE. " +
+			"Without it the rules each decision names cannot be produced, and every row would report as not-archived")
+	}
+
+	events, err := event.ReadFile(*eventsPath)
+	if err != nil {
+		return fmt.Errorf("read events: %w", err)
+	}
+	arch, err := archive.New(*archiveDir)
+	if err != nil {
+		return fmt.Errorf("open policy archive: %w", err)
+	}
+
+	var candidate *policy.Set
+	candidateName := ""
+	if *candidatePath != "" {
+		candidate, err = policy.Load(*candidatePath)
+		if err != nil {
+			return fmt.Errorf("load candidate policy: %w", err)
+		}
+		candidateName = *candidatePath
+	}
+
+	report := replay.Run(events, arch, candidate)
+	fmt.Print(replay.Format(report, *eventsPath, candidateName))
+
+	// A divergence means the record and this build disagree about the past,
+	// which is a finding and not a report. Everything else, including
+	// decisions that could not be replayed, is reported in the text and does
+	// not fail the command: an operator asking what a policy would change is
+	// not asking this process to pass or fail.
+	if report.Diverged > 0 {
+		return fmt.Errorf("%d decision(s) do not reproduce against the version they name", report.Diverged)
+	}
+	return nil
 }
 
 // --- serve ---
