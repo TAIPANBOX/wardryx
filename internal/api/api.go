@@ -372,6 +372,12 @@ func decisionInput(req pdp.DecideRequest, resp pdp.DecideResponse) map[string]an
 		"chain_proven":       req.ChainProven,
 		"policy_version":     resp.PolicyVersion,
 		"reason":             resp.Reason,
+		// Not the token, the FACT about it. Decide's own doc comment says
+		// Allow together with this flag uniquely identifies an allow produced
+		// by redeeming a valid token, and a replay that cannot tell those
+		// apart reports a human's approval as the record and the code
+		// disagreeing about the past.
+		"approval_token_required": resp.ApprovalTokenRequired,
 	}
 }
 
