@@ -6,7 +6,7 @@
 
 [![CI](https://github.com/TAIPANBOX/wardryx/actions/workflows/ci.yml/badge.svg)](https://github.com/TAIPANBOX/wardryx/actions/workflows/ci.yml)
 ![Go](https://img.shields.io/badge/go-1.27-00ADD8.svg)
-![tests](https://img.shields.io/badge/tests-218-brightgreen.svg)
+![tests](https://img.shields.io/badge/tests-255-brightgreen.svg)
 ![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)
 ![Status](https://img.shields.io/badge/status-deterministic%20PDP-2dd4bf.svg)
 
@@ -375,6 +375,10 @@ make build
 # approvals: list pending/decided approvals from Postgres
 ./bin/wardryx approvals -db "$DSN"
 
+# replay: what a candidate policy would have done to decisions already taken
+./bin/wardryx replay -events ./events.ndjson -archive ./policy-archive
+./bin/wardryx replay -events ./events.ndjson -archive ./policy-archive -policy ./policies/candidate.yaml
+
 ./bin/wardryx version
 ```
 
@@ -402,6 +406,56 @@ deny_if_unattested: true
 
 ---
 
+## Replay: what a policy change would have done
+
+Editing a policy is a blind act. `wardryx replay` takes the decisions that
+already happened and puts each recorded question back to the PDP, first
+against the version it was decided under and then against a candidate set.
+
+That first pass is what makes the second one worth anything. `Decide` is a
+deterministic function of the loaded set and the request, so a recorded
+question put back to the same set must return the same answer. A
+counterfactual is offered only for the rows that reproduced; everything else
+is counted and named.
+
+```
+Replayed 4 decision(s) from ./events.ndjson
+
+  reproduced             4
+  approval-decided       0
+  not archived           0
+  unreadable             0
+  diverged               0
+
+Against ./policies/candidate.yaml, 2 of 4 replayable decision(s) change:
+
+  deny -> allow   agent://acme.example/finance/bot1  run r-egress
+        was: domain "payouts.partner.example" is not allowed by policy "finance-guardrail"
+        now: allowed: request satisfies all matched policy rules
+
+  hold -> allow   agent://acme.example/finance/bot1  run r-costly
+        was: estimated cost $420.00 exceeds policy "finance-guardrail" threshold $100.00
+        now: allowed: request satisfies all matched policy rules
+```
+
+The four rows that are not a plain reproduction each mean something specific:
+
+| row | meaning |
+| --- | --- |
+| `approval-decided` | the PDP held it and a human answered. The approval token is deliberately never recorded, so replay reaches the hold, not the answer, and the counterfactual is measured against the hold |
+| `not archived` | the policy version it names was never kept, so there are no rules to put the question to. Set `WARDRYX_POLICY_ARCHIVE` |
+| `unreadable` | recorded before the emitter carried the decision input, so the question was never written down |
+| `diverged` | replaying it against the version it itself names disagrees with the record. The record and this build no longer agree about the past, and the command exits non-zero |
+
+A count of changes never appears without the count of decisions the run could
+not examine: a change tally that silently omitted them would read as coverage
+it does not have.
+
+**It replays a decision, not the agent.** If a candidate turns a refusal into
+an allowance, everything the agent would have done next is a world nothing
+recorded. The honest question is aggregate: over this history, which decisions
+would the candidate have taken differently.
+
 ## Configuration
 
 Every `WARDRYX_*` variable is read once at process startup (`internal/config`), never per-request. Each `serve` flag falls back to its environment variable when the flag itself is left unset.
@@ -413,6 +467,7 @@ Every `WARDRYX_*` variable is read once at process startup (`internal/config`), 
 | `WARDRYX_DB` | `-db` | Postgres DSN; empty uses the in-memory store |
 | `WARDRYX_POLICY` | `-policy` | Policy file or directory (YAML/JSON); empty allows every request |
 | `WARDRYX_EVENTS_PATH` | `-events` | NDJSON agent-event output path; empty disables events |
+| `WARDRYX_POLICY_ARCHIVE` | - | Directory keeping every policy set this process makes effective, named by its `policy_version`; empty disables it, and a decision recorded without it names a version nothing can produce later |
 | `WARDRYX_APPROVAL_SECRET` | (none) | HMAC key for approval tokens; unset fails closed on any mint/verify |
 | `WARDRYX_APPROVAL_SINGLE_USE` | (none) | `true` makes each granted token allow exactly one `/v1/decide` call; default `false` keeps a token reusable for its full TTL (see [Stateless human-in-the-loop](#stateless-human-in-the-loop)) |
 | `WARDRYX_APPROVAL_UNANSWERED_AFTER` | (none) | How long a hold may sit undecided before one `approval_unanswered` event is raised for it; a Go duration, unset means 15m, `0` turns the sweep off (see [The hold nobody decided](#the-hold-nobody-decided)) |

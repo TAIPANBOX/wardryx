@@ -65,6 +65,7 @@ go build ./...
 ./scripts/store-hands-out-copies.sh
 ./scripts/decide-order-is-documented.sh
 ./scripts/readme-numbers.sh
+./scripts/scenarios-bind-to-tests.sh
 ./scripts/gates-have-teeth.sh   # invariant 12; needs a clean tree
 ```
 
@@ -352,3 +353,97 @@ decision outcome and every exported signature identical.
     knows the `if ... ok {` shape those checks have always had, so a rule
     added by some other shape is invisible to it.)*
 
+15. **A recorded decision carries the question it answered, not only the
+    answer.** Every input `Decide` reads reaches the emitted event, or is
+    excluded by name with a reason. Two exclusions stand: `agent_id`, `run_id`
+    and `on_behalf_of` are typed members of the shared envelope and are read
+    from there, so repeating them in `data` would put one fact in a typed
+    field and in the erasable payload plane at once; and `approval_token` is a
+    live credential, and this record is append-only, replicated, and outlives
+    any token's TTL.
+
+    This was measured, not argued. Until 2026-08-31 the emitter wrote
+    `{reason, tool_names}` plus the identity triple, four of eleven inputs,
+    and `internal/pdp/replay_feasibility_test.go` put a recorded DENIAL back
+    to the very policy set that produced it and got ALLOW: the field the
+    refusal turned on, `domains`, was nowhere in the record. Nothing was
+    corrupt and nothing logged an error. An operator re-examining a month of
+    refusals would have been told the policy changed nothing, having never
+    re-evaluated the real question.
+
+    The loss is also one-way. Replay works forward from the day the input is
+    recorded and can never be applied to records that never carried it, so a
+    decision emitted without its question is unexaminable for as long as it is
+    kept.
+    *(test: `TestDecisionInputCoversEveryDecideRequestField` in
+    `internal/api/decision_input_test.go`, which reflects over
+    `pdp.DecideRequest` so the set of fields to account for is read from the
+    code rather than restated, and fails on a field with no home. The loop is
+    closed end to end by `TestARecordedDenialReplaysToTheSameVerdict`, which
+    drives a real refusal over HTTP, reads the event back off disk, and
+    rebuilds the request from that record alone.)*
+
+16. **A scenario names a test that exists, and a test-binding names a real
+    test.** Both directions, because both failures are quiet: a scenario with
+    no test is prose describing software nobody checks, and a binding naming a
+    test since renamed reads as coverage and cannot be told from the real
+    thing without opening the file.
+    *(gate: `scripts/scenarios-bind-to-tests.sh`, which refuses with exit 2
+    rather than reporting success when it parses no feature files, no
+    scenarios, or no bindings. Its limit: it checks that a named test exists,
+    not that the test asserts what the scenario says.)*
+
+17. **A policy set is archived before it is allowed to decide anything.** A
+    recorded decision names a `PolicyVersion`, and the store behind that name
+    is a live control surface: `PutPolicy` overwrites and `DeletePolicy`
+    removes. Without a separate append-only copy, the rules a decision was
+    taken under are gone by the next edit, and invariant 15 buys nothing: the
+    record would carry a faithful question and no rules to put it to.
+
+    The ordering is the invariant, not merely the archiving. Keeping happens
+    BEFORE the store write and before `SetPolicies`, because a set that is
+    stored and not archived becomes effective again on the next restart, so a
+    failure between the two would put rules into force that no recorded
+    decision can ever be replayed against. A set archived and then not stored
+    is the harmless direction: a spare copy under a name nothing references.
+
+    Attaching an archive keeps the set already in force, since that set
+    decides from the first request. Archiving is opt-in
+    (`WARDRYX_POLICY_ARCHIVE`); a deployment without one keeps a working PDP
+    and loses replay, and the process says so on startup rather than leaving
+    it to be discovered.
+    *(tests: `TestAPolicySetDecidesOnlyAfterItIsArchived` and
+    `TestEveryRecordedPolicyVersionCanBeFetchedBack` in
+    `internal/api/policy_archive_test.go`, the second stated the way an
+    auditor would ask it: take the events this server actually wrote, and
+    require every version any of them names to come back and to recompile to
+    that same version. Its limit: it proves the archive holds what THIS
+    process made effective, not that a directory carried across a migration
+    still holds what an older process did.)*
+
+18. **A counterfactual is offered only for a decision that reproduced, and
+    everything else is counted by name.** `wardryx replay` exists to answer
+    what a candidate policy would have done to decisions already taken, and
+    the answer is worthless unless the run first proves it can reproduce what
+    DID happen. `Decide` is deterministic, so a recorded question put back to
+    the version it names must return the same verdict and the same reason.
+
+    Four rows are not a plain reproduction and each is reported rather than
+    folded in: `not-archived` (invariant 17 was not honoured for it),
+    `unreadable` (recorded before invariant 15), `diverged` (the record and
+    this build disagree about the past, which fails the command), and
+    `approval-decided`, which is not a failure at all: the approval token is
+    deliberately never recorded, so replay reaches the hold a human then
+    answered, and the counterfactual is measured against that hold rather
+    than against the person's answer.
+
+    The counting rule is the invariant's teeth: a change tally never appears
+    without the tally of decisions the run could not examine. "2 of 4 change"
+    beside a silent four that were skipped reads as coverage it does not have,
+    which is the same silent shape as the defect that started this work.
+    *(tests: `TestAnUnarchivedVersionIsCountedNotSkipped`,
+    `TestADivergentReplayIsReportedLoudly`,
+    `TestAnAllowGrantedByAHumanIsNotADivergence` and
+    `TestTheReportNamesWhatItCouldNotExamine` in `internal/replay`. Its limit:
+    reproduction proves the PDP answers the same way, not that the recorded
+    question was the one the enforcement point actually asked.)*

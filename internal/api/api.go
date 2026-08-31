@@ -41,6 +41,7 @@ import (
 
 	"github.com/TAIPANBOX/agent-stack-go/event"
 	"github.com/TAIPANBOX/wardryx/internal/approval"
+	"github.com/TAIPANBOX/wardryx/internal/archive"
 	wotel "github.com/TAIPANBOX/wardryx/internal/otel"
 	"github.com/TAIPANBOX/wardryx/internal/pdp"
 	"github.com/TAIPANBOX/wardryx/internal/policy"
@@ -90,6 +91,9 @@ type Server struct {
 	// the store's operator-managed policies on top of. See the package doc
 	// comment's "Policy-as-code" section.
 	basePolicies []policy.Policy
+	// policyArchive keeps every set this server makes effective. Nil means
+	// archiving is off; see SetPolicyArchive.
+	policyArchive *archive.Archive
 
 	// How long a hold may sit undecided before it is worth telling somebody,
 	// and which holds have already been reported.
@@ -144,6 +148,20 @@ const DefaultUnansweredAfter = 15 * time.Minute
 // disables the sweep entirely, which is a real choice: an operator who watches
 // the approval queue themselves does not need to be told about it.
 func (s *Server) SetUnansweredAfter(d time.Duration) { s.unansweredAfter = d }
+
+// SetPolicyArchive attaches the archive that keeps every policy set this
+// server makes effective, and immediately keeps the set already in force:
+// that set decides from the first request, so an archive recording only
+// later swaps would leave every decision before the first edit
+// unexaminable.
+//
+// Attaching nothing is allowed and is the default. What a deployment loses
+// then is the ability to replay its own recorded decisions, because the
+// PolicyVersion those events name will have no rules behind it.
+func (s *Server) SetPolicyArchive(a *archive.Archive) error {
+	s.policyArchive = a
+	return a.Keep(s.engine.CurrentSet())
+}
 
 // WatchUnansweredApprovals reports a hold that nobody has decided.
 //
@@ -323,6 +341,46 @@ type decideRequestDTO struct {
 	ApprovalToken string `json:"approval_token,omitempty"`
 }
 
+// decisionInput is the question a decision answered: every input Decide read,
+// plus the two facts a replay compares itself against. It exists so a recorded
+// decision can be re-evaluated against a different policy version without
+// guessing what was asked. A record that keeps only the verdict replays as
+// whatever the missing fields default to, and those defaults are permissive:
+// a denial that turned on Domains replays as an allow once Domains is gone.
+//
+// Two omissions, both deliberate and both load-bearing:
+//
+//   - agent_id, run_id and on_behalf_of are typed members of the shared
+//     envelope and are read from there. Repeating them here would put one
+//     fact in a typed field and in the erasable payload plane at once, and
+//     the estate's record mapper documents that split as a MUST.
+//   - ApprovalToken is a live credential. This record is append-only,
+//     replicated, and outlives any token's TTL, so writing one down turns a
+//     short-lived secret into a permanent one. A replay does not need it:
+//     whether a token verified is already visible in Decision and Reason.
+//
+// TestDecisionInputCoversEveryDecideRequestField holds this to the shape of
+// pdp.DecideRequest itself, so a new PDP input cannot quietly skip the record.
+func decisionInput(req pdp.DecideRequest, resp pdp.DecideResponse) map[string]any {
+	return map[string]any{
+		"tool_names":         req.ToolNames,
+		"domains":            req.Domains,
+		"steps":              req.Steps,
+		"model":              req.Model,
+		"est_cost_usd":       req.EstCostUSD,
+		"attestation_method": req.AttestationMethod,
+		"chain_proven":       req.ChainProven,
+		"policy_version":     resp.PolicyVersion,
+		"reason":             resp.Reason,
+		// Not the token, the FACT about it. Decide's own doc comment says
+		// Allow together with this flag uniquely identifies an allow produced
+		// by redeeming a valid token, and a replay that cannot tell those
+		// apart reports a human's approval as the record and the code
+		// disagreeing about the past.
+		"approval_token_required": resp.ApprovalTokenRequired,
+	}
+}
+
 type decideResponseDTO struct {
 	Decision              string `json:"decision"`
 	PolicyVersion         string `json:"policy_version"`
@@ -393,12 +451,12 @@ func (s *Server) handleDecide(w http.ResponseWriter, r *http.Request, principal 
 	switch resp.Decision {
 	case pdp.Allow:
 		s.emit(evPolicyAllow, event.SeverityInfo, req.AgentID, req.RunID, req.OnBehalfOf,
-			map[string]any{"reason": resp.Reason, "tool_names": req.ToolNames})
+			decisionInput(req, resp))
 		s.exportSpan(req.AgentID, req.RunID, resp.Decision, resp.Reason, resp.PolicyVersion, req.ToolNames)
 
 	case pdp.Deny:
 		s.emit(evPolicyDeny, event.SeverityHigh, req.AgentID, req.RunID, req.OnBehalfOf,
-			map[string]any{"reason": resp.Reason, "tool_names": req.ToolNames})
+			decisionInput(req, resp))
 		s.exportSpan(req.AgentID, req.RunID, resp.Decision, resp.Reason, resp.PolicyVersion, req.ToolNames)
 		// A presented-but-expired approval_token is a more specific signal
 		// than a generic deny: the human-in-the-loop window closed before
@@ -429,8 +487,13 @@ func (s *Server) handleDecide(w http.ResponseWriter, r *http.Request, principal 
 			return
 		}
 		resp.ApprovalID = held.ApprovalID
+		// A hold is a verdict like the other two, so it records the same
+		// question: an operator tuning the approvable band needs to replay
+		// holds, not only denials.
+		heldInput := decisionInput(req, resp)
+		heldInput["approval_id"] = held.ApprovalID
 		s.emit(evApprovalRequested, event.SeverityMedium, req.AgentID, req.RunID, req.OnBehalfOf,
-			map[string]any{"approval_id": held.ApprovalID, "reason": resp.Reason})
+			heldInput)
 		s.exportSpan(req.AgentID, req.RunID, resp.Decision, resp.Reason, resp.PolicyVersion, req.ToolNames)
 	}
 
@@ -717,6 +780,16 @@ func (s *Server) handlePutPolicy(w http.ResponseWriter, r *http.Request, princip
 		return
 	}
 
+	// Archived BEFORE the store write, not after it. A set archived and then
+	// not stored is a harmless spare copy under a name nothing references. The
+	// reverse is not harmless: a stored set is restored on the next start and
+	// becomes effective, so a failure between the two would put rules into
+	// force that no recorded decision could ever be replayed against.
+	if err := s.policyArchive.Keep(newSet); err != nil {
+		writeInternalError(w, "archiving the policy set", err)
+		return
+	}
+
 	now := time.Now().UTC()
 	if err := s.store.PutPolicy(ctx, id, p, now); err != nil {
 		writeInternalError(w, "writing the policy", err)
@@ -768,6 +841,16 @@ func (s *Server) handleDeletePolicy(w http.ResponseWriter, r *http.Request, prin
 	newSet, err := policy.Compile(candidate)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, fmt.Sprintf("invalid resulting policy set: %v", err))
+		return
+	}
+
+	// Archived BEFORE the store write, not after it. A set archived and then
+	// not stored is a harmless spare copy under a name nothing references. The
+	// reverse is not harmless: a stored set is restored on the next start and
+	// becomes effective, so a failure between the two would put rules into
+	// force that no recorded decision could ever be replayed against.
+	if err := s.policyArchive.Keep(newSet); err != nil {
+		writeInternalError(w, "archiving the policy set", err)
 		return
 	}
 

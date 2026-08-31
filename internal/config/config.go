@@ -28,6 +28,12 @@ type Config struct {
 	// EventsPath is WARDRYX_EVENTS_PATH: the NDJSON agent-event output
 	// path. Empty disables event emission entirely (opt-in, no-op).
 	EventsPath string
+	// PolicyArchive is WARDRYX_POLICY_ARCHIVE: a directory keeping every
+	// policy set this process makes effective, named by its PolicyVersion.
+	// Empty disables archiving; what that costs is the ability to replay
+	// this deployment's own recorded decisions, because the version those
+	// events name will have no rules behind it.
+	PolicyArchive string
 	// ApprovalSecret is WARDRYX_APPROVAL_SECRET: the HMAC key approval
 	// tokens are signed and verified with. No CLI flag mirrors this one;
 	// it is env-only, and empty fails closed wherever it is used
@@ -69,6 +75,7 @@ func FromEnv() Config {
 		DB:                 os.Getenv("WARDRYX_DB"),
 		Policy:             os.Getenv("WARDRYX_POLICY"),
 		EventsPath:         os.Getenv("WARDRYX_EVENTS_PATH"),
+		PolicyArchive:      os.Getenv("WARDRYX_POLICY_ARCHIVE"),
 		ApprovalSecret:     os.Getenv("WARDRYX_APPROVAL_SECRET"),
 		ApprovalSingleUse:  parseBool(os.Getenv("WARDRYX_APPROVAL_SINGLE_USE")),
 		ApprovalUnanswered: parseDuration(os.Getenv("WARDRYX_APPROVAL_UNANSWERED_AFTER")),
