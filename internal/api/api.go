@@ -323,6 +323,40 @@ type decideRequestDTO struct {
 	ApprovalToken string `json:"approval_token,omitempty"`
 }
 
+// decisionInput is the question a decision answered: every input Decide read,
+// plus the two facts a replay compares itself against. It exists so a recorded
+// decision can be re-evaluated against a different policy version without
+// guessing what was asked. A record that keeps only the verdict replays as
+// whatever the missing fields default to, and those defaults are permissive:
+// a denial that turned on Domains replays as an allow once Domains is gone.
+//
+// Two omissions, both deliberate and both load-bearing:
+//
+//   - agent_id, run_id and on_behalf_of are typed members of the shared
+//     envelope and are read from there. Repeating them here would put one
+//     fact in a typed field and in the erasable payload plane at once, and
+//     the estate's record mapper documents that split as a MUST.
+//   - ApprovalToken is a live credential. This record is append-only,
+//     replicated, and outlives any token's TTL, so writing one down turns a
+//     short-lived secret into a permanent one. A replay does not need it:
+//     whether a token verified is already visible in Decision and Reason.
+//
+// TestDecisionInputCoversEveryDecideRequestField holds this to the shape of
+// pdp.DecideRequest itself, so a new PDP input cannot quietly skip the record.
+func decisionInput(req pdp.DecideRequest, resp pdp.DecideResponse) map[string]any {
+	return map[string]any{
+		"tool_names":         req.ToolNames,
+		"domains":            req.Domains,
+		"steps":              req.Steps,
+		"model":              req.Model,
+		"est_cost_usd":       req.EstCostUSD,
+		"attestation_method": req.AttestationMethod,
+		"chain_proven":       req.ChainProven,
+		"policy_version":     resp.PolicyVersion,
+		"reason":             resp.Reason,
+	}
+}
+
 type decideResponseDTO struct {
 	Decision              string `json:"decision"`
 	PolicyVersion         string `json:"policy_version"`
@@ -393,12 +427,12 @@ func (s *Server) handleDecide(w http.ResponseWriter, r *http.Request, principal 
 	switch resp.Decision {
 	case pdp.Allow:
 		s.emit(evPolicyAllow, event.SeverityInfo, req.AgentID, req.RunID, req.OnBehalfOf,
-			map[string]any{"reason": resp.Reason, "tool_names": req.ToolNames})
+			decisionInput(req, resp))
 		s.exportSpan(req.AgentID, req.RunID, resp.Decision, resp.Reason, resp.PolicyVersion, req.ToolNames)
 
 	case pdp.Deny:
 		s.emit(evPolicyDeny, event.SeverityHigh, req.AgentID, req.RunID, req.OnBehalfOf,
-			map[string]any{"reason": resp.Reason, "tool_names": req.ToolNames})
+			decisionInput(req, resp))
 		s.exportSpan(req.AgentID, req.RunID, resp.Decision, resp.Reason, resp.PolicyVersion, req.ToolNames)
 		// A presented-but-expired approval_token is a more specific signal
 		// than a generic deny: the human-in-the-loop window closed before
@@ -429,8 +463,13 @@ func (s *Server) handleDecide(w http.ResponseWriter, r *http.Request, principal 
 			return
 		}
 		resp.ApprovalID = held.ApprovalID
+		// A hold is a verdict like the other two, so it records the same
+		// question: an operator tuning the approvable band needs to replay
+		// holds, not only denials.
+		heldInput := decisionInput(req, resp)
+		heldInput["approval_id"] = held.ApprovalID
 		s.emit(evApprovalRequested, event.SeverityMedium, req.AgentID, req.RunID, req.OnBehalfOf,
-			map[string]any{"approval_id": held.ApprovalID, "reason": resp.Reason})
+			heldInput)
 		s.exportSpan(req.AgentID, req.RunID, resp.Decision, resp.Reason, resp.PolicyVersion, req.ToolNames)
 	}
 

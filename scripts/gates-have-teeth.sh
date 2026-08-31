@@ -300,6 +300,30 @@ assert m, "no test badge in README.md"
 open("README.md","w").write(s.replace(m.group(0), "badge/nothing-", 1))')" \
 	"nothing to compare against"
 
+# The two directions of the scenario/test binding, and the empty measurement.
+# A scenario that names no test is prose; a binding naming a test that is gone
+# reads as coverage. Both are silent, which is why both have a case here.
+run_case "scenarios-bind-to-tests: a scenario that names no test" fail \
+	'./scripts/scenarios-bind-to-tests.sh' \
+	"$(py 'import re
+s = open("features/policy-replay.feature").read()
+m = re.search(r"\n    # -> [^\n]+\n", s)
+assert m, "no binding comment in the feature file"
+open("features/policy-replay.feature","w").write(s.replace(m.group(0), "\n", 1))')" \
+	"names no test"
+
+run_case "scenarios-bind-to-tests: a binding pointing at a test that is gone" fail \
+	'./scripts/scenarios-bind-to-tests.sh' \
+	"$(py 'edit("features/policy-replay.feature",
+    "internal/api:TestARecordedDenialReplaysToTheSameVerdict",
+    "internal/api:TestThisTestWasRenamedAwayLongAgo")')" \
+	"does not exist"
+
+run_case "scenarios-bind-to-tests: no scenarios left to bind" fail \
+	'./scripts/scenarios-bind-to-tests.sh' \
+	"$(py 'import os; os.remove("features/policy-replay.feature")')" \
+	"measured nothing"
+
 echo
 if [ -n "$(git status --porcelain)" ]; then
 	printf 'FAIL: this script left the tree dirty, so it cannot be trusted about anything above\n'
