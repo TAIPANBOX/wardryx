@@ -20,6 +20,7 @@ import (
 
 	"github.com/TAIPANBOX/agent-stack-go/event"
 	"github.com/TAIPANBOX/wardryx/internal/api"
+	"github.com/TAIPANBOX/wardryx/internal/archive"
 	"github.com/TAIPANBOX/wardryx/internal/config"
 	wotel "github.com/TAIPANBOX/wardryx/internal/otel"
 	"github.com/TAIPANBOX/wardryx/internal/passports"
@@ -150,6 +151,22 @@ func runServe(args []string) error {
 	basePolicies := policies.Policies()
 	srv := api.New(engine, st, events, otelExporter, keys, []byte(cfg.ApprovalSecret), cfg.ApprovalSingleUse, basePolicies)
 
+	// Attached before anything is restored or served, because it keeps the
+	// set already in force as a side effect: the file-loaded base decides
+	// from the first request, and an archive that recorded only later swaps
+	// would leave those decisions unexaminable.
+	policyArchive, err := archive.New(cfg.PolicyArchive)
+	if err != nil {
+		return fmt.Errorf("open policy archive: %w", err)
+	}
+	if err := srv.SetPolicyArchive(policyArchive); err != nil {
+		return fmt.Errorf("archive the loaded policy set: %w", err)
+	}
+	if cfg.PolicyArchive == "" {
+		fmt.Fprintln(os.Stderr, "wardryx: WARDRYX_POLICY_ARCHIVE is unset, so policy sets are not kept; "+
+			"decisions recorded by this process name a version nothing can produce later")
+	}
+
 	// Restore any policies an earlier process (or another wardryx instance
 	// sharing this Postgres) wrote through the admin policy API: Engine so
 	// far only has the file-loaded base, layered here with whatever the
@@ -163,6 +180,9 @@ func runServe(args []string) error {
 	} else if restored.Len() != policies.Len() {
 		fmt.Fprintf(os.Stderr, "wardryx: restored %d policy(ies) from the store on top of %d file-loaded, version %s\n",
 			restored.Len()-policies.Len(), policies.Len(), restored.Version())
+		if err := policyArchive.Keep(restored); err != nil {
+			return fmt.Errorf("archive the restored policy set: %w", err)
+		}
 		engine.SetPolicies(restored)
 	}
 

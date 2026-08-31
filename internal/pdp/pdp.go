@@ -207,6 +207,13 @@ func New(policies *policy.Set, approvalSecret []byte) *Engine {
 // PolicyVersion.
 func (e *Engine) PolicyVersion() string { return e.policies.Load().Version() }
 
+// CurrentSet returns the policy.Set in force right now. A Set is immutable
+// after Compile and safe for concurrent readers, so this hands out the
+// pointer rather than a copy; a caller that wants a different set compiles
+// one and calls SetPolicies. It exists so a caller outside the decision path
+// can archive what is in force without reaching into the Engine's internals.
+func (e *Engine) CurrentSet() *policy.Set { return e.policies.Load() }
+
 // SetPolicies atomically replaces the Engine's policy set. Every /v1/decide
 // call that starts after this returns observes the new set; a call already
 // in flight keeps evaluating against whichever set it loaded when it

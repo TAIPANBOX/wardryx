@@ -392,3 +392,31 @@ decision outcome and every exported signature identical.
     rather than reporting success when it parses no feature files, no
     scenarios, or no bindings. Its limit: it checks that a named test exists,
     not that the test asserts what the scenario says.)*
+
+17. **A policy set is archived before it is allowed to decide anything.** A
+    recorded decision names a `PolicyVersion`, and the store behind that name
+    is a live control surface: `PutPolicy` overwrites and `DeletePolicy`
+    removes. Without a separate append-only copy, the rules a decision was
+    taken under are gone by the next edit, and invariant 15 buys nothing: the
+    record would carry a faithful question and no rules to put it to.
+
+    The ordering is the invariant, not merely the archiving. Keeping happens
+    BEFORE the store write and before `SetPolicies`, because a set that is
+    stored and not archived becomes effective again on the next restart, so a
+    failure between the two would put rules into force that no recorded
+    decision can ever be replayed against. A set archived and then not stored
+    is the harmless direction: a spare copy under a name nothing references.
+
+    Attaching an archive keeps the set already in force, since that set
+    decides from the first request. Archiving is opt-in
+    (`WARDRYX_POLICY_ARCHIVE`); a deployment without one keeps a working PDP
+    and loses replay, and the process says so on startup rather than leaving
+    it to be discovered.
+    *(tests: `TestAPolicySetDecidesOnlyAfterItIsArchived` and
+    `TestEveryRecordedPolicyVersionCanBeFetchedBack` in
+    `internal/api/policy_archive_test.go`, the second stated the way an
+    auditor would ask it: take the events this server actually wrote, and
+    require every version any of them names to come back and to recompile to
+    that same version. Its limit: it proves the archive holds what THIS
+    process made effective, not that a directory carried across a migration
+    still holds what an older process did.)*
