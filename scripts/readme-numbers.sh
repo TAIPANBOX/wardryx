@@ -27,6 +27,26 @@
 # It also does not run them. This is a claim about how much test code exists,
 # not about it passing: `go test -race ./...` in CI is what says they pass, and
 # conflating the two would let a green badge mean a red suite.
+#
+# WHY A BROKEN BUILD IS REFUSED RATHER THAN COUNTED
+#
+# `go test -list` enumerates only packages that COMPILE. A package that does
+# not contributes zero test functions to stdout, writes its compiler errors to
+# stderr, and leaves the total quietly smaller. Nothing about that output says
+# a package is missing.
+#
+# On 2026-08-31 a test file referenced a symbol that had been reverted out of
+# the production file. internal/archive stopped building, its seven tests
+# vanished from the count, the total fell from 237 to 230, and this gate said
+# "the badge says 237 and counts 230" -- which reads as a stale badge and sends
+# the reader to edit the README. Following that advice made the gate report
+# "230 test functions, and the badge says so" and exit 0, on a tree where a
+# whole package did not compile. A badge was committed from that number.
+#
+# So this is the THIRD way this check refuses rather than reporting success:
+# no test functions at all, no badge to compare against, and now a module that
+# did not build. All three are the same rule, which is invariant 12: a check
+# must be able to tell "did not fail" from "did not run".
 
 set -uo pipefail
 
@@ -40,7 +60,22 @@ note() {
 	problems=$((problems + 1))
 }
 
-actual=$(go test ./... -list '.*' 2>/dev/null | grep -cE '^Test')
+build_errors=$(mktemp)
+trap 'rm -f "$build_errors"' EXIT
+
+listing=$(go test ./... -list '.*' 2>"$build_errors")
+list_status=$?
+if [ "$list_status" -ne 0 ]; then
+	note "the module did not build, so this count is missing every package that failed to compile"
+	printf '\n%s\n\n' "$(head -20 "$build_errors")"
+	printf 'A package that does not compile contributes ZERO test functions to\n'
+	printf '`go test -list`, silently, and the total just comes out smaller. Fix the\n'
+	printf 'build first: a badge agreed with here would be a number derived from a\n'
+	printf 'suite that does not exist.\n'
+	exit 1
+fi
+
+actual=$(printf '%s\n' "$listing" | grep -cE '^Test')
 if [ "${actual:-0}" -eq 0 ]; then
 	note "the module reported no test functions at all, which means this check measured nothing"
 	exit 1
