@@ -31,18 +31,34 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	"github.com/TAIPANBOX/wardryx/internal/policy"
 )
 
 var (
+	// ErrBadVersion: the string is not shaped like a PolicyVersion at all.
+	// Distinct from ErrNotArchived, so a replayer can tell "you asked wrong"
+	// from "we do not have it".
+	ErrBadVersion = errors.New("archive: not a policy version")
 	// ErrNotArchived: nobody kept this version. Distinct from an empty set,
 	// which Decide reads as "no policy in force" and therefore as allow.
 	ErrNotArchived = errors.New("archive: policy version was never archived")
 	// ErrVersionCollision: this version already names different bytes.
 	ErrVersionCollision = errors.New("archive: version already names a different policy set")
 )
+
+// validVersion is the shape Set.Version() produces: a run of lowercase hex.
+// Every version is checked against it BEFORE being joined into a path, and
+// the length is bounded rather than pinned so that lengthening the digest in
+// package policy does not silently invalidate this archive.
+//
+// This is a real defence and not a formality. Keep is always handed a digest
+// the process just computed, but Get takes its argument from a caller that
+// will read it out of a recorded event, and a value like "../../etc/passwd"
+// must be refused as not-a-version rather than resolved as one.
+var validVersion = regexp.MustCompile(`^[0-9a-f]{8,64}$`)
 
 // renameFile is os.Rename, indirected for one reason: the atomic placement is
 // the last thing Keep does and the only failure a filesystem will not produce
@@ -97,9 +113,12 @@ func (a *Archive) Keep(set *policy.Set) error {
 	if err != nil {
 		return err
 	}
-	path := a.path(set.Version())
+	path, err := a.path(set.Version())
+	if err != nil {
+		return err
+	}
 
-	switch existing, err := os.ReadFile(path); {
+	switch existing, err := readArchived(path); {
 	case err == nil:
 		if string(existing) == string(want) {
 			return nil
@@ -143,7 +162,11 @@ func (a *Archive) Get(version string) ([]policy.Policy, error) {
 	if a == nil {
 		return nil, fmt.Errorf("%w: %s (no archive is configured)", ErrNotArchived, version)
 	}
-	raw, err := os.ReadFile(a.path(version))
+	path, err := a.path(version)
+	if err != nil {
+		return nil, err
+	}
+	raw, err := readArchived(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, fmt.Errorf("%w: %s", ErrNotArchived, version)
 	}
@@ -177,8 +200,19 @@ func (a *Archive) Versions() ([]string, error) {
 	return out, nil
 }
 
-func (a *Archive) path(version string) string {
-	return filepath.Join(a.dir, version+ext)
+func (a *Archive) path(version string) (string, error) {
+	if !validVersion.MatchString(version) {
+		return "", fmt.Errorf("%w: %q", ErrBadVersion, version)
+	}
+	return filepath.Join(a.dir, version+ext), nil
+}
+
+// readArchived is the only read of an archived file, so it is the only place
+// the path-from-a-variable question has to be answered. It is answered by
+// path() above: a version that is not a run of lowercase hex never reaches
+// here, so the joined path cannot leave a.dir.
+func readArchived(path string) ([]byte, error) {
+	return os.ReadFile(path) // #nosec G304 -- path is a.dir joined with a validVersion-checked digest; see path()
 }
 
 // marshalPolicies is the archived form. It takes what Set.Policies() returns,

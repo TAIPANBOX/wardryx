@@ -311,3 +311,51 @@ func TestListingAVanishedArchiveReportsRatherThanReadsEmpty(t *testing.T) {
 		t.Fatal("listing a vanished archive must report, not read as empty")
 	}
 }
+
+// TestAPathShapedVersionIsRefusedRatherThanResolved. Get takes its argument
+// from a caller that will read it out of a recorded event, so anything shaped
+// like a path has to be refused as not-a-version. Refusing on the SHAPE, before
+// any join, is what makes the archive directory a boundary rather than a
+// starting point.
+func TestAPathShapedVersionIsRefusedRatherThanResolved(t *testing.T) {
+	dir := t.TempDir()
+	a, err := New(filepath.Join(dir, "archive"))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	// A file the archive must not be able to reach, one level up.
+	secret := filepath.Join(dir, "secret.json")
+	if err := os.WriteFile(secret, []byte(`[{"target":"agent://x/*"}]`), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	for _, bad := range []string{
+		"../secret", "../../etc/passwd", "..", ".", "/etc/passwd",
+		"a/b", "F5912EFB526D", "f5912efb526d.json", "", "short",
+	} {
+		got, err := a.Get(bad)
+		if err == nil {
+			t.Errorf("Get(%q) returned %d policies instead of refusing", bad, len(got))
+			continue
+		}
+		if !errors.Is(err, ErrBadVersion) {
+			t.Errorf("Get(%q): want ErrBadVersion, got %v", bad, err)
+		}
+		if got != nil {
+			t.Errorf("Get(%q) refused and still returned policies: %+v", bad, got)
+		}
+	}
+}
+
+// TestAVersionOfADifferentLengthIsStillAcceptable. The digest is 12 hex
+// characters today and package policy is free to lengthen it. The bound here
+// is deliberately loose so that a change there does not silently make every
+// previously archived set unreachable.
+func TestAVersionOfADifferentLengthIsStillAcceptable(t *testing.T) {
+	a := newTemp(t)
+	for _, ok := range []string{"0123456789ab", "0123456789abcdef", "abcdef12"} {
+		if _, err := a.Get(ok); !errors.Is(err, ErrNotArchived) {
+			t.Errorf("Get(%q): want ErrNotArchived (a well-formed version nobody kept), got %v", ok, err)
+		}
+	}
+}
