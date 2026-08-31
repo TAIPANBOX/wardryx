@@ -325,3 +325,40 @@ func TestAnEventMissingOneMemberIsUnreadableNotReplayedWithoutIt(t *testing.T) {
 		}
 	}
 }
+
+// TestAChangeIsMeasuredAgainstThePDPNotAgainstThePerson pins the subtlety a
+// mutation walked straight through on 2026-08-31. For a decision a human
+// granted, the RECORDED verdict is allow but the verdict the PDP itself
+// reached was hold. Comparing a candidate against the human's answer hides
+// the change that matters: the policy point used to stop and ask, and now it
+// does not. One fewer human review is exactly what an operator is trying to
+// see before making the edit.
+func TestAChangeIsMeasuredAgainstThePDPNotAgainstThePerson(t *testing.T) {
+	inForce := compile(t, []string{"good.example.com"}, 5)
+	granted := decisionEvent("policy_allow", inForce.Version(),
+		`estimated cost $12.40 exceeds policy "finance-guardrail" threshold $5.00; allowed via a valid approval_token`,
+		map[string]any{"domains": []any{"good.example.com"}, "approval_token_required": true})
+
+	// The candidate lifts the threshold above the cost: nobody is asked at
+	// all any more. Recorded is allow and candidate is allow, so a report
+	// comparing those two would call this unchanged.
+	stopsAsking := Run([]event.Event{granted}, archiveOf(t, inForce), compile(t, []string{"good.example.com"}, 500))
+	if stopsAsking.Changed != 1 {
+		t.Fatalf("changed = %d, want 1: the PDP held this and now allows it outright, which is one fewer human review",
+			stopsAsking.Changed)
+	}
+	if stopsAsking.Rows[0].Baseline != pdp.Hold {
+		t.Fatalf("baseline = %q, want %q: the PDP's own verdict, not the person's", stopsAsking.Rows[0].Baseline, pdp.Hold)
+	}
+
+	// And the converse, so the assertion above cannot be satisfied by a
+	// Changed() that simply always returns true: a candidate that still asks
+	// is not a change.
+	stillAsks := Run([]event.Event{granted}, archiveOf(t, inForce), compile(t, []string{"good.example.com"}, 10))
+	if stillAsks.Changed != 0 {
+		t.Fatalf("changed = %d, want 0: still over the new threshold, so a human is still asked", stillAsks.Changed)
+	}
+	if stillAsks.Rows[0].Candidate.Decision != pdp.Hold {
+		t.Fatalf("candidate = %s, want %s", stillAsks.Rows[0].Candidate.Decision, pdp.Hold)
+	}
+}
