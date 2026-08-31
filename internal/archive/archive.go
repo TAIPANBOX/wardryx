@@ -44,6 +44,14 @@ var (
 	ErrVersionCollision = errors.New("archive: version already names a different policy set")
 )
 
+// renameFile is os.Rename, indirected for one reason: the atomic placement is
+// the last thing Keep does and the only failure a filesystem will not produce
+// on demand. A mutation that made this branch return nil survived the whole
+// suite on 2026-08-31, which is exactly the loss this package exists to
+// prevent: a Keep that reports success and keeps nothing, while the caller
+// makes the set effective on that nil error. Tests swap it; nothing else does.
+var renameFile = os.Rename
+
 const (
 	ext      = ".json"
 	dirPerm  = 0o700
@@ -122,7 +130,7 @@ func (a *Archive) Keep(set *policy.Set) error {
 	if err := tmp.Close(); err != nil {
 		return fmt.Errorf("archive: close %s: %w", tmpName, err)
 	}
-	if err := os.Rename(tmpName, path); err != nil {
+	if err := renameFile(tmpName, path); err != nil {
 		return fmt.Errorf("archive: place %s: %w", path, err)
 	}
 	return nil

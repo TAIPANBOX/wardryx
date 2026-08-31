@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/TAIPANBOX/wardryx/internal/policy"
@@ -209,4 +210,35 @@ func mustJSON(t *testing.T, v any) []byte {
 		t.Fatalf("marshal: %v", err)
 	}
 	return b
+}
+
+// TestAFailedPlacementIsReportedNotSwallowed. Keep's last act is the atomic
+// rename, and a rename that fails while everything before it succeeded is
+// the one failure a filesystem will not produce on demand. It is also the
+// worst one: the caller swaps the policy set on a nil error, so a swallowed
+// rename means a set decides that nobody kept. A mutation that returned nil
+// here survived the whole suite until this test existed.
+func TestAFailedPlacementIsReportedNotSwallowed(t *testing.T) {
+	a := newTemp(t)
+
+	original := renameFile
+	renameFile = func(string, string) error { return errors.New("no space left on device") }
+	t.Cleanup(func() { renameFile = original })
+
+	err := a.Keep(set(t, "good.example.com"))
+	if err == nil {
+		t.Fatal("a failed placement must be reported: the caller makes the set effective on a nil error")
+	}
+	if !strings.Contains(err.Error(), "no space left on device") {
+		t.Errorf("the underlying cause is lost: %v", err)
+	}
+
+	// And nothing was left behind under the real name.
+	versions, vErr := a.Versions()
+	if vErr != nil {
+		t.Fatalf("Versions: %v", vErr)
+	}
+	if len(versions) != 0 {
+		t.Errorf("a failed Keep left %v archived", versions)
+	}
 }

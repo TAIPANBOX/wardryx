@@ -101,6 +101,16 @@ func TestEveryRecordedPolicyVersionCanBeFetchedBack(t *testing.T) {
 		t.Fatalf("PUT status = %d, body = %s", rec.Code, rec.Body.String())
 	}
 	decide("r2", []string{"send_wire_transfer"})
+	// A second rule, so the DELETE below lands on a set nothing has archived
+	// before. Deleting straight back to the base set would return to a
+	// version kept on attach, and the delete path would go unexercised: that
+	// is how a mutation removing it entirely survived this test on
+	// 2026-08-31.
+	if rec := doRequest(t, srv.Handler(), http.MethodPut, "/v1/policies/egress-guard", adminKey,
+		policy.Policy{Name: "egress", Target: "agent://acme.example/etl/*", AllowDomains: []string{"warehouse.acme.example"}}); rec.Code != http.StatusOK {
+		t.Fatalf("second PUT status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	decide("r2b", []string{"generate_report"})
 	if rec := doRequest(t, srv.Handler(), http.MethodDelete, "/v1/policies/scraper-guard", adminKey, nil); rec.Code != http.StatusNoContent {
 		t.Fatalf("DELETE status = %d, body = %s", rec.Code, rec.Body.String())
 	}
