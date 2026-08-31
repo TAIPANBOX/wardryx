@@ -15,10 +15,17 @@
 #
 # WHY THE THIRD PROPERTY IS SEPARATE FROM THE FIRST
 #
-# `readme-numbers.sh` already refuses in two distinct ways when its subject is
-# absent: no test functions at all, and no badge to compare against. Both
-# sentences were true, were established by hand once in the session that wrote
-# it, and nothing re-ran them.
+# `readme-numbers.sh` already refuses in three distinct ways when its subject is
+# absent: no test functions at all, no badge to compare against, and a module
+# that did not build. The first two sentences were true, were established by
+# hand once in the session that wrote it, and nothing re-ran them.
+#
+# The third was added on 2026-08-31 because it was MISSING and cost something.
+# `go test -list` enumerates only packages that compile; one that does not
+# contributes zero test functions and writes to stderr, which the gate
+# discarded. A broken test build made the count fall from 237 to 230, the gate
+# read that as a stale badge, and following its own advice made it report
+# success on a tree where a whole package did not compile.
 #
 # `decision-path-purity.sh` is the one with the sharper edge. It reads `go
 # list` output and matches each import against two lists. A list that stops
@@ -290,6 +297,16 @@ run_case "store-hands-out-copies: no memory store left to read" fail \
 	'./scripts/store-hands-out-copies.sh' \
 	"$(py 'import os; os.remove("internal/store/memory.go")')" \
 	"measured nothing"
+
+# The gate discarded stderr and the exit status of `go test -list`, so a
+# package that would not compile simply stopped contributing tests. This case
+# plants exactly that. The needle matters more than usual here: before the fix
+# the gate DID fail on this mutation, with "the badge says N and counts fewer",
+# which is a wrong diagnosis that sends the reader to edit the README.
+run_case "readme-numbers: a test package that does not compile" fail \
+	'./scripts/readme-numbers.sh' \
+	"$(py 'open("internal/policy/policy_test.go","a").write("\nfunc init() { thisSymbolDoesNotExist() }\n")')" \
+	"did not build"
 
 run_case "readme-numbers: no badge left to compare against" fail \
 	'./scripts/readme-numbers.sh' \
