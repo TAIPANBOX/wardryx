@@ -39,3 +39,22 @@ Feature: A recorded decision carries the question it answered
     Then all three record the tools, domains, steps, model, estimated cost,
       attestation, chain proof, policy version and reason
     # -> internal/api:TestEveryDecisionOutcomeRecordsTheQuestion
+
+  Scenario: the rules a decision was taken under are still there afterwards
+    Given a server that archives every policy set it makes effective
+    When policies are added and removed while decisions are being taken
+    Then every policy version those decisions recorded can be fetched back
+    And what comes back recompiles to exactly the version it was filed under
+    # -> internal/api:TestEveryRecordedPolicyVersionCanBeFetchedBack
+
+  Scenario: no policy set decides anything before it can be fetched back
+    Given an archive that cannot be written to
+    When an operator changes a policy
+    Then the change is refused and the set in force does not move
+    # -> internal/api:TestAPolicySetDecidesOnlyAfterItIsArchived
+
+  Scenario: an unarchived version is refused rather than read as no policy
+    Given a version nobody kept
+    When a replay asks the archive for it
+    Then it is told the version is not archived, and handed no policies at all
+    # -> internal/archive:TestAnUnknownVersionIsDistinguishableFromABrokenArchive

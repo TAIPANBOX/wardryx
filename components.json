@@ -56,6 +56,9 @@
           },
           "WARDRYX_POLICY": {
             "required": false
+          },
+          "WARDRYX_POLICY_ARCHIVE": {
+            "required": false
           }
         },
         "starts_with_empty_environment": true,

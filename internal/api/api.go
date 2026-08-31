@@ -41,6 +41,7 @@ import (
 
 	"github.com/TAIPANBOX/agent-stack-go/event"
 	"github.com/TAIPANBOX/wardryx/internal/approval"
+	"github.com/TAIPANBOX/wardryx/internal/archive"
 	wotel "github.com/TAIPANBOX/wardryx/internal/otel"
 	"github.com/TAIPANBOX/wardryx/internal/pdp"
 	"github.com/TAIPANBOX/wardryx/internal/policy"
@@ -90,6 +91,9 @@ type Server struct {
 	// the store's operator-managed policies on top of. See the package doc
 	// comment's "Policy-as-code" section.
 	basePolicies []policy.Policy
+	// policyArchive keeps every set this server makes effective. Nil means
+	// archiving is off; see SetPolicyArchive.
+	policyArchive *archive.Archive
 
 	// How long a hold may sit undecided before it is worth telling somebody,
 	// and which holds have already been reported.
@@ -144,6 +148,20 @@ const DefaultUnansweredAfter = 15 * time.Minute
 // disables the sweep entirely, which is a real choice: an operator who watches
 // the approval queue themselves does not need to be told about it.
 func (s *Server) SetUnansweredAfter(d time.Duration) { s.unansweredAfter = d }
+
+// SetPolicyArchive attaches the archive that keeps every policy set this
+// server makes effective, and immediately keeps the set already in force:
+// that set decides from the first request, so an archive recording only
+// later swaps would leave every decision before the first edit
+// unexaminable.
+//
+// Attaching nothing is allowed and is the default. What a deployment loses
+// then is the ability to replay its own recorded decisions, because the
+// PolicyVersion those events name will have no rules behind it.
+func (s *Server) SetPolicyArchive(a *archive.Archive) error {
+	s.policyArchive = a
+	return a.Keep(s.engine.CurrentSet())
+}
 
 // WatchUnansweredApprovals reports a hold that nobody has decided.
 //
@@ -756,6 +774,16 @@ func (s *Server) handlePutPolicy(w http.ResponseWriter, r *http.Request, princip
 		return
 	}
 
+	// Archived BEFORE the store write, not after it. A set archived and then
+	// not stored is a harmless spare copy under a name nothing references. The
+	// reverse is not harmless: a stored set is restored on the next start and
+	// becomes effective, so a failure between the two would put rules into
+	// force that no recorded decision could ever be replayed against.
+	if err := s.policyArchive.Keep(newSet); err != nil {
+		writeInternalError(w, "archiving the policy set", err)
+		return
+	}
+
 	now := time.Now().UTC()
 	if err := s.store.PutPolicy(ctx, id, p, now); err != nil {
 		writeInternalError(w, "writing the policy", err)
@@ -807,6 +835,16 @@ func (s *Server) handleDeletePolicy(w http.ResponseWriter, r *http.Request, prin
 	newSet, err := policy.Compile(candidate)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, fmt.Sprintf("invalid resulting policy set: %v", err))
+		return
+	}
+
+	// Archived BEFORE the store write, not after it. A set archived and then
+	// not stored is a harmless spare copy under a name nothing references. The
+	// reverse is not harmless: a stored set is restored on the next start and
+	// becomes effective, so a failure between the two would put rules into
+	// force that no recorded decision could ever be replayed against.
+	if err := s.policyArchive.Keep(newSet); err != nil {
+		writeInternalError(w, "archiving the policy set", err)
 		return
 	}
 
