@@ -16,18 +16,18 @@ import (
 //
 //  A. Is replay meaningful at all? Same request, two policy versions, two
 //     verdicts, two distinct PolicyVersions.
-//  B. Can a decision be replayed from what Wardryx records TODAY? No, and the
-//     failure is silent: internal/api's emit writes only {reason, tool_names}
-//     plus the identity triple, and a request rebuilt from that ALLOWS what
-//     really was DENIED.
-//  C. Would recording the full decision input be sufficient? Yes: a request
+//  B. Would recording the full decision input be sufficient? Yes: a request
 //     rebuilt from all eleven DecideRequest fields reproduces the original
 //     verdict and reason exactly.
 //
-// This is a characterization probe, not a regression test: it asserts what is
-// true now, including the defect in B. When B is fixed (Wardryx starts
-// emitting the full input) the B assertion goes red on purpose, and that is
-// the signal that this probe has done its job and should be replaced.
+// A third question, "can a decision be replayed from what Wardryx records
+// today?", was answered NO by this probe when it was written: the emitter
+// wrote {reason, tool_names} plus the identity triple, four of eleven inputs,
+// and a request rebuilt from that ALLOWED what really was DENIED. That test
+// has been removed rather than kept green, because the emitter now records
+// the whole question and the claim would be false. Its replacement runs on a
+// real emitted event instead of a hand-written snapshot: see
+// TestARecordedDenialReplaysToTheSameVerdict in internal/api.
 
 // probeAgent and probeRun stand in for one recorded decision.
 const (
@@ -105,52 +105,8 @@ func TestReplayIsMeaningful(t *testing.T) {
 	}
 }
 
-// rebuiltFromTodaysEvent is the best DecideRequest recoverable from what
-// internal/api emits for a policy_deny today:
-//
-//	s.emit(evPolicyDeny, SeverityHigh, req.AgentID, req.RunID, req.OnBehalfOf,
-//	    map[string]any{"reason": resp.Reason, "tool_names": req.ToolNames})
-//
-// Four of the eleven inputs survive. The rest are not recorded anywhere.
-func rebuiltFromTodaysEvent() DecideRequest {
-	return DecideRequest{
-		AgentID:   probeAgent,
-		RunID:     probeRun,
-		ToolNames: []string{"http_get"},
-		// Domains, Steps, EstCostUSD, Model, AttestationMethod,
-		// ChainProven, ApprovalToken: not emitted, so not recoverable.
-	}
-}
-
-// TestTodaysRecordCannotBeReplayed is question B, and it is the finding that
-// decides the work. Replaying a recorded DENIAL against the very policy that
-// produced it returns ALLOW, because the field the denial turned on was never
-// written down. An operator running this over last month's refusals would be
-// told the new policy changes nothing, when in truth the old policy was never
-// re-evaluated at all.
-func TestTodaysRecordCannotBeReplayed(t *testing.T) {
-	engine := New(policyV1(t), []byte(testSecret))
-
-	truth := engine.Decide(liveRequest())
-	replayed := engine.Decide(rebuiltFromTodaysEvent())
-
-	t.Logf("what really happened : %s: %s", truth.Decision, truth.Reason)
-	t.Logf("replayed from record : %s: %s", replayed.Decision, replayed.Reason)
-
-	if truth.Decision != Deny {
-		t.Fatalf("probe setup broken: the live request should deny, got %s", truth.Decision)
-	}
-	if replayed.Decision == truth.Decision {
-		t.Fatalf("the recording gap has closed: a request rebuilt from today's event now reproduces %s. "+
-			"Replace this probe with a real replay test.", truth.Decision)
-	}
-	if replayed.Decision != Allow {
-		t.Fatalf("want the silent failure to be %s (worse than a wrong deny), got %s", Allow, replayed.Decision)
-	}
-}
-
-// rebuiltFromFullEvent is what the same event would yield if Wardryx emitted
-// the whole decision input, which is the one-day change phase 1 proposes.
+// rebuiltFromFullEvent is what an emitted event yields now that Wardryx
+// records the whole decision input.
 func rebuiltFromFullEvent() DecideRequest {
 	return DecideRequest{
 		AgentID:           probeAgent,

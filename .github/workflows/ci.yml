@@ -43,6 +43,8 @@ jobs:
       # stale against these repositories. This is the same check at the source.
       - name: the README's numbers are true
         run: ./scripts/readme-numbers.sh
+      - name: scenarios bind to tests
+        run: ./scripts/scenarios-bind-to-tests.sh
 
       # Last, because it mutates tracked files and restores them. It needs a
       # clean tree and says so plainly, so it also reports any earlier step
