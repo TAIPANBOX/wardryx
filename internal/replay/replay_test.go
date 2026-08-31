@@ -292,3 +292,36 @@ func TestAnEmptyFileSaysSoRatherThanReportingZeroChanges(t *testing.T) {
 		t.Errorf("an empty run must say it measured nothing:\n%s", out)
 	}
 }
+
+// TestAnEventMissingOneMemberIsUnreadableNotReplayedWithoutIt is the mutation
+// that survived on 2026-08-31. TestAnEventWithoutTheQuestionIsUnreadable only
+// proved the point for an event missing everything, where a second guard (the
+// version type check) catches it anyway. An event carrying a good version and
+// one absent member is the dangerous shape: replayed with that member
+// defaulted, it answers a question nobody asked, permissively, which is
+// exactly the defect this whole line of work exists to close.
+func TestAnEventMissingOneMemberIsUnreadableNotReplayedWithoutIt(t *testing.T) {
+	inForce := compile(t, []string{"good.example.com"}, 500)
+	reason := `domain "payouts.evil.example" is not allowed by policy "finance-guardrail" (target agent://acme.example/finance/*)`
+
+	for _, drop := range []string{
+		"domains", "tool_names", "steps", "model", "est_cost_usd",
+		"attestation_method", "chain_proven", "approval_token_required", "reason",
+	} {
+		ev := decisionEvent("policy_deny", inForce.Version(), reason, nil)
+		delete(ev.Data, drop)
+
+		report := Run([]event.Event{ev}, archiveOf(t, inForce), compile(t, nil, 500))
+		if report.Unreadable != 1 {
+			t.Errorf("without %q: unreadable = %d, want 1. A replay that fills it in answers a question nobody asked (fidelity %s)",
+				drop, report.Unreadable, report.Rows[0].Fidelity)
+			continue
+		}
+		if !strings.Contains(report.Rows[0].Note, drop) {
+			t.Errorf("without %q the note does not name it: %q", drop, report.Rows[0].Note)
+		}
+		if report.Rows[0].Candidate != nil {
+			t.Errorf("without %q the row still carried a counterfactual", drop)
+		}
+	}
+}
