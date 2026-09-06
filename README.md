@@ -6,7 +6,7 @@
 
 [![CI](https://github.com/TAIPANBOX/wardryx/actions/workflows/ci.yml/badge.svg)](https://github.com/TAIPANBOX/wardryx/actions/workflows/ci.yml)
 ![Go](https://img.shields.io/badge/go-1.27-00ADD8.svg)
-![tests](https://img.shields.io/badge/tests-255-brightgreen.svg)
+![tests](https://img.shields.io/badge/tests-270-brightgreen.svg)
 ![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)
 ![Status](https://img.shields.io/badge/status-deterministic%20PDP-2dd4bf.svg)
 
@@ -365,8 +365,10 @@ make build   # -> ./bin/wardryx
 make build
 
 # serve: HTTP policy decision API
-./bin/wardryx serve                                    # :8090, in-memory store, no policy (allows everything)
-./bin/wardryx serve -addr :9000 -policy ./policies -db "$DSN" -events ./events.ndjson -otlp-endpoint http://localhost:4318
+# refuses to start with no WARDRYX_KEYS and no WARDRYX_ALLOW_DEVKEY: see the
+# "Authentication" section below.
+WARDRYX_ALLOW_DEVKEY=1 ./bin/wardryx serve -addr 127.0.0.1:8090          # loopback, in-memory store, no policy (allows everything)
+WARDRYX_KEYS="$KEYS" ./bin/wardryx serve -addr :9000 -policy ./policies -db "$DSN" -events ./events.ndjson -otlp-endpoint http://localhost:4318
 
 # check: offline dry-run over a directory of Agent Passports
 ./bin/wardryx check ./passports ./policies/finance.yaml
@@ -463,7 +465,8 @@ Every `WARDRYX_*` variable is read once at process startup (`internal/config`), 
 | Variable | Flag | Meaning |
 | --- | --- | --- |
 | `WARDRYX_ADDR` | `-addr` | Listen address (default `:8090`) |
-| `WARDRYX_KEYS` | (none) | `key:org[:role],...` bearer keys; empty gives a single dev key `devkey` -> `default`/`admin` |
+| `WARDRYX_KEYS` | (none) | `key:org[:role],...` bearer keys; with no valid entry, `serve` refuses to start unless `WARDRYX_ALLOW_DEVKEY` is set (see below) |
+| `WARDRYX_ALLOW_DEVKEY` | (none) | Explicit opt-in to the insecure dev key `devkey` -> `default`/`admin` when `WARDRYX_KEYS` has no valid entry; refused outright (not merely warned about) together with a non-loopback `-addr` |
 | `WARDRYX_DB` | `-db` | Postgres DSN; empty uses the in-memory store |
 | `WARDRYX_POLICY` | `-policy` | Policy file or directory (YAML/JSON); empty allows every request |
 | `WARDRYX_EVENTS_PATH` | `-events` | NDJSON agent-event output path; empty disables events |
@@ -474,6 +477,10 @@ Every `WARDRYX_*` variable is read once at process startup (`internal/config`), 
 | `WARDRYX_OTLP_ENDPOINT` | `-otlp-endpoint` | OTLP/HTTP endpoint for decision spans (see [OTLP export](#otlp-export)); empty disables it |
 
 The `[:role]` segment of a `WARDRYX_KEYS` entry is one of `admin` (every endpoint, including `POST /v1/approvals/{id}/decide`) or `viewer` (every other authenticated endpoint), and defaults to `admin` when the segment is omitted.
+
+### Authentication
+
+`serve` fails closed: with no valid `WARDRYX_KEYS` entry and no `WARDRYX_ALLOW_DEVKEY` opt-in, it refuses to start rather than either authenticating nobody silently or, as it did before this section was written, installing the built-in `devkey` -> `default`/`admin` credential on whatever address `-addr` bound (every interface, by default). Set `WARDRYX_KEYS` to a real `key:org[:role]` spec for anything but a local run, or set `WARDRYX_ALLOW_DEVKEY=1` for a local, loopback-only development run (`make serve` does exactly this, binding `127.0.0.1:8090`). The devkey fallback together with a non-loopback bind is refused outright rather than warned about, since that pairing is precisely what let a self-labelled pod turn a policy `deny` into `allow` in this stack's own history.
 
 ---
 

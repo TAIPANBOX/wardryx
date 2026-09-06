@@ -124,6 +124,10 @@ an absent invariant.
 5. **An approval token is single-use.** A redeemed token allows exactly one
    `/v1/decide` call for the approval it was minted for; a second presentation
    of the same token is rejected. Replay of an approval is the whole attack.
+   Held only when `WARDRYX_APPROVAL_SINGLE_USE=true`; the default (false) lets
+   a token be redeemed repeatedly for its TTL against the same agent, run and
+   tool set at or below the approved cost. Whether the default should flip is
+   an open decision (2026-09-06). `@claude`
    *(test: `TestSingleUseOnSecondDecideWithSameTokenHolds`,
    `TestApprovalDecideTwiceReturns409`, and `TryRedeem`'s own atomicity and
    race-safety suites in `internal/store` for both backends)*

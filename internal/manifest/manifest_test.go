@@ -58,12 +58,13 @@ type component struct {
 	Name    string `json:"name"`
 	Class   string `json:"class"`
 	Checked struct {
-		Package                    string            `json:"package"`
-		ListenDefault              string            `json:"listen_default"`
-		HealthPath                 string            `json:"health_path"`
-		Env                        map[string]envVar `json:"env"`
-		StartsWithEmptyEnvironment bool              `json:"starts_with_empty_environment"`
-		RefusesUnauthenticatedV1   bool              `json:"refuses_unauthenticated_v1"`
+		Package                           string            `json:"package"`
+		ListenDefault                     string            `json:"listen_default"`
+		HealthPath                        string            `json:"health_path"`
+		Env                               map[string]envVar `json:"env"`
+		StartsWithEmptyEnvironment        bool              `json:"starts_with_empty_environment"`
+		RefusesWithNoKeysAndNoAllowDevkey bool              `json:"refuses_with_no_keys_and_no_allow_devkey"`
+		RefusesUnauthenticatedV1          bool              `json:"refuses_unauthenticated_v1"`
 	} `json:"checked"`
 }
 
@@ -256,16 +257,28 @@ func TestTheDeclaredListenDefaultIsTheOneServeFallsBackTo(t *testing.T) {
 
 // AND THE HALF NO CENTRAL FILE COULD EVER DO: start it, twice over.
 //
-// It has no required variable: all nine carry a default or are optional. So the
-// first claim is that it comes up with NOTHING configured, and answers its
-// declared health path with no credential.
+// It has no required variable: all ten carry a default or are optional. So the
+// first claim is that it comes up with as little configured as this service
+// allows, and answers its declared health path with no credential.
 //
 // The second claim is the one that exists because the opposite was written
 // down. vouchryx's manifest test says in a comment that wardryx "installs a
-// built-in admin key". ParseKeys("") returns an empty map, so with no
-// WARDRYX_KEYS there is no key of any kind and every /v1 route answers 401.
-// Fail-closed, and the only way to settle a sentence like that is to run it.
-func TestItStartsUnconfiguredAndRefusesUnauthenticatedCalls(t *testing.T) {
+// built-in admin key". That was already the wrong reason for the right
+// conclusion (ParseKeys("") returned devkey -> default/admin, a real key,
+// until the 2026-09-06 security fix below), and is now wrong outright: with
+// no WARDRYX_KEYS and no WARDRYX_ALLOW_DEVKEY opt-in, `serve` refuses to
+// start (TestARefusingServiceExitsRatherThanListens, below). This test covers
+// the surviving half of the old claim, that a RUNNING wardryx with no real
+// key of its own still answers every /v1 route 401 without one. Fail-closed,
+// and the only way to settle a sentence like that is to run it.
+//
+// 2026-09-06: this used to start with a truly empty environment
+// (StartsWithEmptyEnvironment was true). It no longer can, since that exact
+// condition is now refused (see TestARefusingServiceExitsRatherThanListens),
+// so this uses the smallest opt-in the service supports instead:
+// WARDRYX_ALLOW_DEVKEY=1 on a loopback-only bind, which is the one
+// combination startupKeyPosture starts on without a real WARDRYX_KEYS.
+func TestItStartsAndRefusesUnauthenticatedCalls(t *testing.T) {
 	if testing.Short() {
 		t.Skip("starts a process")
 	}
@@ -273,13 +286,10 @@ func TestItStartsUnconfiguredAndRefusesUnauthenticatedCalls(t *testing.T) {
 	svc := service(t, m)
 
 	for k, v := range svc.Checked.Env {
-		if v.Required {
+		if v.Required && svc.Checked.StartsWithEmptyEnvironment {
 			t.Fatalf("components.json marks %s required AND claims the service starts "+
 				"with nothing configured. Those cannot both be true.", k)
 		}
-	}
-	if !svc.Checked.StartsWithEmptyEnvironment {
-		t.Skip("the manifest does not claim it starts unconfigured")
 	}
 
 	bin := filepath.Join(t.TempDir(), "wardryx")
@@ -292,7 +302,9 @@ func TestItStartsUnconfiguredAndRefusesUnauthenticatedCalls(t *testing.T) {
 	// A port the OS picks, so a developer already running wardryx on the
 	// declared default does not make this fail for a reason that is not a
 	// finding. The DEFAULT itself is checked against main.go above, where it
-	// can be checked without binding anything.
+	// can be checked without binding anything. Loopback on purpose: it is
+	// also the bind startupKeyPosture requires for WARDRYX_ALLOW_DEVKEY to
+	// start rather than refuse.
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("reserving a port: %v", err)
@@ -303,8 +315,14 @@ func TestItStartsUnconfiguredAndRefusesUnauthenticatedCalls(t *testing.T) {
 	}
 
 	cmd := exec.Command(bin, "serve", "-addr", addr)
-	// env -i, in Go. Nothing configured means nothing configured.
-	cmd.Env = []string{}
+	if svc.Checked.StartsWithEmptyEnvironment {
+		// env -i, in Go. Nothing configured means nothing configured.
+		cmd.Env = []string{}
+	} else {
+		// As close to nothing as this service allows without refusing: the
+		// devkey opt-in, on the loopback bind it requires.
+		cmd.Env = []string{"WARDRYX_ALLOW_DEVKEY=1"}
+	}
 	var out syncBuffer
 	cmd.Stdout = &out
 	cmd.Stderr = &out
@@ -370,6 +388,47 @@ func TestItStartsUnconfiguredAndRefusesUnauthenticatedCalls(t *testing.T) {
 			t.Errorf("%s %s answered %d with no credential and no WARDRYX_KEYS set.\n"+
 				"components.json claims this service is fail-closed, and 401 is the only "+
 				"answer that makes that true.", probe.method, probe.path, code)
+		}
+	}
+}
+
+// TestARefusingServiceExitsRatherThanListens is the other half of the
+// 2026-09-06 security fix, and the one a unit test on startupKeyPosture
+// (cmd/wardryx/main_test.go) cannot give: that internal decision function is
+// proven correct in isolation, but nothing before this asserted that runServe
+// actually WIRES it in, in the real built binary, with a truly empty
+// environment. A refactor that stopped checking the return value would pass
+// every existing test and still start happily with the devkey admin key.
+func TestARefusingServiceExitsRatherThanListens(t *testing.T) {
+	if testing.Short() {
+		t.Skip("starts a process")
+	}
+	m, r := load(t)
+	svc := service(t, m)
+	if !svc.Checked.RefusesWithNoKeysAndNoAllowDevkey {
+		t.Skip("the manifest does not claim this")
+	}
+
+	bin := filepath.Join(t.TempDir(), "wardryx")
+	build := exec.Command("go", "build", "-o", bin, svc.Checked.Package)
+	build.Dir = r
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("building the declared package: %v\n%s", err, out)
+	}
+
+	cmd := exec.Command(bin, "serve")
+	// env -i, in Go: nothing configured means nothing configured. No port is
+	// reserved here, unlike the test above: a process that refuses to start
+	// never gets far enough to bind one.
+	cmd.Env = []string{}
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("it exited 0 with no WARDRYX_KEYS and no WARDRYX_ALLOW_DEVKEY, want a nonzero "+
+			"exit refusing to start.\nits output was:\n%s", out)
+	}
+	for _, want := range []string{"WARDRYX_KEYS", "WARDRYX_ALLOW_DEVKEY"} {
+		if !strings.Contains(string(out), want) {
+			t.Errorf("the refusal does not mention %s, want both ways out named.\ngot:\n%s", want, out)
 		}
 	}
 }

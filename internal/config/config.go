@@ -21,6 +21,15 @@ type Config struct {
 	// Keys is WARDRYX_KEYS: the "key:org[:role],..." bearer-key spec. No
 	// CLI flag mirrors this one; it is env-only.
 	Keys string
+	// AllowDevkey is WARDRYX_ALLOW_DEVKEY: an explicit operator opt-in to the
+	// insecure devkey -> default/admin fallback when Keys has no valid
+	// entries. No CLI flag mirrors this one; it is env-only. Defaults to
+	// false, which means an empty or entirely malformed Keys spec yields no
+	// keys at all (see api.ParseKeys) and `serve` refuses to start rather
+	// than silently authenticating everyone as devkey. This is the fix for
+	// the finding that a bare `wardryx serve` was a policy decision point on
+	// every interface whose admin password was the word "devkey".
+	AllowDevkey bool
 	// DB is WARDRYX_DB: a Postgres DSN. Empty selects the in-memory store.
 	DB string
 	// Policy is WARDRYX_POLICY: a policy file or directory.
@@ -72,6 +81,7 @@ func FromEnv() Config {
 	return Config{
 		Addr:               os.Getenv("WARDRYX_ADDR"),
 		Keys:               os.Getenv("WARDRYX_KEYS"),
+		AllowDevkey:        parseBool(os.Getenv("WARDRYX_ALLOW_DEVKEY")),
 		DB:                 os.Getenv("WARDRYX_DB"),
 		Policy:             os.Getenv("WARDRYX_POLICY"),
 		EventsPath:         os.Getenv("WARDRYX_EVENTS_PATH"),
