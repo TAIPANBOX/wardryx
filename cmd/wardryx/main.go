@@ -12,6 +12,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"strings"
@@ -217,9 +218,21 @@ func runServe(args []string) error {
 		fmt.Fprintf(os.Stderr, "wardryx: exporting OTLP decision spans to %s\n", *otlpEndpoint)
 	}
 
-	keys, keyWarnings := api.ParseKeys(cfg.Keys)
+	keys, keyWarnings := api.ParseKeys(cfg.Keys, cfg.AllowDevkey)
 	for _, warn := range keyWarnings {
 		fmt.Fprintln(os.Stderr, warn)
+	}
+	// W1: a built-in admin key on every interface. Refusing here, before a
+	// store, an events writer, or an OTLP exporter is ever opened, would be
+	// cleaner, but those are already open by this point and their defers
+	// close them correctly on this early return, so the ordering cost is
+	// only that a misconfigured process touches a database it will not use.
+	refuseMsg, postureWarnings := startupKeyPosture(cfg.Keys, cfg.AllowDevkey, *addr)
+	if refuseMsg != "" {
+		return fmt.Errorf("refusing to start: %s", refuseMsg)
+	}
+	for _, w := range postureWarnings {
+		fmt.Fprintln(os.Stderr, "wardryx: "+w)
 	}
 	engine := pdp.New(policies, []byte(cfg.ApprovalSecret))
 	basePolicies := policies.Policies()
@@ -282,8 +295,104 @@ func runServe(args []string) error {
 		Addr:              *addr,
 		Handler:           srv.Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       120 * time.Second,
 	}
 	return httpSrv.ListenAndServe()
+}
+
+// startupKeyPosture is the W1 fix's decision: given the raw WARDRYX_KEYS spec,
+// whether WARDRYX_ALLOW_DEVKEY is set, and the address serve is about to bind,
+// decide whether to refuse to start, warn, or proceed silently.
+//
+// Factored out of runServe so it can be tested without binding a real port:
+// it touches no network, no store, nothing but strings.
+//
+// Before this, ParseKeys installed the devkey -> default/admin fallback
+// unconditionally whenever WARDRYX_KEYS was unset or entirely malformed, on
+// whatever address -addr bound (":8090", every interface, by default). A
+// bare `wardryx serve` -- the Docker image, `docker run` -- was a policy
+// decision point on every interface whose admin password was the word
+// "devkey", and stack-k8s GOTCHAS 20 records that pairing turning a `deny`
+// into an `allow` from a self-labelled pod.
+//
+// Four outcomes, in the order this function decides them:
+//
+//  1. No valid keys and no opt-in: refuse to start. Nobody configured this
+//     deployment on purpose, and starting anyway would either authenticate
+//     no one (silent, confusing) or, before this fix, everyone as devkey
+//     (silent and dangerous). Naming both ways out in the message means an
+//     operator who hits this does not have to read the source to find them.
+//  2. The devkey fallback IS active (no valid keys, opt-in given) and the
+//     bind is not loopback-only: refuse. This exact pairing is the GOTCHAS 20
+//     incident, so it is refused outright rather than merely warned about.
+//  3. The devkey fallback is active and the bind IS loopback-only: a
+//     legitimate local dev run (`make serve`'s own shape). Start, but warn
+//     loudly that the insecure credential is active.
+//  4. Real keys are configured: start. WARDRYX_ALLOW_DEVKEY has no effect
+//     when there are valid entries (mirrors tokenfuse-cloud's own
+//     TOKENFUSE_CLOUD_ALLOW_DEVKEY), so it warns that the flag is unused
+//     rather than staying silent about it. A non-loopback bind is warned
+//     about independently of the key question: k8s binds 0.0.0.0 on purpose,
+//     so this never refuses on the bind alone, only logs it (see
+//     bindWarning).
+func startupKeyPosture(keysSpec string, allowDevkey bool, addr string) (refuse string, warn []string) {
+	realKeys, _ := api.ParseKeys(keysSpec, false)
+	devkeyActive := allowDevkey && len(realKeys) == 0
+
+	if !allowDevkey && len(realKeys) == 0 {
+		return "no valid entries in WARDRYX_KEYS and WARDRYX_ALLOW_DEVKEY is not set: " +
+			"wardryx would authenticate nobody. Set WARDRYX_KEYS to a real " +
+			`"key:org[:role]" spec, or set WARDRYX_ALLOW_DEVKEY=1 for a local, ` +
+			"loopback-only development run", nil
+	}
+
+	bw := bindWarning(addr)
+
+	switch {
+	case devkeyActive && bw != "":
+		return "WARDRYX_ALLOW_DEVKEY is set and no real WARDRYX_KEYS entries are configured, " +
+			"and " + bw + ". The built-in devkey admin credential on a non-loopback bind " +
+			"is refused outright, not merely warned about: it is the exact misconfiguration " +
+			"behind stack-k8s GOTCHAS 20. Set WARDRYX_KEYS to real keys, or bind -addr to " +
+			"loopback (127.0.0.1:PORT) for a local devkey run", nil
+	case devkeyActive:
+		warn = append(warn, "WARDRYX_ALLOW_DEVKEY is set and WARDRYX_KEYS has no valid "+
+			"entries: the insecure devkey credential (org=default, role=admin) is ACTIVE. "+
+			"This must never be used outside a local, loopback-only development run")
+	case allowDevkey:
+		warn = append(warn, "WARDRYX_ALLOW_DEVKEY is set but WARDRYX_KEYS already has "+
+			"valid entries; the flag has no effect")
+	}
+	if bw != "" {
+		warn = append(warn, bw)
+	}
+	return "", warn
+}
+
+// bindWarning says something when this binds somewhere the whole network can
+// reach. It does not refuse on its own: a deployment behind an ingress binds
+// 0.0.0.0 on purpose, and a service that refused would be one an operator
+// works around by disabling the check. What it must not do is stay silent,
+// which is how the built-in devkey admin key going out on every interface
+// went unexamined until stack-k8s GOTCHAS 20. Mirrors vouchryx's own
+// bindWarning (cmd/vouchryx/main.go).
+func bindWarning(addr string) string {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return ""
+	}
+	switch host {
+	case "", "0.0.0.0", "::", "[::]":
+		return "listening on every interface; this service decides allow and deny for " +
+			"the whole stack; put it behind something that authenticates or bind it to loopback"
+	}
+	if ip := net.ParseIP(host); ip != nil && !ip.IsLoopback() {
+		return "listening on a routable address; this service decides allow and deny for " +
+			"the whole stack; put it behind something that authenticates"
+	}
+	return ""
 }
 
 // singleUseInMemoryWarning returns the stderr warning to print when

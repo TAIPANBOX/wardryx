@@ -37,8 +37,15 @@ check: build
 
 # Serve demo: in-memory store, no policy loaded (every request allowed),
 # events disabled. Ctrl-C to stop.
+#
+# WARDRYX_ALLOW_DEVKEY=1 opts into the insecure devkey -> default/admin
+# credential for this local run; -addr binds loopback only, which
+# startupKeyPosture requires for that opt-in to start rather than refuse
+# (see CLAUDE.md's W1 finding and cmd/wardryx/main.go's bindWarning). Without
+# either, `serve` now refuses to start rather than installing devkey
+# silently on every interface.
 serve: build
-	./bin/wardryx serve
+	WARDRYX_ALLOW_DEVKEY=1 ./bin/wardryx serve -addr 127.0.0.1:8090
 
 clean:
 	rm -rf bin

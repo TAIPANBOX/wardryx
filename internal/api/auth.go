@@ -27,9 +27,20 @@ type Principal struct {
 // RoleAdmin when absent, matching the Rust implementation's default: a bare
 // "key:org" key gets full access unless explicitly downgraded to viewer.
 //
-// With no valid entries (including an empty spec, WARDRYX_KEYS unset), a
-// single dev key "devkey" -> default/admin is returned, so the service is
-// usable out of the box in development.
+// Fails closed by default. With no valid entries (an empty spec, WARDRYX_KEYS
+// unset, or every entry malformed) and allowDevkey false, ParseKeys returns
+// an EMPTY map: nobody authenticates, and every /v1 route answers 401. The
+// insecure "devkey" -> default/admin fallback exists only for a local,
+// loopback-only development run and is inserted ONLY when the caller
+// explicitly opts in via allowDevkey, mirroring the Cloud plane's
+// TOKENFUSE_CLOUD_ALLOW_DEVKEY (tokenfuse/crates/cloud/src/keys.rs
+// parse_keys). It is never a silent default: before this, an unset or
+// malformed WARDRYX_KEYS installed the built-in devkey admin credential on
+// whatever address -addr bound (":8090", every interface, by default), which
+// is exactly the misconfiguration stack-k8s GOTCHAS 20 records turning a
+// `deny` into an `allow` from a self-labelled pod. Callers must only ever set
+// allowDevkey from an explicit operator opt-in (WARDRYX_ALLOW_DEVKEY), never
+// as a silent default.
 //
 // ParseKeys never rejects a role outside {RoleAdmin, RoleViewer}: it stores
 // whatever string followed the second colon exactly as given, so a lookup
@@ -43,7 +54,7 @@ type Principal struct {
 // RoleAdmin nor RoleViewer, naming the key and the role, so a caller (serve)
 // can print it at startup rather than leaving the gap for a 403 to reveal
 // later.
-func ParseKeys(spec string) (map[string]Principal, []string) {
+func ParseKeys(spec string, allowDevkey bool) (map[string]Principal, []string) {
 	keys := make(map[string]Principal)
 	var warnings []string
 	for _, pair := range strings.Split(spec, ",") {
@@ -73,7 +84,7 @@ func ParseKeys(spec string) (map[string]Principal, []string) {
 		}
 		keys[key] = Principal{Org: org, Role: role}
 	}
-	if len(keys) == 0 {
+	if len(keys) == 0 && allowDevkey {
 		keys["devkey"] = Principal{Org: "default", Role: RoleAdmin}
 	}
 	return keys, warnings

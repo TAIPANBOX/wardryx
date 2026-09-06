@@ -421,6 +421,86 @@ func TestApprovalDecideTwiceReturns409(t *testing.T) {
 	}
 }
 
+// TestAnAdminOfAnotherOrgCannotDecideAnApproval is W3, 2026-09-06:
+// handleApprovalDecide never compared the approval's stored org against the
+// caller's, so an admin key for one org could grant or deny a hold that
+// belongs to another. handleListApprovals already scoped by org (it
+// filters `a.Context["org"] != principal.Org`), so the list hid the hold
+// while the decide route honoured it anyway.
+func TestAnAdminOfAnotherOrgCannotDecideAnApproval(t *testing.T) {
+	srv := newTestServer(t)
+
+	// Hold created under org "acme" (adminKey).
+	holdRec := doRequest(t, srv.Handler(), http.MethodPost, "/v1/decide", adminKey, decideRequestDTO{
+		AgentID: "agent://acme.example/finance/bot1", RunID: "r1", EstCostUSD: 999,
+	})
+	held := decodeBody[decideResponseDTO](t, holdRec)
+	if held.Decision != pdp.Hold {
+		t.Fatalf("initial Decision = %q, want hold", held.Decision)
+	}
+
+	// otherOrg is an admin key for org "globex" (see newTestServerOpts):
+	// a real admin key, just not one that owns this hold.
+	rec := doRequest(t, srv.Handler(), http.MethodPost, "/v1/approvals/"+held.ApprovalID+"/decide", otherOrg,
+		approvalDecideRequestDTO{Decision: "grant", DecidedBy: "mallory@globex.example"})
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404: an admin of another org must not be able to decide "+
+			"this hold, and the response must look exactly like a missing id rather than "+
+			"leaking that the id exists under a different org", rec.Code)
+	}
+
+	// The hold must still be pending: a rejected cross-org decide must not
+	// have consumed it, partially or otherwise.
+	listRec := doRequest(t, srv.Handler(), http.MethodGet, "/v1/approvals", adminKey, nil)
+	list := decodeBody[[]approvalDTO](t, listRec)
+	found := false
+	for _, a := range list {
+		if a.ApprovalID == held.ApprovalID {
+			found = true
+			if !a.Pending {
+				t.Errorf("approval %s is no longer pending after a rejected cross-org decide", a.ApprovalID)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("approval %s not found in org acme's own list after the cross-org attempt", held.ApprovalID)
+	}
+
+	// The rightful admin (org acme) can still decide it normally.
+	grantRec := doRequest(t, srv.Handler(), http.MethodPost, "/v1/approvals/"+held.ApprovalID+"/decide", adminKey,
+		approvalDecideRequestDTO{Decision: "grant", DecidedBy: "alice@acme.example"})
+	if grantRec.Code != http.StatusOK {
+		t.Fatalf("the rightful org's admin could not decide its own hold: status = %d, body = %s",
+			grantRec.Code, grantRec.Body.String())
+	}
+}
+
+// TestAnApprovalWithNoOrgInItsContextIsDecidedAsBefore: an approval minted
+// before org scoping existed (or hand-built by an older client) carries no
+// "org" key in its Context at all. W3's check only narrows what was
+// otherwise wide open, so this must still be decidable by any admin, the
+// exact behavior this repository had before the fix.
+func TestAnApprovalWithNoOrgInItsContextIsDecidedAsBefore(t *testing.T) {
+	srv := newTestServer(t)
+	ctx := context.Background()
+	if err := srv.store.CreateApproval(ctx, store.Approval{
+		ApprovalID:  "legacy-1",
+		AgentID:     "agent://acme.example/finance/bot1",
+		RunID:       "r1",
+		RequestedAt: time.Now().UTC(),
+		Context:     map[string]any{"tool_names": []string{"generate_report"}},
+	}); err != nil {
+		t.Fatalf("seeding a legacy approval with no org: %v", err)
+	}
+
+	rec := doRequest(t, srv.Handler(), http.MethodPost, "/v1/approvals/legacy-1/decide", otherOrg,
+		approvalDecideRequestDTO{Decision: "grant", DecidedBy: "mallory@globex.example"})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: an approval with no org in its context predates "+
+			"org scoping and must remain decidable by any admin, body = %s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestApprovalDecideRejectsInvalidDecisionValue(t *testing.T) {
 	srv := newTestServer(t)
 	holdRec := doRequest(t, srv.Handler(), http.MethodPost, "/v1/decide", adminKey, decideRequestDTO{

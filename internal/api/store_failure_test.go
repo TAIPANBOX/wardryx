@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/TAIPANBOX/wardryx/internal/approval"
 	"github.com/TAIPANBOX/wardryx/internal/policy"
 	"github.com/TAIPANBOX/wardryx/internal/store"
 )
@@ -129,5 +130,81 @@ func TestAStoreErrorDoesNotCarryTheDatabasePasswordIntoTheResponse(t *testing.T)
 				}
 			}
 		})
+	}
+}
+
+// ------------------------------------------------------------------
+// W2, 2026-09-06: two more paths wrote the store's error into the response
+// through fmt.Sprintf's %v verb instead of err.Error() directly, which is
+// exactly the shape scripts/no-raw-error-in-response.sh's ORIGINAL grep
+// (literal ".Error()") could not see. Both are on POST /v1/decide rather
+// than the six routes above, so they need their own fixtures: one drives a
+// fresh hold (RequireHumanAboveUSD is crossed, no token presented), the
+// other redeems a token under WARDRYX_APPROVAL_SINGLE_USE.
+// ------------------------------------------------------------------
+
+// TestAStoreErrorWhileRecordingAnApprovalHoldDoesNotLeakTheDatabasePassword
+// covers api.go's approval.Request branch in handleDecide (the Hold case):
+// before the fix, a failing CreateApproval wrote
+// fmt.Sprintf("failed to record approval hold: %v", err) straight into the
+// body.
+func TestAStoreErrorWhileRecordingAnApprovalHoldDoesNotLeakTheDatabasePassword(t *testing.T) {
+	srv := newServerOnABrokenStore(t)
+
+	rec := doRequest(t, srv.Handler(), http.MethodPost, "/v1/decide", adminKey, decideRequestDTO{
+		AgentID: "agent://acme.example/finance/bot1", RunID: "r1", EstCostUSD: 999,
+	})
+	if rec.Code < 500 {
+		t.Fatalf("status = %d, want 500+: a store that cannot record a hold is wardryx's "+
+			"problem, not the caller's", rec.Code)
+	}
+	body := rec.Body.String()
+	for _, secret := range []string{"hunter2", leakyDSN} {
+		if strings.Contains(body, secret) {
+			t.Fatalf("the response carries the database credential.\ngot: %s\n"+
+				"the approval-hold path folded the store error into an fmt.Sprintf %%v "+
+				"verb before this fix; see scripts/no-raw-error-in-response.sh", body)
+		}
+	}
+	if !strings.Contains(body, "recording the approval hold") {
+		t.Errorf("body = %q, want it to name the operation wardryx wrote itself "+
+			"(\"recording the approval hold\"), the way writeInternalError does", body)
+	}
+}
+
+// TestAStoreErrorDuringApprovalTokenRedemptionDoesNotLeakTheDatabasePassword
+// covers the WARDRYX_APPROVAL_SINGLE_USE branch: a validly signed,
+// not-yet-expired approval_token is presented, the PDP verifies it and would
+// allow, and then TryRedeem itself fails against a broken store. Before the
+// fix this wrote fmt.Sprintf("failed to record approval_token redemption:
+// %v", rErr) straight into the body, exactly as the hold path did.
+func TestAStoreErrorDuringApprovalTokenRedemptionDoesNotLeakTheDatabasePassword(t *testing.T) {
+	srv := newTestServerSingleUse(t)
+	tok, _, err := approval.MintApprovalToken([]byte(testHMAC),
+		"agent://acme.example/finance/bot1", "run-1", []string{"generate_report"}, 999, approval.DefaultTTL)
+	if err != nil {
+		t.Fatalf("mint token: %v", err)
+	}
+	srv.store = brokenStore{}
+
+	rec := doRequest(t, srv.Handler(), http.MethodPost, "/v1/decide", adminKey, decideRequestDTO{
+		AgentID: "agent://acme.example/finance/bot1", RunID: "run-1", ToolNames: []string{"generate_report"},
+		EstCostUSD: 999, ApprovalToken: tok,
+	})
+	if rec.Code < 500 {
+		t.Fatalf("status = %d, want 500+: a store that cannot record a redemption is "+
+			"wardryx's problem, not the caller's", rec.Code)
+	}
+	body := rec.Body.String()
+	for _, secret := range []string{"hunter2", leakyDSN} {
+		if strings.Contains(body, secret) {
+			t.Fatalf("the response carries the database credential.\ngot: %s\n"+
+				"the single-use redemption path folded the store error into an fmt.Sprintf "+
+				"%%v verb before this fix; see scripts/no-raw-error-in-response.sh", body)
+		}
+	}
+	if !strings.Contains(body, "recording the approval_token redemption") {
+		t.Errorf("body = %q, want it to name the operation wardryx wrote itself "+
+			"(\"recording the approval_token redemption\")", body)
 	}
 }

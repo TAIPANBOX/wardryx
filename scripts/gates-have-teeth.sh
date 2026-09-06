@@ -197,6 +197,23 @@ run_case "no-raw-error-in-response: a driver error written into a body" fail \
 	"$(py 'edit("internal/api/api.go", "writeInternalError(w, \"listing policies\", err)", "writeError(w, http.StatusInternalServerError, err.Error())")')" \
 	"err.Error()"
 
+# The second shape of the same leak, added 2026-09-06: the error text folded
+# into an fmt.Sprintf %v verb instead of a bare err.Error() call. The first
+# version of this gate only grepped for the literal ".Error()" text and
+# walked straight past this one.
+run_case "no-raw-error-in-response: a driver error folded into an fmt.Sprintf %v verb" fail \
+	'./scripts/no-raw-error-in-response.sh' \
+	"$(py 'edit("internal/api/api.go", "writeInternalError(w, \"listing policies\", err)", "writeError(w, http.StatusInternalServerError, fmt.Sprintf(\"failed to list policies: %v\", err))")')" \
+	"failed to list policies"
+
+# The negative control for the same check: a Sprintf %d verb over a plain
+# count has nothing to do with an error and must not trip it. Without this,
+# a gate that fires on any Sprintf near StatusInternalServerError would be
+# indistinguishable from one that fires only on a leaked error.
+run_case "no-raw-error-in-response: a Sprintf verb over a count, not an error" pass \
+	'./scripts/no-raw-error-in-response.sh' \
+	"$(py 'edit("internal/api/api.go", "writeInternalError(w, \"listing policies\", err)", "n := len(all)\n\t\twriteError(w, http.StatusInternalServerError, fmt.Sprintf(\"failed after %d attempts\", n))")')"
+
 run_case "store-hands-out-copies: a read method that stops copying" fail \
 	'./scripts/store-hands-out-copies.sh' \
 	"$(py 'edit("internal/store/memory.go", "\treturn copyOut(a)", "\treturn a, nil")')" \
@@ -338,7 +355,7 @@ run_case "scenarios-bind-to-tests: a binding pointing at a test that is gone" fa
 
 run_case "scenarios-bind-to-tests: no scenarios left to bind" fail \
 	'./scripts/scenarios-bind-to-tests.sh' \
-	"$(py 'import os; os.remove("features/policy-replay.feature")')" \
+	"$(py 'import shutil; shutil.rmtree("features")')" \
 	"measured nothing"
 
 echo

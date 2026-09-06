@@ -198,6 +198,125 @@ func TestSingleUseInMemoryWarning(t *testing.T) {
 	}
 }
 
+// ------------------------------------------------------------------
+// W1: startupKeyPosture, the pure decision runServe consults before it ever
+// opens a store or binds a socket. Driven directly rather than by spawning
+// the binary, per the spec's guidance to avoid binding a real port where
+// avoidable.
+// ------------------------------------------------------------------
+
+// TestServeRefusesToStartWithNoKeysAndNoOptIn is the security-critical
+// default: no valid WARDRYX_KEYS and no WARDRYX_ALLOW_DEVKEY opt-in refuses
+// to start, naming both ways out, rather than silently authenticating
+// nobody (or, before this fix, everybody as devkey).
+func TestServeRefusesToStartWithNoKeysAndNoOptIn(t *testing.T) {
+	refuse, warn := startupKeyPosture("", false, ":8090")
+	if refuse == "" {
+		t.Fatal("startupKeyPosture(\"\", false, \":8090\") returned no refusal, want one: " +
+			"no keys and no opt-in must refuse to start")
+	}
+	if !strings.Contains(refuse, "WARDRYX_KEYS") || !strings.Contains(refuse, "WARDRYX_ALLOW_DEVKEY") {
+		t.Errorf("refusal = %q, want it to name both ways out: WARDRYX_KEYS and WARDRYX_ALLOW_DEVKEY", refuse)
+	}
+	if len(warn) != 0 {
+		t.Errorf("warnings = %v, want none alongside a refusal", warn)
+	}
+}
+
+// TestDevkeyOnARoutableBindIsRefused is the GOTCHAS 20 pairing exactly:
+// devkey fallback active AND a non-loopback bind. Refused outright, not
+// merely warned about, because that exact pair is the incident.
+func TestDevkeyOnARoutableBindIsRefused(t *testing.T) {
+	for _, addr := range []string{":8090", "0.0.0.0:8090", "[::]:8090"} {
+		refuse, _ := startupKeyPosture("", true, addr)
+		if refuse == "" {
+			t.Errorf("startupKeyPosture(\"\", true, %q) returned no refusal, want one: "+
+				"devkey plus a non-loopback bind is the GOTCHAS 20 incident", addr)
+		}
+	}
+}
+
+// TestDevkeyOnLoopbackStartsWithAWarning: the same devkey fallback bound to
+// loopback only is a legitimate local dev run (make serve's own shape) and
+// must start, loudly warning that the insecure credential is active rather
+// than refusing.
+func TestDevkeyOnLoopbackStartsWithAWarning(t *testing.T) {
+	refuse, warn := startupKeyPosture("", true, "127.0.0.1:8090")
+	if refuse != "" {
+		t.Fatalf("startupKeyPosture(\"\", true, \"127.0.0.1:8090\") refused: %q, want it to start", refuse)
+	}
+	if len(warn) == 0 {
+		t.Fatal("no warning printed for an active devkey fallback on loopback, want one naming it")
+	}
+	found := false
+	for _, w := range warn {
+		if strings.Contains(strings.ToLower(w), "devkey") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("warnings = %v, want at least one naming the active devkey credential", warn)
+	}
+}
+
+// TestAllowDevkeySetButKeysAlreadyValidWarnsTheFlagIsUnused mirrors
+// tokenfuse-cloud's main.rs: the flag is harmless when real keys are already
+// configured, but silence would leave an operator wondering whether it did
+// anything, so serve says it did not.
+func TestAllowDevkeySetButKeysAlreadyValidWarnsTheFlagIsUnused(t *testing.T) {
+	refuse, warn := startupKeyPosture("a:acme", true, "127.0.0.1:8090")
+	if refuse != "" {
+		t.Fatalf("refused: %q, want it to start (real keys are configured)", refuse)
+	}
+	found := false
+	for _, w := range warn {
+		if strings.Contains(w, "WARDRYX_ALLOW_DEVKEY") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("warnings = %v, want one saying WARDRYX_ALLOW_DEVKEY has no effect", warn)
+	}
+}
+
+// TestARealKeySpecOnANonLoopbackBindOnlyWarns: bindWarning fires
+// independently of the devkey question. A k8s deployment binds 0.0.0.0 on
+// purpose with real keys configured, and must be allowed to start, merely
+// warned.
+func TestARealKeySpecOnANonLoopbackBindOnlyWarns(t *testing.T) {
+	refuse, warn := startupKeyPosture("a:acme", false, ":8090")
+	if refuse != "" {
+		t.Fatalf("refused: %q, want it to start: a wide bind with real keys is a normal k8s deployment", refuse)
+	}
+	if len(warn) == 0 {
+		t.Error("no warning for a non-loopback bind, want one: an operator should still see it")
+	}
+}
+
+// TestBindWarning pins bindWarning's own cases directly, independent of
+// startupKeyPosture's key logic.
+func TestBindWarning(t *testing.T) {
+	cases := []struct {
+		addr      string
+		wantEmpty bool
+	}{
+		{":8090", false},
+		{"0.0.0.0:8090", false},
+		{"[::]:8090", false},
+		{"127.0.0.1:8090", true},
+		{"localhost", true}, // no port: SplitHostPort errors, warning suppressed rather than guessed
+	}
+	for _, c := range cases {
+		got := bindWarning(c.addr)
+		if c.wantEmpty && got != "" {
+			t.Errorf("bindWarning(%q) = %q, want empty", c.addr, got)
+		}
+		if !c.wantEmpty && got == "" {
+			t.Errorf("bindWarning(%q) = empty, want a warning", c.addr)
+		}
+	}
+}
+
 func TestOrDash(t *testing.T) {
 	if got := orDash(""); got != "-" {
 		t.Errorf("orDash(\"\") = %q, want -", got)

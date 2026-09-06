@@ -398,8 +398,7 @@ type decideResponseDTO struct {
 
 func (s *Server) handleDecide(w http.ResponseWriter, r *http.Request, principal Principal) {
 	var dto decideRequestDTO
-	if err := json.NewDecoder(r.Body).Decode(&dto); err != nil {
-		writeError(w, http.StatusBadRequest, fmt.Sprintf("invalid request body: %v", err))
+	if !decodeJSONBody(w, r, &dto) {
 		return
 	}
 	if dto.AgentID == "" || dto.RunID == "" {
@@ -439,7 +438,7 @@ func (s *Server) handleDecide(w http.ResponseWriter, r *http.Request, principal 
 	if s.approvalSingleUse && resp.Decision == pdp.Allow && resp.ApprovalTokenRequired {
 		redeemed, rErr := s.store.TryRedeem(r.Context(), approval.RedemptionKey(dto.ApprovalToken))
 		if rErr != nil {
-			writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to record approval_token redemption: %v", rErr))
+			writeInternalError(w, "recording the approval_token redemption", rErr)
 			return
 		}
 		if !redeemed {
@@ -483,7 +482,7 @@ func (s *Server) handleDecide(w http.ResponseWriter, r *http.Request, principal 
 			"policy_version":     resp.PolicyVersion,
 		})
 		if err != nil {
-			writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to record approval hold: %v", err))
+			writeInternalError(w, "recording the approval hold", err)
 			return
 		}
 		resp.ApprovalID = held.ApprovalID
@@ -520,15 +519,14 @@ type approvalDecideResponseDTO struct {
 	ApprovalToken string `json:"approval_token,omitempty"`
 }
 
-func (s *Server) handleApprovalDecide(w http.ResponseWriter, r *http.Request, _ Principal) {
+func (s *Server) handleApprovalDecide(w http.ResponseWriter, r *http.Request, principal Principal) {
 	id := r.PathValue("id")
 	if id == "" {
 		writeError(w, http.StatusBadRequest, "missing approval id")
 		return
 	}
 	var dto approvalDecideRequestDTO
-	if err := json.NewDecoder(r.Body).Decode(&dto); err != nil {
-		writeError(w, http.StatusBadRequest, fmt.Sprintf("invalid request body: %v", err))
+	if !decodeJSONBody(w, r, &dto) {
 		return
 	}
 	if dto.Decision != "grant" && dto.Decision != "deny" {
@@ -537,6 +535,30 @@ func (s *Server) handleApprovalDecide(w http.ResponseWriter, r *http.Request, _ 
 	}
 	if dto.DecidedBy == "" {
 		writeError(w, http.StatusBadRequest, "decided_by is required")
+		return
+	}
+
+	// An admin may decide only an approval belonging to their own org.
+	// handleListApprovals already scopes by org (see its own comment); this
+	// route did not, so an admin key for one org could grant or deny a hold
+	// it never listed. An approval with NO org in its context (a row
+	// written before org scoping existed) is decided as today: this check
+	// only narrows what was otherwise wide open, it never widens it.
+	//
+	// The response is the same 404 body as an unknown id, deliberately: a
+	// distinct "wrong org" answer would make this route an oracle for
+	// which ids belong to another org.
+	existing, err := s.store.GetApproval(r.Context(), id)
+	switch {
+	case errors.Is(err, store.ErrNotFound):
+		writeError(w, http.StatusNotFound, "approval not found")
+		return
+	case err != nil:
+		writeInternalError(w, "reading the approval", err)
+		return
+	}
+	if org, ok := existing.Context["org"].(string); ok && org != "" && org != principal.Org {
+		writeError(w, http.StatusNotFound, "approval not found")
 		return
 	}
 
@@ -748,8 +770,7 @@ func (s *Server) handlePutPolicy(w http.ResponseWriter, r *http.Request, princip
 		return
 	}
 	var p policy.Policy
-	if err := json.NewDecoder(r.Body).Decode(&p); err != nil {
-		writeError(w, http.StatusBadRequest, fmt.Sprintf("invalid request body: %v", err))
+	if !decodeJSONBody(w, r, &p) {
 		return
 	}
 
@@ -899,6 +920,36 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")
 	_ = enc.Encode(v)
+}
+
+// maxRequestBodyBytes caps every request body this server decodes as JSON.
+// Every route here answers with a handful of fields; there is no legitimate
+// caller of this API whose request body approaches 1 MiB, and an uncapped
+// json.NewDecoder(r.Body) will happily read as much as a caller sends before
+// deciding the JSON is invalid, which is memory an authenticated (or, before
+// requireAuth runs, merely connected) caller can spend on this process for
+// free.
+const maxRequestBodyBytes = 1 << 20 // 1 MiB
+
+// decodeJSONBody wraps r.Body in http.MaxBytesReader and decodes it into v,
+// writing the appropriate error response itself and reporting false when it
+// did: a body over maxRequestBodyBytes gets 413 with a fixed message rather
+// than whatever the decoder's own error text happens to say, and anything
+// else that fails to decode still gets the existing 400 (the client's own
+// malformed body, echoed back to them, which is not a leak: see
+// scripts/no-raw-error-in-response.sh).
+func decodeJSONBody(w http.ResponseWriter, r *http.Request, v any) bool {
+	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodyBytes)
+	if err := json.NewDecoder(r.Body).Decode(v); err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			writeError(w, http.StatusRequestEntityTooLarge, "request body exceeds the 1 MiB limit")
+			return false
+		}
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("invalid request body: %v", err))
+		return false
+	}
+	return true
 }
 
 // emit writes one agent-event, source "wardryx", chained via the SPEC 6.5
