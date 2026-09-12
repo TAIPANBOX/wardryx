@@ -359,6 +359,20 @@ Build from source (Go 1.27+):
 make build   # -> ./bin/wardryx
 ```
 
+## Verify the image
+
+Every image is signed keyless with Sigstore and carries a build-provenance
+attestation and an SBOM. With `cosign` and `gh` installed:
+
+```sh
+cosign verify ghcr.io/taipanbox/wardryx:<tag> \
+  --certificate-identity-regexp '^https://github.com/TAIPANBOX/wardryx/\.github/workflows/release\.yml@refs/tags/v' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+gh attestation verify oci://ghcr.io/taipanbox/wardryx:<tag> -R TAIPANBOX/wardryx
+```
+
+Releases through v0.1.0 have none of this; the next tag is the first to carry it.
+
 ## Quick start
 
 ```sh

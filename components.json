@@ -29,6 +29,7 @@
   ],
   "schema": "taipanbox.dev/components/v1",
   "repo": "TAIPANBOX/wardryx",
+  "distribution": "ghcr.io/taipanbox/wardryx",
   "components": [
     {
       "name": "wardryx",
