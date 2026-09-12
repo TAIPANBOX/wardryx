@@ -178,5 +178,13 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "${GITHUB_REF_NAME}" dist/* \
-            --verify-tag --title "${GITHUB_REF_NAME}" --generate-notes
+          # Create the Release, or upload into one that already exists: the tags
+          # cut before this job existed got their Release objects by hand on
+          # 2026-09-12, and a re-dispatch against one of them must add the
+          # assets rather than fail on a page that is already there.
+          if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
+            gh release upload "${GITHUB_REF_NAME}" dist/* --clobber
+          else
+            gh release create "${GITHUB_REF_NAME}" dist/* \
+              --verify-tag --title "${GITHUB_REF_NAME}" --generate-notes
+          fi
