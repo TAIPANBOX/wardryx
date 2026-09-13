@@ -440,14 +440,20 @@ decision outcome and every exported signature identical.
     DID happen. `Decide` is deterministic, so a recorded question put back to
     the version it names must return the same verdict and the same reason.
 
-    Four rows are not a plain reproduction and each is reported rather than
+    Five rows are not a plain reproduction and each is reported rather than
     folded in: `not-archived` (invariant 17 was not honoured for it),
     `unreadable` (recorded before invariant 15), `diverged` (the record and
-    this build disagree about the past, which fails the command), and
+    this build disagree about the past, which fails the command),
     `approval-decided`, which is not a failure at all: the approval token is
     deliberately never recorded, so replay reaches the hold a human then
     answered, and the counterfactual is measured against that hold rather
-    than against the person's answer.
+    than against the person's answer; and `approval-spent` (since 1.0.1,
+    wardryx#57), its twin under the single-use default: the second
+    presentation of a token records a hold whose reason only that token
+    explains, `pdp.ReasonApprovalSpent`, the one sentence `internal/api`
+    writes and `internal/replay` reads back, so the row is excused by that
+    exact sentence and no other; a hold with any other reason the replay does
+    not reproduce is still a divergence.
 
     The counting rule is the invariant's teeth: a change tally never appears
     without the tally of decisions the run could not examine. "2 of 4 change"
@@ -455,8 +461,13 @@ decision outcome and every exported signature identical.
     which is the same silent shape as the defect that started this work.
     *(tests: `TestAnUnarchivedVersionIsCountedNotSkipped`,
     `TestADivergentReplayIsReportedLoudly`,
-    `TestAnAllowGrantedByAHumanIsNotADivergence` and
-    `TestTheReportNamesWhatItCouldNotExamine` in `internal/replay`. Its limit:
+    `TestAnAllowGrantedByAHumanIsNotADivergence`,
+    `TestASpentTokenHoldIsNotADivergence`,
+    `TestAHoldWithAReasonTheTokenDoesNotExplainStaysDiverged` and
+    `TestTheReportNamesWhatItCouldNotExamine` in `internal/replay`;
+    `TestASpentTokenHoldReplaysAsApprovalSpent` in `internal/api`, the seam
+    that keeps the sentence the handler writes and the one replay reads the
+    same. Its limit:
     reproduction proves the PDP answers the same way, not that the recorded
     question was the one the enforcement point actually asked.)*
 

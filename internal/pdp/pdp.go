@@ -44,6 +44,16 @@ const (
 	Hold  = "hold"
 )
 
+// ReasonApprovalSpent is the reason on a Hold that internal/api substitutes
+// for the Allow a valid approval_token just earned, when the token had
+// already been redeemed once under WARDRYX_APPROVAL_SINGLE_USE. It lives
+// here, beside the verdicts, because two packages must agree on it byte for
+// byte: internal/api writes it into the recorded decision, and
+// internal/replay reads it back to tell this hold from a divergence. The
+// token itself is never recorded (invariant 15), so this sentence is the
+// only trace the record keeps of why the hold happened.
+const ReasonApprovalSpent = "approval_token was already redeemed once under WARDRYX_APPROVAL_SINGLE_USE; a new approval is required"
+
 // DecideRequest describes one action an agent is about to take, submitted
 // to POST /v1/decide.
 type DecideRequest struct {

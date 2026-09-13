@@ -84,3 +84,25 @@ Feature: A recorded decision carries the question it answered
     When the history is replayed without the approval token, which is never recorded
     Then replay reaches the hold rather than the answer, and says so
     # -> internal/replay:TestAnAllowGrantedByAHumanIsNotADivergence
+
+  # @decided 2026-09-13: the fix for wardryx#57, asked for as a 1.0.1; the
+  # defect was found by UPG-2 of the 1.0 proving run, a 0.1.0 store upgraded
+  # in place, where the second presentation of a token under the 1.0 default
+  # read as a divergence.
+  Scenario: a hold on an approval already used once is not mistaken for a disagreement
+    Given an approval a person granted, presented once and allowed, then presented again under single-use
+    When the history is replayed without the approval token, which is never recorded
+    Then the second hold is reported beside the human's answer, as an approval spent, and not as the record and the code disagreeing
+    # -> internal/replay:TestASpentTokenHoldIsNotADivergence
+
+  Scenario: a hold with a reason the token does not explain is still a disagreement
+    Given a recorded hold whose reason this build never produces
+    When the history is replayed
+    Then it is reported as diverged, since only the spent-token sentence is excused
+    # -> internal/replay:TestAHoldWithAReasonTheTokenDoesNotExplainStaysDiverged
+
+  Scenario: the sentence the decision point writes is the one replay reads
+    Given the real decision handler under single-use, its real event file, and the real replay
+    When a token is presented twice and the file is replayed
+    Then the spent-token hold is counted as an approval spent by the same sentence the handler wrote
+    # -> internal/api:TestASpentTokenHoldReplaysAsApprovalSpent
