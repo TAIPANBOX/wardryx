@@ -19,6 +19,14 @@ on:
   push:
     tags: ["v*"]
   workflow_dispatch:
+    inputs:
+      tag:
+        description: >-
+          An existing v* tag to (re)build the release page for. The image is
+          not rebuilt: the tag push published it. This exists because the
+          release-page job runs for the first time on a tag, and the first
+          v1.0.0 run of it failed after the image was already out.
+        required: true
   # This workflow otherwise runs only on a `v*` tag, so its one job was proven
   # for the first time by the tag itself. TokenFuse's `v0.4.2` failed exactly
   # that way on 2026-09-02: the tag was the first thing that had ever run its
@@ -65,9 +73,11 @@ jobs:
 
   image:
     name: build + push
-    # Never on a pull request: image-build above already proves the
-    # Dockerfile builds, and this job is the one that actually pushes to GHCR.
-    if: github.event_name != 'pull_request'
+    # Only on the tag push: image-build above already proves the Dockerfile
+    # builds on a pull request, this job is the one that actually pushes to
+    # GHCR, and a manual dispatch rebuilds the release page of a tag whose
+    # image is already published (see `release` below).
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     permissions:
       contents: read      # a job-level block replaces the workflow's, and checkout needs this
@@ -144,14 +154,26 @@ jobs:
   release:
     name: release page
     needs: image
-    if: github.event_name != 'pull_request'
+    # On a tag push, after the image; on a manual dispatch naming an existing
+    # tag, alone (the image job is skipped, so `!cancelled()` keeps this one
+    # from being skipped with it). Never on a pull request.
+    if: ${{ !cancelled() && github.event_name != 'pull_request' && needs.image.result != 'failure' }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
       id-token: write
       attestations: write
+    env:
+      TAG: ${{ inputs.tag || github.ref_name }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+      # The SBOM action writes into dist/ and does not create it; the first
+      # v1.0.0 run of this job failed here with ENOENT, after the image had
+      # already been pushed. The binary-shipping repositories create dist/ when
+      # they build; this repository ships an image and has no earlier step.
+      - run: mkdir -p dist
       - name: SBOM of this build, SPDX
         uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
         with:
@@ -186,9 +208,9 @@ jobs:
           # cut before this job existed got their Release objects by hand on
           # 2026-09-12, and a re-dispatch against one of them must add the
           # assets rather than fail on a page that is already there.
-          if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
-            gh release upload "${GITHUB_REF_NAME}" dist/* --clobber
+          if gh release view "${TAG}" >/dev/null 2>&1; then
+            gh release upload "${TAG}" dist/* --clobber
           else
-            gh release create "${GITHUB_REF_NAME}" dist/* \
-              --verify-tag --title "${GITHUB_REF_NAME}" --generate-notes
+            gh release create "${TAG}" dist/* \
+              --verify-tag --title "${TAG}" --generate-notes
           fi
