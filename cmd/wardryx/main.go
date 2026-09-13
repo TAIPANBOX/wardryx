@@ -406,7 +406,7 @@ func singleUseInMemoryWarning(singleUse bool, dbDSN string) string {
 	if !singleUse || dbDSN != "" {
 		return ""
 	}
-	return "wardryx: WARDRYX_APPROVAL_SINGLE_USE=true with no -db (in-memory approval store); single-use is only enforced within this one process, not across multiple wardryx instances -- pass -db for single-use that holds across a multi-instance deployment"
+	return "wardryx: approval tokens are single-use (the default; WARDRYX_APPROVAL_SINGLE_USE=false turns reuse back on) with no -db (in-memory approval store): single-use is only enforced within this one process, not across multiple wardryx instances -- pass -db for single-use that holds across a multi-instance deployment"
 }
 
 func displayAddr(addr string) string {

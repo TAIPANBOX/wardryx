@@ -101,3 +101,10 @@ Feature: A request body has a size an operator can name
     When it is sent to a route that decodes JSON
     Then it is processed normally
     # -> internal/api:TestABodyAtOrUnderTheCapIsUnaffected
+
+  Scenario: an approval token is single-use unless the operator says otherwise
+    Given WARDRYX_APPROVAL_SINGLE_USE is not set
+    When the configuration is read
+    Then approval tokens are single-use
+    And only an explicit false turns reuse for the token's TTL back on
+    # -> internal/config:TestFromEnvApprovalSingleUseDefaultsOn
