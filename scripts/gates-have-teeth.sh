@@ -359,6 +359,68 @@ run_case "scenarios-bind-to-tests: no scenarios left to bind" fail \
 	"measured nothing"
 
 echo
+echo "=== compat-surface: the 1.0 promise is present in the code and rendered ==="
+
+# A frozen route renamed in the router. The one place `http.routes` says it
+# lives; a route the code stops serving is the plainest way a promise breaks.
+run_case "compat-surface: a frozen route gone from the router" fail \
+	'./scripts/compat-surface.sh' \
+	"$(py 'edit("internal/api/api.go", "\"GET /v1/status\"", "\"GET /v1/state\"")')" \
+	"'GET /v1/status' is promised"
+
+# A wire field renamed in its struct tag. This repository keeps its wire
+# fields in Go struct tags, many with `,omitempty`, which is why the gate
+# accepts a comma where the closing quote would be. `cacheable` is the one
+# response field that appears exactly once in api.go, as a tag, so renaming it
+# there is the whole of the drift; a field named in more than one literal
+# (`approval_id` is also a JSON key in an event's data) would need every
+# occurrence renamed before the gate could see it leave, which is the same
+# property trailryx's harness notes about a binary name.
+run_case "compat-surface: a frozen wire field renamed in its struct tag" fail \
+	'./scripts/compat-surface.sh' \
+	"$(py 'edit("internal/api/api.go", "json:\"cacheable\"", "json:\"reusable\"")')" \
+	"'cacheable' is promised"
+
+# An environment name the config reader stops reading.
+run_case "compat-surface: an env name gone from the config reader" fail \
+	'./scripts/compat-surface.sh' \
+	"$(py 'edit("internal/config/config.go", "\"WARDRYX_POLICY_ARCHIVE\"", "\"WARDRYX_ARCHIVE\"")')" \
+	"'WARDRYX_POLICY_ARCHIVE' is promised"
+
+# The human form edited by hand rather than rendered.
+run_case "compat-surface: COMPATIBILITY.md edited by hand" fail \
+	'./scripts/compat-surface.sh' \
+	"$(py 'edit("COMPATIBILITY.md", "# Compatibility", "# Compatibility (hand-edited)")')" \
+	"is not the rendering of"
+
+# An additive name is documentation and is never checked against the code.
+run_case "compat-surface: an additive name added" pass \
+	'./scripts/compat-surface.sh' \
+	"$(cat <<'PY'
+import json
+import subprocess
+
+p = "compat/1.0.json"
+m = json.load(open(p))
+m["additive"].append("a teeth-test additive name, never checked against the code")
+json.dump(m, open(p, "w"), indent=2)
+open(p, "a").write("\n")
+r = subprocess.run(["./scripts/compat-surface.sh", "--write"], capture_output=True, text=True)
+assert r.returncode == 0, "regenerating after the additive edit failed:\n" + r.stdout + r.stderr
+PY
+)"
+
+# The manifest itself gone: measured nothing, never a pass on an absent promise.
+run_case "compat-surface: the manifest is gone" fail \
+	'./scripts/compat-surface.sh' \
+	"$(cat <<'PY'
+import os
+os.remove("compat/1.0.json")
+PY
+)" \
+	"measured nothing"
+
+echo
 if [ -n "$(git status --porcelain)" ]; then
 	printf 'FAIL: this script left the tree dirty, so it cannot be trusted about anything above\n'
 	git status --porcelain | head -5

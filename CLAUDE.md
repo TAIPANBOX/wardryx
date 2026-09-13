@@ -66,6 +66,7 @@ go build ./...
 ./scripts/decide-order-is-documented.sh
 ./scripts/readme-numbers.sh
 ./scripts/scenarios-bind-to-tests.sh
+./scripts/compat-surface.sh      # invariant 19; compat/1.0.json against the code, COMPATIBILITY.md rendered
 ./scripts/gates-have-teeth.sh   # invariant 12; needs a clean tree
 ```
 
@@ -451,3 +452,44 @@ decision outcome and every exported signature identical.
     `TestTheReportNamesWhatItCouldNotExamine` in `internal/replay`. Its limit:
     reproduction proves the PDP answers the same way, not that the recorded
     question was the one the enforcement point actually asked.)*
+
+19. **The surface `compat/1.0.json` promises is present in the code, and
+    `COMPATIBILITY.md` is rendered from it, never typed.** SemVer's item 5:
+    version 1.0.0 defines the public API, so a 1.0 is a promise about a
+    surface, and a promise nobody can point at is a mood. The estate's first
+    1.0 tags (agent-passport, agent-stack-go, 2026-09-12) each came with the
+    surface written down and a gate that fails when it moves; trailryx, idryx
+    and qryx followed in wave 1 of the 1.0 plan. This repository's manifest was
+    written on 2026-09-13, ahead of its own 1.0, so the tag freezes something
+    already held.
+
+    Frozen, in eight kinds: the nine `METHOD /path` routes the router
+    registers (`internal/api/api.go`), the eleven request and six response
+    fields of `/v1/decide` as their struct tags spell them, the three decision
+    words `allow`, `deny`, `hold` (`internal/pdp/pdp.go`), the eleven policy
+    fields (`internal/policy/policy.go`), the five subcommands
+    (`cmd/wardryx/main.go`), the eleven `WARDRYX_*` names the one config reader
+    reads (`internal/config/config.go`), and the eight event types this service
+    emits under `source: wardryx`. Additive: new event types, new policy
+    fields whose zero value means no restriction, new routes and optional
+    request fields, and the approval token's DEFAULT (single-use or reusable
+    for its TTL), which is configuration and not wire: it may flip by decision
+    and `WARDRYX_APPROVAL_SINGLE_USE` stays the switch either way (invariant
+    5). Experimental: the OTLP span attribute names and replay's
+    candidate-policy report shape.
+
+    The check is textual by design and says so: a plain name must appear as a
+    quoted literal (`"name"`, `'name'` or `` `name` ``) in a file the manifest
+    says holds it, so a comment mentioning it does not count as the code
+    carrying it. This repository's wire fields live in Go struct tags spelled
+    `json:"name,omitempty"`, so the check also accepts a comma where the
+    closing quote would be; a field named in more than one literal (an
+    `approval_id` is also a JSON key inside an event's data) leaves the file
+    only when every occurrence does, which the teeth case for the tag form
+    respects by renaming a field that appears exactly once. estate-gates C19
+    asks whether the manifest and the gate exist and whether the newest tag is
+    1.0 or above; this gate asks whether the promise still holds.
+    *(gate: `scripts/compat-surface.sh`; six cases in `gates-have-teeth.sh`: a
+    frozen route gone from the router, a wire field renamed in its struct tag,
+    an env name gone from the config reader, `COMPATIBILITY.md` edited by hand,
+    an additive name added (must pass), the manifest gone (measured nothing).)*
