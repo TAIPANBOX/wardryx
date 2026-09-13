@@ -443,7 +443,7 @@ func (s *Server) handleDecide(w http.ResponseWriter, r *http.Request, principal 
 		}
 		if !redeemed {
 			resp.Decision = pdp.Hold
-			resp.Reason = "approval_token was already redeemed once under WARDRYX_APPROVAL_SINGLE_USE; a new approval is required"
+			resp.Reason = pdp.ReasonApprovalSpent
 		}
 	}
 

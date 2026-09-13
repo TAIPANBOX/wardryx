@@ -6,7 +6,7 @@
 
 [![CI](https://github.com/TAIPANBOX/wardryx/actions/workflows/ci.yml/badge.svg)](https://github.com/TAIPANBOX/wardryx/actions/workflows/ci.yml)
 ![Go](https://img.shields.io/badge/go-1.27-00ADD8.svg)
-![tests](https://img.shields.io/badge/tests-271-brightgreen.svg)
+![tests](https://img.shields.io/badge/tests-274-brightgreen.svg)
 ![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)
 ![Status](https://img.shields.io/badge/status-deterministic%20PDP-2dd4bf.svg)
 
@@ -439,6 +439,7 @@ Replayed 4 decision(s) from ./events.ndjson
 
   reproduced             4
   approval-decided       0
+  approval-spent         0
   not archived           0
   unreadable             0
   diverged               0
@@ -454,11 +455,12 @@ Against ./policies/candidate.yaml, 2 of 4 replayable decision(s) change:
         now: allowed: request satisfies all matched policy rules
 ```
 
-The four rows that are not a plain reproduction each mean something specific:
+The five rows that are not a plain reproduction each mean something specific:
 
 | row | meaning |
 | --- | --- |
 | `approval-decided` | the PDP held it and a human answered. The approval token is deliberately never recorded, so replay reaches the hold, not the answer, and the counterfactual is measured against the hold |
+| `approval-spent` | the PDP held it again because the approval a human gave had already been used once (the single-use default since 1.0.0). Same hold as replay reaches, a reason only the unrecorded token explains; the counterfactual is measured against the hold, as for `approval-decided` |
 | `not archived` | the policy version it names was never kept, so there are no rules to put the question to. Set `WARDRYX_POLICY_ARCHIVE` |
 | `unreadable` | recorded before the emitter carried the decision input, so the question was never written down |
 | `diverged` | replaying it against the version it itself names disagrees with the record. The record and this build no longer agree about the past, and the command exits non-zero |

@@ -362,3 +362,58 @@ func TestAChangeIsMeasuredAgainstThePDPNotAgainstThePerson(t *testing.T) {
 		t.Fatalf("candidate = %s, want %s", stillAsks.Rows[0].Candidate.Decision, pdp.Hold)
 	}
 }
+
+// TestASpentTokenHoldIsNotADivergence is wardryx#57, found by UPG-2 of the
+// 1.0 proving run: under the 1.0 default a token allows once, and its second
+// presentation records a hold whose reason only the token explains. The
+// token is never recorded, so replay answers the plain hold; same verdict,
+// a reason the record cannot carry, and the row belongs beside
+// approval-decided, never under the diverged banner.
+func TestASpentTokenHoldIsNotADivergence(t *testing.T) {
+	inForce := compile(t, []string{"good.example.com"}, 5)
+	ev := decisionEvent("approval_requested", inForce.Version(), pdp.ReasonApprovalSpent,
+		map[string]any{"domains": []any{"good.example.com"}, "approval_token_required": true})
+
+	report := Run([]event.Event{ev}, archiveOf(t, inForce), compile(t, []string{"good.example.com"}, 500))
+
+	if report.Diverged != 0 {
+		t.Fatalf("a hold on a spent token must not be a divergence: %+v", report.Rows[0])
+	}
+	if report.ApprovalSpent != 1 || report.Rows[0].Fidelity != ApprovalSpent {
+		t.Fatalf("approvalSpent = %d, fidelity %s (%s), want 1 and %s",
+			report.ApprovalSpent, report.Rows[0].Fidelity, report.Rows[0].Note, ApprovalSpent)
+	}
+	if report.Rows[0].Baseline != pdp.Hold {
+		t.Fatalf("baseline = %s, want the hold the PDP produced", report.Rows[0].Baseline)
+	}
+	if report.Replayable() != 1 {
+		t.Fatalf("replayable = %d, want 1: replay reached the hold, which is faithful up to the token", report.Replayable())
+	}
+	if report.Rows[0].Candidate == nil || report.Rows[0].Candidate.Decision != pdp.Allow {
+		t.Fatalf("the counterfactual is well defined here: under the candidate nobody is asked at all, got %+v", report.Rows[0].Candidate)
+	}
+	if report.Changed != 1 {
+		t.Fatalf("changed = %d, want 1 (hold -> allow under the candidate)", report.Changed)
+	}
+	out := Format(report, "events.ndjson", "")
+	if !strings.Contains(out, "approval-spent") || strings.Contains(out, "DIVERGED") {
+		t.Fatalf("the report must name the spent token and show no divergence banner:\n%s", out)
+	}
+}
+
+// TestAHoldWithAReasonTheTokenDoesNotExplainStaysDiverged is the guard on the
+// case above: the new bucket takes exactly the sentence internal/api writes
+// for a spent token. A recorded hold with any other reason the replay does
+// not reproduce is still the record and this build disagreeing.
+func TestAHoldWithAReasonTheTokenDoesNotExplainStaysDiverged(t *testing.T) {
+	inForce := compile(t, []string{"good.example.com"}, 5)
+	ev := decisionEvent("approval_requested", inForce.Version(),
+		"held for a reason this build never produces",
+		map[string]any{"domains": []any{"good.example.com"}, "approval_token_required": true})
+
+	report := Run([]event.Event{ev}, archiveOf(t, inForce), nil)
+
+	if report.Diverged != 1 || report.ApprovalSpent != 0 {
+		t.Fatalf("diverged = %d, approvalSpent = %d, want 1 and 0: %+v", report.Diverged, report.ApprovalSpent, report.Rows[0])
+	}
+}

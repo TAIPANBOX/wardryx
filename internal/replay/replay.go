@@ -10,7 +10,7 @@
 // offered for decisions that reproduced; anything else is counted and named,
 // never quietly folded in.
 //
-// # The four ways a row can fail to be replayable, all reported
+// # The five ways a row can fail to reproduce, all reported
 //
 //   - Unreadable: the event predates the emitter carrying the decision input,
 //     so the question was never written down.
@@ -24,6 +24,11 @@
 //     recorded (it is a live credential and this record outlives it), so
 //     replay cannot redeem one. What it can do is reach the exact hold a
 //     human then answered, which is faithful up to that answer.
+//   - ApprovalSpent: not a failure either. Under single-use (the 1.0
+//     default) a token allows once, and its second presentation records a
+//     hold whose reason only that token explains (pdp.ReasonApprovalSpent).
+//     Replay reaches the same hold with the threshold's own reason, which is
+//     faithful up to the token, exactly as ApprovalDecided is.
 //
 // # What it does NOT do
 //
@@ -56,6 +61,11 @@ const (
 	// counterfactual is offered against that hold, not against the human's
 	// answer.
 	ApprovalDecided Fidelity = "approval-decided"
+	// ApprovalSpent: replay reached the hold the PDP produced when a token
+	// was presented a second time under single-use. The record says why
+	// (pdp.ReasonApprovalSpent) and replay, holding no token, cannot; the
+	// counterfactual is offered against that hold, as for ApprovalDecided.
+	ApprovalSpent Fidelity = "approval-spent"
 	// NotArchived: the version this decision names was never kept.
 	NotArchived Fidelity = "not-archived"
 	// Unreadable: the event does not carry the question that was asked.
@@ -107,6 +117,7 @@ type Report struct {
 	Total           int
 	Reproduced      int
 	ApprovalDecided int
+	ApprovalSpent   int
 	NotArchived     int
 	Unreadable      int
 	Diverged        int
@@ -114,7 +125,7 @@ type Report struct {
 }
 
 // Replayable is how many rows carried a counterfactual at all.
-func (r Report) Replayable() int { return r.Reproduced + r.ApprovalDecided }
+func (r Report) Replayable() int { return r.Reproduced + r.ApprovalDecided + r.ApprovalSpent }
 
 // Run replays every decision in events against the version it names, then
 // against candidate. A nil candidate runs the fidelity pass alone, which is a
@@ -135,6 +146,8 @@ func Run(events []event.Event, arch *archive.Archive, candidate *policy.Set) Rep
 			report.Reproduced++
 		case ApprovalDecided:
 			report.ApprovalDecided++
+		case ApprovalSpent:
+			report.ApprovalSpent++
 		case NotArchived:
 			report.NotArchived++
 		case Unreadable:
@@ -196,6 +209,18 @@ func replayOne(ev event.Event, verdict string, arch *archive.Archive, candidate 
 		row.Fidelity = ApprovalDecided
 		row.Baseline = pdp.Hold
 		row.Note = "the PDP held this and a human granted it; replay reaches the hold, not the answer"
+	case row.Recorded == pdp.Hold && tokenRequired && row.Reason == pdp.ReasonApprovalSpent &&
+		again.Decision == pdp.Hold && again.ApprovalTokenRequired:
+		// The other faithful disagreement, and the exact sentence is the
+		// condition: internal/api writes pdp.ReasonApprovalSpent onto a
+		// hold only when a valid token was presented a second time under
+		// single-use, and replay, holding no token, reaches the plain hold
+		// with the threshold's own reason. Same verdict, a reason only the
+		// unrecorded token explains. Any other reason on a hold the replay
+		// does not reproduce stays a divergence.
+		row.Fidelity = ApprovalSpent
+		row.Baseline = pdp.Hold
+		row.Note = "the PDP held this again because the approval a human gave had already been used once; replay reaches the hold"
 	default:
 		row.Fidelity = Diverged
 		row.Note = fmt.Sprintf("recorded %s (%q) but %s answers %s (%q)",
@@ -314,6 +339,7 @@ func Format(r Report, source, candidateName string) string {
 	}
 	line("reproduced", r.Reproduced, "")
 	line("approval-decided", r.ApprovalDecided, "the PDP held these and a human answered")
+	line("approval-spent", r.ApprovalSpent, "held again: the approval a human gave was already used once")
 	line("not archived", r.NotArchived, "the version they name was never kept")
 	line("unreadable", r.Unreadable, "recorded before the emitter carried the question")
 	line("diverged", r.Diverged, "replaying their OWN version disagrees with the record")
