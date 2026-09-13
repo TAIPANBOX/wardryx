@@ -28,13 +28,17 @@ on:
 
 permissions:
   contents: read
-  packages: write
 
 jobs:
   # Proves the Dockerfile itself still builds on a pull request that touches
   # this workflow, before a tag ever reaches it. See `image` below for the
   # job that actually pushes.
   image-build:
+    # Pushes to the registry by digest, so it needs the package scope the
+    # top level no longer grants; `contents: read` repeated for the checkout.
+    permissions:
+      contents: read
+      packages: write
     name: build image (no push)
     runs-on: ubuntu-latest
     steps:
