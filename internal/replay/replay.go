@@ -10,7 +10,7 @@
 // offered for decisions that reproduced; anything else is counted and named,
 // never quietly folded in.
 //
-// # The five ways a row can fail to reproduce, all reported
+// # The six ways a row can fail to reproduce, all reported
 //
 //   - Unreadable: the event predates the emitter carrying the decision input,
 //     so the question was never written down.
@@ -29,6 +29,12 @@
 //     hold whose reason only that token explains (pdp.ReasonApprovalSpent).
 //     Replay reaches the same hold with the threshold's own reason, which is
 //     faithful up to the token, exactly as ApprovalDecided is.
+//   - ApprovalRefused: the third token-dependent outcome, and the last. A
+//     presented token that does not verify records a deny carrying the
+//     verifier's own reason (pdp.ReasonApprovalRefused); replay, presenting
+//     nothing, reaches the hold. A token is only ever inspected past the
+//     threshold, so these three are every way a credential the record does
+//     not carry can move a verdict.
 //
 // # What it does NOT do
 //
@@ -66,6 +72,12 @@ const (
 	// (pdp.ReasonApprovalSpent) and replay, holding no token, cannot; the
 	// counterfactual is offered against that hold, as for ApprovalDecided.
 	ApprovalSpent Fidelity = "approval-spent"
+	// ApprovalRefused: replay reached the hold the PDP would have produced
+	// had no token been presented; what was presented did not verify, so
+	// the record says deny with the verifier's reason
+	// (pdp.ReasonApprovalRefused). The counterfactual is offered against the
+	// hold, as for the two above.
+	ApprovalRefused Fidelity = "approval-refused"
 	// NotArchived: the version this decision names was never kept.
 	NotArchived Fidelity = "not-archived"
 	// Unreadable: the event does not carry the question that was asked.
@@ -118,6 +130,7 @@ type Report struct {
 	Reproduced      int
 	ApprovalDecided int
 	ApprovalSpent   int
+	ApprovalRefused int
 	NotArchived     int
 	Unreadable      int
 	Diverged        int
@@ -125,7 +138,9 @@ type Report struct {
 }
 
 // Replayable is how many rows carried a counterfactual at all.
-func (r Report) Replayable() int { return r.Reproduced + r.ApprovalDecided + r.ApprovalSpent }
+func (r Report) Replayable() int {
+	return r.Reproduced + r.ApprovalDecided + r.ApprovalSpent + r.ApprovalRefused
+}
 
 // Run replays every decision in events against the version it names, then
 // against candidate. A nil candidate runs the fidelity pass alone, which is a
@@ -148,6 +163,8 @@ func Run(events []event.Event, arch *archive.Archive, candidate *policy.Set) Rep
 			report.ApprovalDecided++
 		case ApprovalSpent:
 			report.ApprovalSpent++
+		case ApprovalRefused:
+			report.ApprovalRefused++
 		case NotArchived:
 			report.NotArchived++
 		case Unreadable:
@@ -221,6 +238,16 @@ func replayOne(ev event.Event, verdict string, arch *archive.Archive, candidate 
 		row.Fidelity = ApprovalSpent
 		row.Baseline = pdp.Hold
 		row.Note = "the PDP held this again because the approval a human gave had already been used once; replay reaches the hold"
+	case row.Recorded == pdp.Deny && tokenRequired && refusedToken(row.Reason) &&
+		again.Decision == pdp.Hold && again.ApprovalTokenRequired:
+		// The third and last: a presented token that did not verify. Decide
+		// writes pdp.ReasonApprovalRefused after the threshold sentence and
+		// before the verifier's own error, only on that path, so the phrase
+		// in that position is the condition; a deny past the threshold with
+		// any other reason stays a divergence.
+		row.Fidelity = ApprovalRefused
+		row.Baseline = pdp.Hold
+		row.Note = "the PDP refused what was presented as an approval; replay presents nothing and reaches the hold"
 	default:
 		row.Fidelity = Diverged
 		row.Note = fmt.Sprintf("recorded %s (%q) but %s answers %s (%q)",
@@ -233,6 +260,16 @@ func replayOne(ev event.Event, verdict string, arch *archive.Archive, candidate 
 		row.Candidate = &answer
 	}
 	return row
+}
+
+// refusedToken reports whether a recorded reason is the one Decide writes
+// for a presented approval_token that failed verification: the threshold
+// sentence, then pdp.ReasonApprovalRefused, then the verifier's error in
+// parentheses. The phrase is matched in that position and not anywhere in
+// the string, so a tool name or a policy name that happened to contain it
+// could not excuse a divergence.
+func refusedToken(reason string) bool {
+	return strings.Contains(reason, "; "+pdp.ReasonApprovalRefused+" (")
 }
 
 // question rebuilds the DecideRequest one event recorded, or names what the
@@ -340,6 +377,7 @@ func Format(r Report, source, candidateName string) string {
 	line("reproduced", r.Reproduced, "")
 	line("approval-decided", r.ApprovalDecided, "the PDP held these and a human answered")
 	line("approval-spent", r.ApprovalSpent, "held again: the approval a human gave was already used once")
+	line("approval-refused", r.ApprovalRefused, "denied: what was presented as an approval did not verify")
 	line("not archived", r.NotArchived, "the version they name was never kept")
 	line("unreadable", r.Unreadable, "recorded before the emitter carried the question")
 	line("diverged", r.Diverged, "replaying their OWN version disagrees with the record")

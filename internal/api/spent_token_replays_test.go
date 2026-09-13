@@ -3,6 +3,7 @@ package api
 import (
 	"net/http"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/TAIPANBOX/agent-stack-go/event"
@@ -76,5 +77,55 @@ func TestASpentTokenHoldReplaysAsApprovalSpent(t *testing.T) {
 	if report.Reproduced != 1 || report.ApprovalDecided != 1 || report.ApprovalSpent != 1 {
 		t.Fatalf("reproduced = %d, approval-decided = %d, approval-spent = %d, want 1, 1, 1:\n%s",
 			report.Reproduced, report.ApprovalDecided, report.ApprovalSpent, replay.Format(report, path, ""))
+	}
+}
+
+// TestARefusedTokenDenyReplaysAsApprovalRefused is the #59 seam, the twin of
+// the test above: the real handler refuses a token that does not verify, the
+// real writer records the deny with the verifier's reason, and the real
+// replay must file it as approval-refused by the phrase Decide wrote. A
+// garbage token is the shortest way to a refusal; the verifier's own error
+// text is not part of the contract, only the phrase in front of it.
+func TestARefusedTokenDenyReplaysAsApprovalRefused(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "events.ndjson")
+	ew, err := event.NewChainedWriter(path)
+	if err != nil {
+		t.Fatalf("NewChainedWriter: %v", err)
+	}
+	set, err := policy.Compile([]policy.Policy{{
+		Name: "finance-guardrail", Target: "agent://acme.example/finance/*",
+		RequireHumanAboveUSD: 500,
+	}})
+	if err != nil {
+		t.Fatalf("policy.Compile: %v", err)
+	}
+	keys := map[string]Principal{adminKey: {Org: "acme", Role: RoleAdmin}}
+	srv := New(pdp.New(set, []byte(testHMAC)), store.NewMemory(), ew, nil, keys, []byte(testHMAC), true, set.Policies())
+	a, err := archive.New(t.TempDir())
+	if err != nil {
+		t.Fatalf("archive.New: %v", err)
+	}
+	if err := srv.SetPolicyArchive(a); err != nil {
+		t.Fatalf("SetPolicyArchive: %v", err)
+	}
+
+	ask := decideRequestDTO{AgentID: "agent://acme.example/finance/bot1", RunID: "run-59", ToolNames: []string{"generate_report"}, EstCostUSD: 999,
+		ApprovalToken: "not-a-token-anybody-minted"}
+	refused := decodeBody[decideResponseDTO](t, doRequest(t, srv.Handler(), http.MethodPost, "/v1/decide", adminKey, ask))
+	if refused.Decision != pdp.Deny || !strings.Contains(refused.Reason, pdp.ReasonApprovalRefused) {
+		t.Fatalf("Decision = %q (%s), want a deny carrying pdp.ReasonApprovalRefused", refused.Decision, refused.Reason)
+	}
+	if err := ew.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	events, err := event.ReadFile(path)
+	if err != nil {
+		t.Fatalf("event.ReadFile: %v", err)
+	}
+	report := replay.Run(events, a, nil)
+	if report.Total != 1 || report.Diverged != 0 || report.ApprovalRefused != 1 {
+		t.Fatalf("total = %d, diverged = %d, approval-refused = %d, want 1, 0, 1:\n%s",
+			report.Total, report.Diverged, report.ApprovalRefused, replay.Format(report, path, ""))
 	}
 }

@@ -440,7 +440,7 @@ decision outcome and every exported signature identical.
     DID happen. `Decide` is deterministic, so a recorded question put back to
     the version it names must return the same verdict and the same reason.
 
-    Five rows are not a plain reproduction and each is reported rather than
+    Six rows are not a plain reproduction and each is reported rather than
     folded in: `not-archived` (invariant 17 was not honoured for it),
     `unreadable` (recorded before invariant 15), `diverged` (the record and
     this build disagree about the past, which fails the command),
@@ -453,7 +453,13 @@ decision outcome and every exported signature identical.
     explains, `pdp.ReasonApprovalSpent`, the one sentence `internal/api`
     writes and `internal/replay` reads back, so the row is excused by that
     exact sentence and no other; a hold with any other reason the replay does
-    not reproduce is still a divergence.
+    not reproduce is still a divergence. And `approval-refused` (since 1.0.2,
+    wardryx#59), the third and last token-dependent outcome: a presented
+    token that does not verify records a deny carrying the verifier's reason
+    after the phrase `pdp.ReasonApprovalRefused`, matched in that position
+    and no other; replay presents nothing and reaches the hold. A token is
+    only ever inspected past the threshold, so these three are every way a
+    credential the record does not carry can move a verdict.
 
     The counting rule is the invariant's teeth: a change tally never appears
     without the tally of decisions the run could not examine. "2 of 4 change"
@@ -463,11 +469,14 @@ decision outcome and every exported signature identical.
     `TestADivergentReplayIsReportedLoudly`,
     `TestAnAllowGrantedByAHumanIsNotADivergence`,
     `TestASpentTokenHoldIsNotADivergence`,
-    `TestAHoldWithAReasonTheTokenDoesNotExplainStaysDiverged` and
+    `TestAHoldWithAReasonTheTokenDoesNotExplainStaysDiverged`,
+    `TestARefusedTokenDenyIsNotADivergence`,
+    `TestADenyWithAReasonTheTokenDoesNotExplainStaysDiverged` and
     `TestTheReportNamesWhatItCouldNotExamine` in `internal/replay`;
-    `TestASpentTokenHoldReplaysAsApprovalSpent` in `internal/api`, the seam
-    that keeps the sentence the handler writes and the one replay reads the
-    same. Its limit:
+    `TestASpentTokenHoldReplaysAsApprovalSpent` and
+    `TestARefusedTokenDenyReplaysAsApprovalRefused` in `internal/api`, the
+    seams that keep the sentences the handler writes and the ones replay
+    reads the same. Its limit:
     reproduction proves the PDP answers the same way, not that the recorded
     question was the one the enforcement point actually asked.)*
 
