@@ -54,6 +54,15 @@ const (
 // only trace the record keeps of why the hold happened.
 const ReasonApprovalSpent = "approval_token was already redeemed once under WARDRYX_APPROVAL_SINGLE_USE; a new approval is required"
 
+// ReasonApprovalRefused is the fixed part of the reason on a Deny produced
+// by a presented approval_token that failed verification (expired, forged,
+// bound to another agent, run or tool set): Decide writes it after the
+// threshold sentence and before the verifier's own error in parentheses.
+// Same contract as ReasonApprovalSpent, for the same reason: the token is
+// never recorded, so this phrase is what tells internal/replay that the
+// recorded deny was the credential's doing and not the policy's.
+const ReasonApprovalRefused = "presented approval_token is invalid"
+
 // DecideRequest describes one action an agent is about to take, submitted
 // to POST /v1/decide.
 type DecideRequest struct {
@@ -390,7 +399,7 @@ func (e *Engine) Decide(req DecideRequest) DecideResponse {
 			// mismatched credential is never treated the same as simply
 			// not having approval yet (see the package doc comment).
 			resp.Decision = Deny
-			resp.Reason = fmt.Sprintf("estimated cost $%.2f exceeds policy %q threshold $%.2f; presented approval_token is invalid (%v)", req.EstCostUSD, pol.Name, pol.RequireHumanAboveUSD, verr)
+			resp.Reason = fmt.Sprintf("estimated cost $%.2f exceeds policy %q threshold $%.2f; %s (%v)", req.EstCostUSD, pol.Name, pol.RequireHumanAboveUSD, ReasonApprovalRefused, verr)
 			return resp
 		}
 		resp.Decision = Hold

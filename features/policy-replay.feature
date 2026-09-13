@@ -106,3 +106,24 @@ Feature: A recorded decision carries the question it answered
     When a token is presented twice and the file is replayed
     Then the spent-token hold is counted as an approval spent by the same sentence the handler wrote
     # -> internal/api:TestASpentTokenHoldReplaysAsApprovalSpent
+
+  # @decided 2026-09-14: the fix for wardryx#59, asked for as a 1.0.2; the
+  # sibling of #57, seen while fixing it: a presented token that does not
+  # verify records a deny the policy alone would not have produced.
+  Scenario: a denial of an approval that did not verify is not mistaken for a disagreement
+    Given a decision past the threshold where the caller presented an approval that did not verify
+    When the history is replayed without the approval token, which is never recorded
+    Then the deny is reported beside the other two token-dependent outcomes, as an approval refused, and not as the record and the code disagreeing
+    # -> internal/replay:TestARefusedTokenDenyIsNotADivergence
+
+  Scenario: a denial with a reason the token does not explain is still a disagreement
+    Given a recorded denial past the threshold whose reason this build never produces
+    When the history is replayed
+    Then it is reported as diverged, since only the verifier's phrase in its place is excused
+    # -> internal/replay:TestADenyWithAReasonTheTokenDoesNotExplainStaysDiverged
+
+  Scenario: the phrase the decision point writes on a refused approval is the one replay reads
+    Given the real decision handler, its real event file, and the real replay
+    When a token nobody minted is presented and the file is replayed
+    Then the deny is counted as an approval refused by the phrase the handler wrote
+    # -> internal/api:TestARefusedTokenDenyReplaysAsApprovalRefused

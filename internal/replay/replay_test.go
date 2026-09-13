@@ -417,3 +417,55 @@ func TestAHoldWithAReasonTheTokenDoesNotExplainStaysDiverged(t *testing.T) {
 		t.Fatalf("diverged = %d, approvalSpent = %d, want 1 and 0: %+v", report.Diverged, report.ApprovalSpent, report.Rows[0])
 	}
 }
+
+// TestARefusedTokenDenyIsNotADivergence is wardryx#59, the sibling of #57: a
+// presented approval_token that did not verify records a deny carrying the
+// verifier's reason. The token is never recorded, so replay presents nothing
+// and reaches the hold; recorded deny, replayed hold, a reason only the
+// unrecorded credential explains. The row belongs beside the other two
+// token-dependent outcomes, never under the diverged banner.
+func TestARefusedTokenDenyIsNotADivergence(t *testing.T) {
+	inForce := compile(t, []string{"good.example.com"}, 5)
+	ev := decisionEvent("policy_deny", inForce.Version(),
+		`estimated cost $12.40 exceeds policy "finance-guardrail" threshold $5.00; `+pdp.ReasonApprovalRefused+` (approval: token has expired)`,
+		map[string]any{"domains": []any{"good.example.com"}, "approval_token_required": true})
+
+	report := Run([]event.Event{ev}, archiveOf(t, inForce), compile(t, []string{"good.example.com"}, 500))
+
+	if report.Diverged != 0 {
+		t.Fatalf("a deny on a refused token must not be a divergence: %+v", report.Rows[0])
+	}
+	if report.ApprovalRefused != 1 || report.Rows[0].Fidelity != ApprovalRefused {
+		t.Fatalf("approvalRefused = %d, fidelity %s (%s), want 1 and %s",
+			report.ApprovalRefused, report.Rows[0].Fidelity, report.Rows[0].Note, ApprovalRefused)
+	}
+	if report.Rows[0].Baseline != pdp.Hold || report.Rows[0].Recorded != pdp.Deny {
+		t.Fatalf("baseline = %s, recorded = %s, want the hold the policy produced and the deny the record carries",
+			report.Rows[0].Baseline, report.Rows[0].Recorded)
+	}
+	if report.Replayable() != 1 || report.Changed != 1 || report.Rows[0].Candidate == nil || report.Rows[0].Candidate.Decision != pdp.Allow {
+		t.Fatalf("replayable = %d, changed = %d, candidate = %+v: the counterfactual is against the hold, and a candidate that asks nobody turns it into an allow",
+			report.Replayable(), report.Changed, report.Rows[0].Candidate)
+	}
+	out := Format(report, "events.ndjson", "")
+	if !strings.Contains(out, "approval-refused") || strings.Contains(out, "DIVERGED") {
+		t.Fatalf("the report must name the refused token and show no divergence banner:\n%s", out)
+	}
+}
+
+// TestADenyWithAReasonTheTokenDoesNotExplainStaysDiverged guards the case
+// above the way its #57 twin does: only the verifier's phrase is excused. A
+// recorded deny past the threshold with any other reason is still the record
+// and this build disagreeing, whatever approval_token_required says.
+func TestADenyWithAReasonTheTokenDoesNotExplainStaysDiverged(t *testing.T) {
+	inForce := compile(t, []string{"good.example.com"}, 5)
+	ev := decisionEvent("policy_deny", inForce.Version(),
+		"denied for a reason this build never produces",
+		map[string]any{"domains": []any{"good.example.com"}, "approval_token_required": true})
+
+	report := Run([]event.Event{ev}, archiveOf(t, inForce), nil)
+
+	if report.Diverged != 1 || report.ApprovalRefused != 0 {
+		t.Fatalf("diverged = %d, approvalRefused = %d, want 1 and 0: %+v", report.Diverged, report.ApprovalRefused, report.Rows[0])
+	}
+}
