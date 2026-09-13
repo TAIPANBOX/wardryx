@@ -52,10 +52,12 @@ type Config struct {
 	// redeemed approval_token allows exactly one /v1/decide call for the
 	// approval it was minted for; a second presentation of that same
 	// token returns a fresh hold instead of allow (internal/api). No CLI
-	// flag mirrors this one; it is env-only. Defaults to false, which
-	// preserves the original behavior of a token staying reusable for its
-	// full TTL -- unset (or any value that does not parse as a bool) is
-	// always false, never a fail-open/fail-closed ambiguity.
+	// flag mirrors this one; it is env-only. Defaults to TRUE since 1.0
+	// (decided 2026-09-13, invariant 5): replay of an approval is the whole
+	// attack, and the stack is closed by default everywhere else. Unset,
+	// or any value that does not parse as a bool, is true, the closed
+	// side; only an explicit false ("false", "0", "f") restores the pre-1.0
+	// behaviour of a token staying reusable for its full TTL.
 	ApprovalSingleUse bool
 	// ApprovalUnanswered is WARDRYX_APPROVAL_UNANSWERED_AFTER: how long a
 	// hold may sit undecided before wardryx raises `approval_unanswered`
@@ -87,7 +89,7 @@ func FromEnv() Config {
 		EventsPath:         os.Getenv("WARDRYX_EVENTS_PATH"),
 		PolicyArchive:      os.Getenv("WARDRYX_POLICY_ARCHIVE"),
 		ApprovalSecret:     os.Getenv("WARDRYX_APPROVAL_SECRET"),
-		ApprovalSingleUse:  parseBool(os.Getenv("WARDRYX_APPROVAL_SINGLE_USE")),
+		ApprovalSingleUse:  parseBoolClosed(os.Getenv("WARDRYX_APPROVAL_SINGLE_USE")),
 		ApprovalUnanswered: parseDuration(os.Getenv("WARDRYX_APPROVAL_UNANSWERED_AFTER")),
 		OTLPEndpoint:       os.Getenv("WARDRYX_OTLP_ENDPOINT"),
 	}
@@ -108,5 +110,17 @@ func parseDuration(s string) time.Duration {
 // malformed environment variable, it just falls back to the zero value.
 func parseBool(s string) bool {
 	b, _ := strconv.ParseBool(s)
+	return b
+}
+
+// parseBoolClosed reads a switch whose safe side is ON: unset and unparsable
+// both read as true, and only a value strconv.ParseBool accepts as false turns
+// it off. The mirror of parseBool, for the one variable (invariant 5) whose
+// default flipped to the closed side at 1.0.
+func parseBoolClosed(s string) bool {
+	b, err := strconv.ParseBool(s)
+	if err != nil {
+		return true
+	}
 	return b
 }

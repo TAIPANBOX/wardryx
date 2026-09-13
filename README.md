@@ -6,7 +6,7 @@
 
 [![CI](https://github.com/TAIPANBOX/wardryx/actions/workflows/ci.yml/badge.svg)](https://github.com/TAIPANBOX/wardryx/actions/workflows/ci.yml)
 ![Go](https://img.shields.io/badge/go-1.27-00ADD8.svg)
-![tests](https://img.shields.io/badge/tests-270-brightgreen.svg)
+![tests](https://img.shields.io/badge/tests-271-brightgreen.svg)
 ![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)
 ![Status](https://img.shields.io/badge/status-deterministic%20PDP-2dd4bf.svg)
 
@@ -207,7 +207,7 @@ The token is a compact `base64url(claims) + "." + hex(HMAC-SHA256)` string, wher
 
 `max_cost_usd` is a real ceiling, not a label carried along for reference: it is set to the exact `est_cost_usd` that triggered the hold (the amount a human is actually approving, not merely the policy's `require_human_above_usd` threshold it crossed), and `/v1/decide` rejects any later presentation of the token whose `est_cost_usd` exceeds it, even with a correct signature, an unexpired token, and a matching agent/run/tool set. A legitimate retry at the same or a lower cost still succeeds, since the check is "at or under the ceiling", not "exactly equal". This makes a granted approval narrower than it might look: it authorizes spend up to a specific dollar figure for that agent/run/tool set, not blanket permission for whatever the agent tries next under the same token. A token minted before `max_cost_usd` existed decodes it as `0`, and `0` is deliberately never treated as "no ceiling": such a token fails closed against any positive `est_cost_usd`, the same as a token whose ceiling was explicitly set to zero.
 
-By default a granted token stays valid for every `/v1/decide` call that presents it within the TTL window, steps 5-6 above can repeat. Setting `WARDRYX_APPROVAL_SINGLE_USE=true` tightens this: the first `/v1/decide` call that redeems a token records the redemption in the store (an atomic check-and-set, `Store.TryRedeem`, keyed by a hash of the token itself so a later, separately-granted token for the same `agent_id`/`run_id`/tool set is never mistaken for the earlier one); a second presentation of that *same* token no longer allows, it falls back to a fresh `hold` (a new `approval_id`), exactly as if no token had been presented, so the action can be re-approved out of band rather than silently allowed again. This is off by default, so with `WARDRYX_APPROVAL_SINGLE_USE` unset the decide path is byte-for-byte unchanged from before single-use existed.
+Since 1.0 a granted token is **single-use**: the first `/v1/decide` call that redeems it records the redemption, and a second presentation of the same token returns a fresh hold rather than an allow, because replaying an approval is the whole attack. `WARDRYX_APPROVAL_SINGLE_USE=false` restores the pre-1.0 behaviour, a token valid for every `/v1/decide` call within its TTL window, so steps 5-6 above can repeat; an unset or unparsable value is single-use, never silently reusable.
 
 Single-use redemption tracking has the same durability split as approval holds themselves: with `-db`/`WARDRYX_DB` set, `TryRedeem` is a Postgres `INSERT .. ON CONFLICT DO NOTHING` (atomic across every wardryx instance sharing that database); with no `-db`, redemptions live in one process's memory only, so single-use is enforced per-process, not across multiple wardryx instances behind a load balancer. `serve` prints a startup warning to stderr when `WARDRYX_APPROVAL_SINGLE_USE=true` is combined with no `-db`, so this caveat is never silent.
 

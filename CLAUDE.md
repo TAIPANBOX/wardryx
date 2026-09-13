@@ -124,12 +124,19 @@ an absent invariant.
    `TestDecideGrantFailsClosedWithNoSecretAndLeavesApprovalPending`)*
 5. **An approval token is single-use.** A redeemed token allows exactly one
    `/v1/decide` call for the approval it was minted for; a second presentation
-   of the same token is rejected. Replay of an approval is the whole attack.
-   Held only when `WARDRYX_APPROVAL_SINGLE_USE=true`; the default (false) lets
-   a token be redeemed repeatedly for its TTL against the same agent, run and
-   tool set at or below the approved cost. Whether the default should flip is
-   an open decision (2026-09-06). `@claude`
-   *(test: `TestSingleUseOnSecondDecideWithSameTokenHolds`,
+   of the same token returns a fresh hold. Replay of an approval is the whole
+   attack. The default since 1.0: `WARDRYX_APPROVAL_SINGLE_USE` unset, or set
+   to anything that does not parse as a bool, is single-use, the closed side;
+   only an explicit false restores the pre-1.0 behaviour of a token redeemed
+   repeatedly for its TTL against the same agent, run and tool set at or
+   below the approved cost. `@decided 2026-09-13`: the default flips to
+   single-use for 1.0, with the variable kept as the switch; the open question
+   of 2026-09-06 is closed by that. Durable, cross-instance single-use needs
+   `-db`/`WARDRYX_DB`; without it the redemption set lives in one process and
+   `serve` says so at start.
+   *(tests: `TestFromEnvApprovalSingleUseDefaultsOn` and the parsing table in
+   `internal/config` (unset and unparsable read as true, explicit false as
+   false; red on the pre-flip code first), `TestSingleUseOnSecondDecideWithSameTokenHolds`,
    `TestApprovalDecideTwiceReturns409`, and `TryRedeem`'s own atomicity and
    race-safety suites in `internal/store` for both backends)*
 6. **`POST /v1/approvals/{id}/decide` is admin-only.** Granting an approval is
