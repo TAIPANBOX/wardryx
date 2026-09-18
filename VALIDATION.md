@@ -120,6 +120,45 @@ the number it replaces.
   a freeze reaches live traffic in one PDP round trip rather than at cache
   expiry.
 
+## On a box behind a home router, with two clouds asking (2026-09-17)
+
+- A single-machine launcher (stack-single v1.1.3) pinned this service at v1.0.2 on a Debian 13 mini
+  PC behind a home router, the gateway published only on the box's tailnet address, with that TokenFuse
+  gateway as the enforcement point (`TOKENFUSE_WARDRYX_MODE: enforce`, `TOKENFUSE_WARDRYX_FAILMODE: closed`)
+  and two customer agents, one in AWS and one in GCP, calling through it over that tailnet.
+- Both agents' calls carried this service's decision on the wire: the gateway's own
+  `x-fuse-wardryx` response header read `allow` on every `200`, 17 calls each for the AWS and the
+  GCP agent at USD 0.000033 per call, and every decision this service made reached the bus in
+  `wardryx.ndjson`.
+- A `PUT /v1/policies/freeze-gcp` (`deny_above_usd 0.000001`, target
+  `agent://customer.example/gcp/*`) denied the GCP agent from its first call onward (`403`,
+  `wardryx=deny`) while the AWS agent kept getting `200`, 17 calls in the same window; three
+  `policy_deny` events at `high` severity reached the bus. `DELETE` on the same policy returned
+  `204`, and the GCP agent's next call was `200` again.
+- With this service stopped, the gateway itself answered every call: `403 wardryx unreachable,
+  failmode=closed` in 0.3 s, one `dependency_failed` event (`dependency=policy_plane`) per call, and
+  no call reached the model provider. Started again, the next call was `200`. This is the
+  fail-closed half of the README's [enforcement modes](README.md#enforcement-modes-at-the-pep)
+  table, measured on the shipped launcher's own setting.
+- With the policy store (Postgres) stopped and this service still running, `GET /healthz` stayed
+  `200` and decisions kept coming from the in-memory set (correct: liveness never reads the store),
+  but a `PUT /v1/policies/{id}` against the same outage had no answer after 8 s and the write was
+  never applied. That gap is issue #62; #63 closed it (`00ad4b5`) by adding `GET /readyz` (reads the
+  store, `200` or `503` inside a 3 s deadline) and the same deadline on every policy write, see
+  ["When the store is down"](README.md#when-the-store-is-down). The v1.0.2 this run pinned predates
+  that fix.
+- A delegation chain of 40 entries, carried in the request header `x-fuse-on-behalf-of`, reached
+  this service's `/v1/decide` and was allowed. Nothing here had a `max_chain_depth` rule loaded, so
+  this is the base policy set doing exactly what it was configured to do, not a defect in this
+  service; the matching gap on the header's own cap was the gateway's, closed in tokenfuse#297 and
+  tokenfuse#303.
+
+Not exercised here: the hold and approval-token path, and this service's decision-call timeout under
+real wide-area latency, since it and its enforcement point shared one compose network throughout.
+Detail behind every point above is in
+[estate-gates/PROVEN.md](https://github.com/TAIPANBOX/estate-gates/blob/main/PROVEN.md), the 16-case
+failure matrix and the rows dated 2026-09-17.
+
 ## Method
 
 Disposable Hetzner VPS boxes (deleted after each run), Wardryx running as a PEP in front of a real
