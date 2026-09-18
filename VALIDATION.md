@@ -123,8 +123,8 @@ the number it replaces.
 ## On a box behind a home router, with two clouds asking (2026-09-17)
 
 - A single-machine launcher (stack-single v1.1.3) pinned this service at v1.0.2 on a Debian 13 mini
-  PC behind a home router, reachable only over its own tailnet address, with a TokenFuse gateway as
-  the enforcement point (`TOKENFUSE_WARDRYX_MODE: enforce`, `TOKENFUSE_WARDRYX_FAILMODE: closed`)
+  PC behind a home router, the gateway published only on the box's tailnet address, with that TokenFuse
+  gateway as the enforcement point (`TOKENFUSE_WARDRYX_MODE: enforce`, `TOKENFUSE_WARDRYX_FAILMODE: closed`)
   and two customer agents, one in AWS and one in GCP, calling through it over that tailnet.
 - Both agents' calls carried this service's decision on the wire: the gateway's own
   `x-fuse-wardryx` response header read `allow` on every `200`, 17 calls each for the AWS and the
