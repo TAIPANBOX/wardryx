@@ -40,6 +40,7 @@ var errStoreIsDown = errors.New("dial tcp: connect: connection refused (" + leak
 // brokenStore fails every operation with an error carrying a credential.
 type brokenStore struct{}
 
+func (brokenStore) Ping(context.Context) error                           { return errStoreIsDown }
 func (brokenStore) CreateApproval(context.Context, store.Approval) error { return errStoreIsDown }
 func (brokenStore) GetApproval(context.Context, string) (store.Approval, error) {
 	return store.Approval{}, errStoreIsDown

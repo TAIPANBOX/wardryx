@@ -166,6 +166,10 @@ func (m *Memory) TryRedeem(_ context.Context, key string) (bool, error) {
 
 func (m *Memory) Close() error { return nil }
 
+// Ping always answers: the in-memory store is this process, and a process
+// that can run this method is reachable by definition.
+func (m *Memory) Ping(_ context.Context) error { return nil }
+
 // deepCopyPolicy round-trips p through JSON for the same reason
 // deepCopyContext does: keep Memory and Postgres behaviorally identical,
 // and protect the store from a caller mutating a policy.Policy's slice

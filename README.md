@@ -6,7 +6,7 @@
 
 [![CI](https://github.com/TAIPANBOX/wardryx/actions/workflows/ci.yml/badge.svg)](https://github.com/TAIPANBOX/wardryx/actions/workflows/ci.yml)
 ![Go](https://img.shields.io/badge/go-1.27-00ADD8.svg)
-![tests](https://img.shields.io/badge/tests-277-brightgreen.svg)
+![tests](https://img.shields.io/badge/tests-291-brightgreen.svg)
 ![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)
 ![Status](https://img.shields.io/badge/status-deterministic%20PDP-2dd4bf.svg)
 
@@ -248,6 +248,23 @@ curl localhost:8090/v1/policies -H "Authorization: Bearer $ADMIN_KEY"
 curl -X DELETE localhost:8090/v1/policies/ops-guard -H "Authorization: Bearer $ADMIN_KEY"
 ```
 
+### When the store is down
+
+Two things are true at once with `-db` pointing at a Postgres that has gone away, and a launcher needs to see both. `/v1/decide` keeps answering from the policy set already in memory: the data plane needs nothing from the store for an allow or a deny, and that is the right behaviour, so `GET /healthz` stays `200` for as long as the process runs. A liveness check that restarted wardryx for a store outage would trade a working decision point for a crash loop.
+
+What cannot work without the store is a policy write, and the honest answer to that is a different route:
+
+```
+GET /readyz     200 {"store":"ok"}            the store answered a ping
+                503 {"store":"unreachable"}   it did not, within the store deadline
+```
+
+No credential, no body, nothing read from the request: a compose `healthcheck`, a Kubernetes `readinessProbe`, or a plain `curl -fsS` reads the status and knows whether this wardryx is healthy or deciding from memory. Point a `livenessProbe` at `/healthz` and a `readinessProbe` at `/readyz`, and give the readiness probe a timeout above the store deadline (three seconds) or it will time out before the `503` arrives, which reads the same but says less.
+
+Every store call a `PUT` or `DELETE /v1/policies/{id}` makes shares that same three-second deadline, so a write against a store that has gone away answers `503` with a reason (`the policy store did not answer within 3s while writing the policy; the change is not in force`, or `is unreachable` when the network said no outright) instead of holding the request until the kernel gives up on a dial nothing refuses. The reason is wardryx's own sentence; the driver's text goes to the log, and it goes there once per outage (`policy store unreachable while ...`) and once more when the store is back (`policy store reachable again`), not once per request, so the line that matters is not buried under a launcher retrying every second.
+
+"The change is not in force" is a statement about this process: its live set was not swapped. A write the store applied after wardryx stopped waiting is restored on the next start like any stored policy, and until then the store and the live set differ, so retry the write once `/readyz` is `200` rather than assuming either state. Reads under `/v1/policies`, `/v1/approvals` and `/v1/status` are not bounded by this deadline.
+
 ### GET /v1/status
 
 `/v1/policies` answers a narrower question than it looks like it does: it lists the *store's*
@@ -319,7 +336,7 @@ This mirrors Wardryx's own stated defaults for its *own* availability: with no `
 
 Beyond the decision engine and the approval flow above, Wardryx ships:
 
-1. **HTTP API** (`internal/api`): `POST /v1/decide`, `POST /v1/approvals/{id}/decide` (admin only), `GET /v1/approvals` (org-scoped), `GET /v1/status` (see [GET /v1/status](#get-v1status)), the admin-only `/v1/policies` policy-as-code routes (see [Policy-as-code](#policy-as-code)), `GET /healthz`. Bearer-key auth mirrors the Cloud plane's `key:org[:role]` convention (TokenFuse `crates/cloud/src/keys.rs`), reimplemented in Go for the same wire format.
+1. **HTTP API** (`internal/api`): `POST /v1/decide`, `POST /v1/approvals/{id}/decide` (admin only), `GET /v1/approvals` (org-scoped), `GET /v1/status` (see [GET /v1/status](#get-v1status)), the admin-only `/v1/policies` policy-as-code routes (see [Policy-as-code](#policy-as-code)), `GET /healthz` (liveness) and `GET /readyz` (readiness, see [When the store is down](#when-the-store-is-down)). Bearer-key auth mirrors the Cloud plane's `key:org[:role]` convention (TokenFuse `crates/cloud/src/keys.rs`), reimplemented in Go for the same wire format.
 2. **Storage** (`internal/store`): Postgres via `pgx/v5` with an embedded, idempotent `schema.sql`, or an in-memory store when no DSN is configured. Both implementations satisfy the same `Store` interface.
 3. **Events** (`source: wardryx`): optional NDJSON `agent-event` output (`WARDRYX_EVENTS_PATH`) via `agent-stack-go/event`: `policy_allow`, `policy_deny`, `approval_requested`, `approval_granted`, `approval_denied`, `approval_timeout` (an agent presenting an approval token whose window had already closed, so usually a human did decide and the agent came back late), `approval_unanswered` (a hold nobody decided, see [The hold nobody decided](#the-hold-nobody-decided)), and `policy_updated` (a runtime `/v1/policies` write). Events now carry the SPEC §6.5 `prev_hash` chain; verify a stream with `agent-conform -chain <file>`.
 4. **OTLP export** (`internal/otel`): optional one-span-per-decision export to an OTLP/HTTP collector (`WARDRYX_OTLP_ENDPOINT`), see [OTLP export](#otlp-export).
@@ -335,7 +352,7 @@ internal/policy         policy model, YAML/JSON loader, glob matcher, PolicyVers
 internal/pdp            Engine.Decide: the pure decision algorithm
 internal/approval       approval_token minting/verification (HMAC-SHA256) + hold/decide orchestration
 internal/store          Store interface; Postgres (pgx/v5, embedded schema.sql) + in-memory; approvals + policies
-internal/api            net/http API: bearer auth, /v1/decide, /v1/approvals, /v1/policies, /healthz
+internal/api            net/http API: bearer auth, /v1/decide, /v1/approvals, /v1/policies, /healthz, /readyz
 internal/passports      directory loader for the offline `check` command (agent-stack-go/passport)
 internal/otel           OTLP/HTTP-JSON span export, one per /v1/decide outcome
 internal/config         WARDRYX_* environment variables, read once at startup
@@ -537,7 +554,7 @@ Wardryx is itself a security-relevant component, so a few of its own defaults ar
 - [x] Declarative policy model (YAML/JSON, `agent://` glob targeting, stable `PolicyVersion`)
 - [x] Deterministic decision engine: `deny_tool`, `deny_if_unattested`, `max_steps`, `allow_domains`, `require_human_above_usd`
 - [x] Stateless human-in-the-loop: HMAC-signed approval tokens, configurable TTL, optional single-use redemption (`WARDRYX_APPROVAL_SINGLE_USE`)
-- [x] HTTP API: `/v1/decide`, `/v1/approvals/{id}/decide`, `/v1/approvals`, `/v1/policies` (admin policy-as-code, see [Policy-as-code](#policy-as-code)), `/healthz`, bearer-key auth with org/role scoping
+- [x] HTTP API: `/v1/decide`, `/v1/approvals/{id}/decide`, `/v1/approvals`, `/v1/policies` (admin policy-as-code, see [Policy-as-code](#policy-as-code)), `/healthz` (liveness), `/readyz` (readiness: reads the store, see [When the store is down](#when-the-store-is-down)), bearer-key auth with org/role scoping
 - [x] Storage: Postgres (`pgx/v5`, embedded schema) and in-memory, behind one `Store` interface; approvals and policy-as-code documents
 - [x] `agent-event` NDJSON output (`policy_allow` / `policy_deny` / `approval_*` / `policy_updated`)
 - [x] Unanswered-approval sweep: one `approval_unanswered` per hold nobody decided (`WARDRYX_APPROVAL_UNANSWERED_AFTER`, default 15m), which reports and never decides

@@ -38,6 +38,7 @@
         "package": "github.com/TAIPANBOX/wardryx/cmd/wardryx",
         "listen_default": ":8090",
         "health_path": "/healthz",
+        "ready_path": "/readyz",
         "env": {
           "WARDRYX_ADDR": {
             "required": false,

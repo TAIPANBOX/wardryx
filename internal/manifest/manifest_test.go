@@ -61,6 +61,7 @@ type component struct {
 		Package                           string            `json:"package"`
 		ListenDefault                     string            `json:"listen_default"`
 		HealthPath                        string            `json:"health_path"`
+		ReadyPath                         string            `json:"ready_path"`
 		Env                               map[string]envVar `json:"env"`
 		StartsWithEmptyEnvironment        bool              `json:"starts_with_empty_environment"`
 		RefusesWithNoKeysAndNoAllowDevkey bool              `json:"refuses_with_no_keys_and_no_allow_devkey"`
@@ -357,6 +358,23 @@ func TestItStartsAndRefusesUnauthenticatedCalls(t *testing.T) {
 	if !up && lastErr != nil {
 		t.Fatalf("it never answered %s with an empty environment: %v\nits output was:\n%s",
 			svc.Checked.HealthPath, lastErr, out.String())
+	}
+
+	// The ready path, since issue #62: the one a launcher check reads to tell
+	// "deciding from memory" from "healthy". With no -db the store is this
+	// process, so it answers 200 here; what it answers with the store gone is
+	// held by internal/api's own tests against a store that refuses or hangs.
+	if svc.Checked.ReadyPath == "" {
+		t.Fatal("components.json declares no ready_path, so the readiness half of this measured nothing")
+	}
+	ready, err := client.Get("http://" + addr + svc.Checked.ReadyPath)
+	if err != nil {
+		t.Fatalf("GET %s: %v", svc.Checked.ReadyPath, err)
+	}
+	_ = ready.Body.Close()
+	if ready.StatusCode != http.StatusOK {
+		t.Errorf("%s answered %d with no credential and the in-memory store; the manifest declares it as the ready path",
+			svc.Checked.ReadyPath, ready.StatusCode)
 	}
 
 	if !svc.Checked.RefusesUnauthenticatedV1 {
