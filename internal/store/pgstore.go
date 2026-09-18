@@ -53,6 +53,18 @@ func (p *Postgres) migrate(ctx context.Context) error {
 // Close releases the underlying connection pool.
 func (p *Postgres) Close() error { return p.db.Close() }
 
+// Ping is one round trip to the database, on a pooled connection when the
+// pool has one and on a fresh dial when it does not, which is the case that
+// matters: once the database has gone, the pool's dead connections are
+// dropped on their first failure and every later call dials again. The dial
+// and the wait for the server's first bytes both stop at ctx's deadline.
+func (p *Postgres) Ping(ctx context.Context) error {
+	if err := p.db.PingContext(ctx); err != nil {
+		return fmt.Errorf("store: ping postgres: %w", err)
+	}
+	return nil
+}
+
 func (p *Postgres) CreateApproval(ctx context.Context, a Approval) error {
 	ctxJSON, err := marshalContext(a.Context)
 	if err != nil {

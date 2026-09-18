@@ -21,7 +21,9 @@ package store
 
 import (
 	"context"
+	"database/sql/driver"
 	"errors"
+	"net"
 	"time"
 
 	"github.com/TAIPANBOX/wardryx/internal/policy"
@@ -95,6 +97,13 @@ type PolicyRecord struct {
 // overwriting the first one, since the first decision may already have
 // minted a live approval_token.
 type Store interface {
+	// Ping reports whether the store can be reached right now, as cheaply as
+	// the backend allows: a round trip for Postgres, nothing at all for
+	// Memory. It is what GET /readyz reads (internal/api), so a launcher can
+	// tell a wardryx deciding from memory with its store gone from a healthy
+	// one. Honour ctx: a ping that hangs is the outage it exists to report.
+	Ping(ctx context.Context) error
+
 	// CreateApproval inserts a new pending approval. ApprovalID must be
 	// unique; Decision, DecidedAt, and DecidedBy on a must be zero values.
 	CreateApproval(ctx context.Context, a Approval) error
@@ -145,4 +154,25 @@ type Store interface {
 	// DeletePolicy removes the policy stored under id. Returns ErrNotFound
 	// if no such policy exists.
 	DeletePolicy(ctx context.Context, id string) error
+}
+
+// IsUnavailable reports whether err says the store could not be reached or
+// did not answer before the caller's deadline, as opposed to the store
+// answering with a failure of its own (a row that is not there, a document
+// that does not marshal, a constraint). The API answers 503 for the first
+// kind and 500 for the second, and logs the first once per outage rather
+// than once per request.
+//
+// A cancelled context is deliberately not an outage: in the API the only
+// cancellation a store call can see comes from the client going away, and a
+// client that hung up did not find the store down.
+func IsUnavailable(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, driver.ErrBadConn) {
+		return true
+	}
+	var netErr net.Error
+	return errors.As(err, &netErr)
 }

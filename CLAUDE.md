@@ -520,3 +520,53 @@ decision outcome and every exported signature identical.
     frozen route gone from the router, a wire field renamed in its struct tag,
     an env name gone from the config reader, `COMPATIBILITY.md` edited by hand,
     an additive name added (must pass), the manifest gone (measured nothing).)*
+
+20. **Liveness never reads the store, readiness does, and a policy write never
+    hangs on it.** Issue #62, measured on the appliance proving run of
+    2026-09-17 with the policy store stopped: `/healthz` answered 200 (right:
+    decisions continued from memory, and a liveness check that restarted the
+    process for its store would trade a working PDP for a crash loop), a
+    `PUT /v1/policies/{id}` had no answer after eight seconds, the log had no
+    line about the store, and a launcher reading `/healthz` could not tell
+    "deciding from memory" from "healthy".
+
+    Three parts, each held on its own. `GET /readyz`, unauthenticated like
+    `/healthz` and reading nothing from the request, pings the store under
+    `api.DefaultStoreTimeout` (three seconds) and answers 200
+    `{"store":"ok"}` or 503 `{"store":"unreachable"}`: a launcher check reads
+    the status, so the signal is the code and not a field inside a 200. Every
+    store call a `PUT` or `DELETE /v1/policies/{id}` makes shares that
+    deadline, and a store that is gone (`store.IsUnavailable`: the deadline
+    passed, or the network said no) answers 503 with a sentence wardryx
+    composed, while a store that answered with a failure of its own stays the
+    500 of invariant 10. And an outage is logged once when it starts and once
+    when it ends, never once per request in between.
+
+    The deadline is proven on the driver and not only on a double: pgx against
+    a listener that accepts and never speaks returns at the deadline on every
+    bounded call. Its limit: "the change is not in force" is a statement about
+    this process's engine; a write the store applied after the process stopped
+    waiting is restored on the next start, and until then the store and the
+    live set differ. Reads under `/v1/policies`, `/v1/approvals` and
+    `/v1/status`, the approval paths on `/v1/decide`, the unanswered-approval
+    sweep and `OpenPostgres` at startup are not bounded by this deadline.
+    `components.json` declares the ready path as a `checked` claim, proven by
+    starting the binary.
+    *(tests: `TestReadyzAnswers503WhenTheStoreRefuses`,
+    `TestReadyzAnswers503WithinTheDeadlineWhenTheStoreHangs`,
+    `TestReadyzAnswers200WhenTheStoreAnswers`,
+    `TestHealthzAndDecisionsStayUpWhileTheStoreIsDown` (red on a planted
+    `/healthz` that pings the store), `TestReadyzIgnoresHostileInput`,
+    `TestAPolicyWriteOnAHangingStoreAnswers503InsteadOfHanging` (red on the
+    unfixed handler: no answer after three seconds),
+    `TestAPolicyWriteOnARefusingStoreAnswers503WithAReason`,
+    `TestAWriteThatFailsAfterTheListAnswers503AndLeavesTheLiveSetAlone` (the
+    issue's "nothing half-written", held on a store that lists and then loses
+    the write),
+    `TestAStoreOutageIsLoggedOncePerOutageNotPerRequest`,
+    `TestAStoreFailureThatIsNotAnOutageIsStillA500` in `internal/api`;
+    `TestPostgresCallsReturnWithinTheDeadlineAgainstAListenerThatNeverAnswers`,
+    `TestARefusedConnectionIsUnavailable`, `TestMemoryPingAlwaysAnswers`,
+    `TestAnOrdinaryStoreErrorIsNotUnavailable` in `internal/store`; and the
+    ready-path half of `TestItStartsAndRefusesUnauthenticatedCalls` in
+    `internal/manifest`. Scenarios in `features/store-outage.feature`.)*

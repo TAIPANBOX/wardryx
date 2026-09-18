@@ -1,13 +1,28 @@
 // Package api is Wardryx's HTTP surface: POST /v1/decide (the decision
 // engine), POST /v1/approvals/{id}/decide (admin-only grant/deny), GET
 // /v1/approvals (org-scoped list), the admin-only policy-as-code routes
-// under /v1/policies (see "Policy-as-code" below), and GET /healthz.
+// under /v1/policies (see "Policy-as-code" below), GET /healthz (liveness)
+// and GET /readyz (readiness, see "Liveness and readiness" below).
 //
 // Every /v1/* route requires a bearer key (Authorization: Bearer <key>)
 // resolved through ParseKeys, mirroring the Cloud plane's
-// "key:org[:role]" convention; /healthz does not, matching Idryx's own
-// unauthenticated liveness endpoint. The approvals-decide and every
-// /v1/policies route additionally require the admin role.
+// "key:org[:role]" convention; /healthz and /readyz do not, matching
+// Idryx's own unauthenticated liveness endpoint. The approvals-decide and
+// every /v1/policies route additionally require the admin role.
+//
+// # Liveness and readiness
+//
+// /healthz says this process is up and answers 200 for as long as it does,
+// store or no store: with the store gone, /v1/decide keeps answering from the
+// policy set already in memory, which is the data plane doing its job, and a
+// liveness check that restarted it for that would trade a working PDP for a
+// crash loop. /readyz is the check that reads the store: it pings it under
+// DefaultStoreTimeout and answers 200 {"store":"ok"} or 503
+// {"store":"unreachable"}, so a launcher can tell "deciding from memory" from
+// "healthy" by the status alone (issue #62). The same deadline bounds every
+// store call a policy write makes, so PUT and DELETE /v1/policies/{id}
+// answer 503 with a reason rather than hanging; and an outage is logged once
+// when it starts and once when it ends, not once per request in between.
 //
 // # Policy-as-code
 //
@@ -106,6 +121,50 @@ type Server struct {
 	unansweredAfter time.Duration
 	unansweredMu    sync.Mutex
 	unansweredSeen  map[string]bool
+
+	// storeTimeout bounds every store call made on behalf of a policy write
+	// and the readiness ping. See DefaultStoreTimeout.
+	storeTimeout time.Duration
+	// outage remembers whether the store was reachable the last time a
+	// bounded call asked, so the log carries one line per outage.
+	outage storeOutage
+}
+
+// storeOutage is the one bit that turns "the store failed" into "the store
+// went down", so the log says so once when it happens and once when it is
+// over. Without it every request during an outage writes its own line, and
+// a launcher retrying a write every second buries the line that matters.
+// It is in memory on purpose: a restart that logs "unreachable" again is
+// saying something true about a process that has just lost its memory of
+// saying it.
+type storeOutage struct {
+	mu   sync.Mutex
+	down bool
+}
+
+// failed records a failure that store.IsUnavailable classified as the store
+// being gone, and logs it only if it is the first since the store was last
+// seen. The detail goes to the log and nowhere else (invariant 10).
+func (o *storeOutage) failed(op string, err error) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if o.down {
+		return
+	}
+	o.down = true
+	log.Printf("wardryx: policy store unreachable while %s: %v; policy writes and /readyz answer 503 until it is back", op, err)
+}
+
+// recovered records a store call that succeeded, and logs it only if an
+// outage was in progress.
+func (o *storeOutage) recovered() {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if !o.down {
+		return
+	}
+	o.down = false
+	log.Printf("wardryx: policy store reachable again")
 }
 
 // New returns a Server. events may be nil, which makes event emission a
@@ -133,8 +192,16 @@ func New(engine *pdp.Engine, st store.Store, events *event.ChainedWriter, otel *
 		basePolicies:      basePolicies,
 		unansweredAfter:   DefaultUnansweredAfter,
 		unansweredSeen:    map[string]bool{},
+		storeTimeout:      DefaultStoreTimeout,
 	}
 }
+
+// DefaultStoreTimeout is how long a policy write, or the readiness ping,
+// waits for the store before answering 503. Three seconds: a healthy
+// Postgres answers these in milliseconds, a launcher's probe gives up at
+// somewhere between one and ten, and the request issue #62 measured had
+// still not answered at eight.
+const DefaultStoreTimeout = 3 * time.Second
 
 // DefaultUnansweredAfter is how long a hold may sit undecided before wardryx
 // says so. Fifteen minutes, because a granted approval_token lives ten
@@ -265,6 +332,7 @@ func (s *Server) forgetDecidedApprovals(pending map[string]bool) {
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", handleHealthz)
+	mux.HandleFunc("GET /readyz", s.handleReadyz)
 	mux.HandleFunc("POST /v1/decide", s.requireAuth(s.handleDecide))
 	mux.HandleFunc("POST /v1/approvals/{id}/decide", s.requireAdmin(s.handleApprovalDecide))
 	mux.HandleFunc("GET /v1/approvals", s.requireAuth(s.handleListApprovals))
@@ -279,6 +347,29 @@ func (s *Server) Handler() http.Handler {
 func handleHealthz(w http.ResponseWriter, _ *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte("ok"))
+}
+
+// readyDTO is what /readyz answers: one field, "ok" or "unreachable", and
+// nothing about why. The why is the driver's text and goes to the log.
+type readyDTO struct {
+	Store string `json:"store"`
+}
+
+// handleReadyz reads nothing from the request: no body, no query, no bearer.
+// It is unauthenticated because the launcher checks that need it (a compose
+// healthcheck, a Kubernetes readiness probe, install.sh's own probe) carry no
+// credential, and what it reveals is one word about whether the store
+// answered.
+func (s *Server) handleReadyz(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), s.storeTimeout)
+	defer cancel()
+	if err := s.store.Ping(ctx); err != nil {
+		s.outage.failed("pinging the store", err)
+		writeJSON(w, http.StatusServiceUnavailable, readyDTO{Store: "unreachable"})
+		return
+	}
+	s.outage.recovered()
+	writeJSON(w, http.StatusOK, readyDTO{Store: "ok"})
 }
 
 // --- auth ---
@@ -774,10 +865,15 @@ func (s *Server) handlePutPolicy(w http.ResponseWriter, r *http.Request, princip
 		return
 	}
 
-	ctx := r.Context()
+	// Bounded: every store call below shares one deadline, so a store that
+	// has gone away answers 503 in storeTimeout rather than holding the
+	// request for as long as the kernel takes to give up on a dial that
+	// nothing refuses (issue #62 measured eight seconds and no answer).
+	ctx, cancel := context.WithTimeout(r.Context(), s.storeTimeout)
+	defer cancel()
 	stored, err := s.store.ListPolicies(ctx)
 	if err != nil {
-		writeInternalError(w, "writing the policy", err)
+		s.writeStoreFailure(w, "writing the policy", err)
 		return
 	}
 	candidate := make([]policy.Policy, 0, len(s.basePolicies)+len(stored)+1)
@@ -813,19 +909,19 @@ func (s *Server) handlePutPolicy(w http.ResponseWriter, r *http.Request, princip
 
 	now := time.Now().UTC()
 	if err := s.store.PutPolicy(ctx, id, p, now); err != nil {
-		writeInternalError(w, "writing the policy", err)
+		s.writeStoreFailure(w, "writing the policy", err)
 		return
 	}
+	s.outage.recovered()
 	s.engine.SetPolicies(newSet)
 	s.emit(evPolicyUpdated, event.SeverityHigh, systemAgentID, "", nil,
 		map[string]any{"action": "put", "policy_id": id, "policy_version": newSet.Version(), "decided_by": principal.Org})
 
-	rec, err := s.store.GetPolicy(ctx, id)
-	if err != nil {
-		writeInternalError(w, "writing the policy", err)
-		return
-	}
-	writeJSON(w, http.StatusOK, policyRecordToDTO(rec))
+	// Rendered from what was just written rather than read back from the
+	// store: the record is id, the body and now, all three in hand, and a
+	// read-back that failed after the write succeeded and the engine was
+	// swapped would answer 503 "not in force" about a change that is.
+	writeJSON(w, http.StatusOK, policyRecordToDTO(store.PolicyRecord{ID: id, Policy: p, UpdatedAt: now}))
 }
 
 // handleDeletePolicy removes the policy stored under {id}. Same
@@ -837,11 +933,13 @@ func (s *Server) handlePutPolicy(w http.ResponseWriter, r *http.Request, princip
 // handlers are provably held to the same "never partially apply" rule.
 func (s *Server) handleDeletePolicy(w http.ResponseWriter, r *http.Request, principal Principal) {
 	id := r.PathValue("id")
-	ctx := r.Context()
+	// Bounded, for the same reason handlePutPolicy is.
+	ctx, cancel := context.WithTimeout(r.Context(), s.storeTimeout)
+	defer cancel()
 
 	stored, err := s.store.ListPolicies(ctx)
 	if err != nil {
-		writeInternalError(w, "deleting the policy", err)
+		s.writeStoreFailure(w, "deleting the policy", err)
 		return
 	}
 	found := false
@@ -876,9 +974,10 @@ func (s *Server) handleDeletePolicy(w http.ResponseWriter, r *http.Request, prin
 	}
 
 	if err := s.store.DeletePolicy(ctx, id); err != nil {
-		writeInternalError(w, "deleting the policy", err)
+		s.writeStoreFailure(w, "deleting the policy", err)
 		return
 	}
+	s.outage.recovered()
 	s.engine.SetPolicies(newSet)
 	s.emit(evPolicyUpdated, event.SeverityHigh, systemAgentID, "", nil,
 		map[string]any{"action": "delete", "policy_id": id, "policy_version": newSet.Version(), "decided_by": principal.Org})
@@ -908,6 +1007,32 @@ type errorDTO struct {
 func writeInternalError(w http.ResponseWriter, op string, err error) {
 	log.Printf("wardryx: %s: %v", op, err)
 	writeError(w, http.StatusInternalServerError, "internal error while "+op)
+}
+
+// writeStoreFailure answers a store call that failed on a bounded path. A
+// store that is gone (store.IsUnavailable: the deadline passed, or the
+// network said no) is a 503 with a reason wardryx composed, and the outage
+// is noted once; anything else is the 500 writeInternalError has always
+// answered, because the store did answer, and what it said is a fault of
+// this process's own.
+//
+// "The change is not in force" is a statement about this process: its
+// engine was not swapped. A write the store applied after this process
+// stopped waiting is restored on the next start, the way any stored policy
+// is (see cmd/wardryx), and until then the store and the live set differ;
+// the reason names the store so a caller retries the write once the store
+// is back rather than assuming either state.
+func (s *Server) writeStoreFailure(w http.ResponseWriter, op string, err error) {
+	if !store.IsUnavailable(err) {
+		writeInternalError(w, op, err)
+		return
+	}
+	s.outage.failed(op, err)
+	why := "is unreachable"
+	if errors.Is(err, context.DeadlineExceeded) {
+		why = "did not answer within " + s.storeTimeout.String()
+	}
+	writeError(w, http.StatusServiceUnavailable, "the policy store "+why+" while "+op+"; the change is not in force")
 }
 
 func writeError(w http.ResponseWriter, status int, msg string) {
