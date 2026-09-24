@@ -334,6 +334,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /healthz", handleHealthz)
 	mux.HandleFunc("GET /readyz", s.handleReadyz)
 	mux.HandleFunc("POST /v1/decide", s.requireAuth(s.handleDecide))
+	mux.HandleFunc("POST /v1/filter-tools", s.requireAuth(s.handleFilterTools))
 	mux.HandleFunc("POST /v1/approvals/{id}/decide", s.requireAdmin(s.handleApprovalDecide))
 	mux.HandleFunc("GET /v1/approvals", s.requireAuth(s.handleListApprovals))
 	mux.HandleFunc("GET /v1/status", s.requireAuth(s.handleStatus))
@@ -594,6 +595,71 @@ func (s *Server) handleDecide(w http.ResponseWriter, r *http.Request, principal 
 		ApprovalID:            resp.ApprovalID,
 		ApprovalTokenRequired: resp.ApprovalTokenRequired,
 		Cacheable:             resp.Cacheable,
+	})
+}
+
+// --- POST /v1/filter-tools ---
+
+// filterToolsRequestDTO is the wire request for POST /v1/filter-tools. It
+// carries only what pdp.Filter reads: no approval token, no cost, no chain --
+// Filter applies no rule about those (see pdp.Filter's doc comment).
+type filterToolsRequestDTO struct {
+	AgentID   string   `json:"agent_id"`
+	RunID     string   `json:"run_id,omitempty"`
+	ToolNames []string `json:"tool_names,omitempty"`
+}
+
+// deniedToolDTO mirrors pdp.DeniedTool onto the wire.
+type deniedToolDTO struct {
+	Name   string `json:"name"`
+	Policy string `json:"policy"`
+	Rule   string `json:"rule"`
+}
+
+// filterToolsResponseDTO is the wire response for POST /v1/filter-tools.
+// Allowed and Denied carry no `omitempty`: an empty list must serialize as
+// `[]`, never `null`, so a caller's JSON decoder never has to special-case an
+// absent field as "nothing offered" versus "nothing denied".
+type filterToolsResponseDTO struct {
+	Allowed       []string        `json:"allowed"`
+	Denied        []deniedToolDTO `json:"denied"`
+	PolicyVersion string          `json:"policy_version"`
+}
+
+// handleFilterTools answers pdp.Filter over HTTP: the same auth
+// (s.requireAuth, wired at registration), the same maxRequestBodyBytes cap
+// and the same JSON-decoding discipline as handleDecide (decodeJSONBody), but
+// no event is emitted -- nothing acts on this answer yet, so nothing records
+// it (see the Filter invariant in CLAUDE.md).
+func (s *Server) handleFilterTools(w http.ResponseWriter, r *http.Request, _ Principal) {
+	var dto filterToolsRequestDTO
+	if !decodeJSONBody(w, r, &dto) {
+		return
+	}
+	if dto.AgentID == "" {
+		writeError(w, http.StatusBadRequest, "agent_id is required")
+		return
+	}
+
+	resp := s.engine.Filter(pdp.FilterRequest{
+		AgentID:   dto.AgentID,
+		RunID:     dto.RunID,
+		ToolNames: dto.ToolNames,
+	})
+
+	denied := make([]deniedToolDTO, 0, len(resp.Denied))
+	for _, d := range resp.Denied {
+		denied = append(denied, deniedToolDTO{Name: d.Name, Policy: d.Policy, Rule: d.Rule})
+	}
+	allowed := resp.Allowed
+	if allowed == nil {
+		allowed = []string{}
+	}
+
+	writeJSON(w, http.StatusOK, filterToolsResponseDTO{
+		Allowed:       allowed,
+		Denied:        denied,
+		PolicyVersion: resp.PolicyVersion,
 	})
 }
 
