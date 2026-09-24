@@ -570,3 +570,46 @@ decision outcome and every exported signature identical.
     `TestAnOrdinaryStoreErrorIsNotUnavailable` in `internal/store`; and the
     ready-path half of `TestItStartsAndRefusesUnauthenticatedCalls` in
     `internal/manifest`. Scenarios in `features/store-outage.feature`.)*
+
+21. **`Filter` is Decide's rule 2 applied to each offered tool alone, through
+    the same matcher, and it is unrecorded while no enforcement point acts on
+    its answer.** `POST /v1/filter-tools` exists to answer a narrower
+    question than `/v1/decide`: not "may this action happen" but "which of
+    these offered tools would `deny_tool` refuse". It reads the Engine's
+    policy set exactly the way `Decide` reads it (one load, `Set.Match` on
+    `AgentID`), and denies a tool through the same `containsFold` `Decide`
+    uses, called rather than copied, so the two can never quietly diverge on
+    what "denied" means for one tool.
+
+    It is pure in the same sense `Decide` is pure (invariant 1): no clock,
+    randomness, network or database in `internal/pdp`'s own code. And it
+    applies no rule that is not about one tool: no chain rule, no
+    attestation, no `max_steps`, no `allow_domains`, no cost rule, no
+    approval token. Those are rules about the action as a whole, and `Filter`
+    was asked a question about tools offered, not an action taken.
+
+    **Unrecorded is a decision, not an oversight, and it is temporary.** No
+    event is emitted for a `filter-tools` call. Recording it would describe a
+    decision nothing yet enforces: emitting `policy_deny`-shaped events for
+    tools an agent never attempted to use would double the event volume for a
+    verdict with no consequence, and would need its own name so a reader
+    could tell "the agent tried this and was refused" from "the agent asked
+    what it could try, once, in a plane that only measures shadow pruning."
+    The named limitation is TokenFuse's shadow-measurement wave (W2a): this
+    route exists so an enforcement point can measure how many tool
+    definitions a policy would remove, before anything prunes them. If a
+    later wave enforces on this answer, that wave adds the event and this
+    line stops being true.
+    *(gate: `scripts/decision-path-purity.sh` for the purity half; the "no
+    event" half is not enforced, there is nothing to grep for an absence, and
+    a later wave changing this is expected, not a regression; test:
+    `TestFilterNamesEveryDeniedToolNotOnlyTheFirst`,
+    `TestFilterAppliesNoRuleThatIsNotAboutATool`,
+    `TestFilterMatchesToolsTheWayDecideDoes`,
+    `TestFilterIgnoresPoliciesForOtherAgents`, `TestFilterDropsLaterDuplicates`,
+    `TestFilterAgreesWithDecideOnEveryToolAlone` (a 200-seed sweep: for every
+    tool offered alone, `Decide` denies by `deny_tool` if and only if `Filter`
+    lists it in `Denied`) in `internal/pdp`; `TestFilterToolsRequiresAuth`,
+    `TestFilterToolsAnswersThePartition`, `TestFilterToolsRefusesABodyOverTheCap`,
+    `TestFilterToolsRefusesAMissingAgentID`, `TestFilterToolsSurvivesHostileInput`
+    in `internal/api`)*

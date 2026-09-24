@@ -113,6 +113,7 @@ Status: frozen at 1.0.0 (2026-09-13): the surface below is the promise of this m
 
 - OTLP span export (WARDRYX_OTLP_ENDPOINT): the span attribute names
 - replay's candidate-policy mode (replay -policy <candidate>): its report shape
+- POST /v1/filter-tools: no enforcement point acts on its answer yet
 
 ## Support
 
