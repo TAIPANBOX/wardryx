@@ -18,7 +18,7 @@ import "testing"
 func policiesFixture() []Policy {
 	return []Policy{
 		{Name: "deny-shell", Target: "agent://ops.local/*", DenyTool: []string{"shell_exec"}},
-		{Name: "hold-costly", Target: "agent://finance.local/*", RequireHumanAboveUSD: 5},
+		{Name: "hold-costly", Target: "agent://finance.local/*", RequireHumanAboveUSD: usd(5)},
 		{Name: "cap-steps", Target: "agent://ops.local/deploy", MaxSteps: 10},
 	}
 }
@@ -51,8 +51,8 @@ func TestPoliciesGivesBackEveryRuleSoAWriteCannotDeleteTheFileLoadedOnes(t *test
 		if got.Target != want.Target {
 			t.Errorf("%s: target %q, want %q", want.Name, got.Target, want.Target)
 		}
-		if got.RequireHumanAboveUSD != want.RequireHumanAboveUSD {
-			t.Errorf("%s: threshold %v, want %v", want.Name, got.RequireHumanAboveUSD, want.RequireHumanAboveUSD)
+		if !usdEqual(got.RequireHumanAboveUSD, want.RequireHumanAboveUSD) {
+			t.Errorf("%s: threshold %v, want %v", want.Name, usdString(got.RequireHumanAboveUSD), usdString(want.RequireHumanAboveUSD))
 		}
 		if len(got.DenyTool) != len(want.DenyTool) {
 			t.Errorf("%s: deny_tool %v, want %v", want.Name, got.DenyTool, want.DenyTool)
@@ -109,15 +109,23 @@ func TestRequiresHumanApprovalIsTrueExactlyWhenAHoldCanHappen(t *testing.T) {
 			false,
 		},
 		{
-			"a threshold of exactly zero, which holds nothing",
-			[]Policy{{Name: "z", Target: "agent://a/*", RequireHumanAboveUSD: 0}},
-			false,
+			// Before @decided 2026-09-27 this case read "a threshold of
+			// exactly zero, which holds nothing" and expected false: it
+			// codified the exact defect measured 2026-09-27, since a bare
+			// float64 could not tell an explicit zero from the field never
+			// being set. RequireHumanAboveUSD is now a *float64, so this
+			// case is split in two: an explicitly-zero threshold DOES hold
+			// (below), and an actually-unset one does not (the "a policy
+			// with no threshold" case above already covers that).
+			"an explicit threshold of exactly zero holds any priced call",
+			[]Policy{{Name: "z", Target: "agent://a/*", RequireHumanAboveUSD: zeroUSD()}},
+			true,
 		},
 		{
 			"one policy above zero among several",
 			[]Policy{
 				{Name: "deny", Target: "agent://a/*", DenyTool: []string{"shell_exec"}},
-				{Name: "hold", Target: "agent://b/*", RequireHumanAboveUSD: 0.01},
+				{Name: "hold", Target: "agent://b/*", RequireHumanAboveUSD: usd(0.01)},
 			},
 			true,
 		},

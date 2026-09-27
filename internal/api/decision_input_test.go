@@ -291,7 +291,7 @@ func testServerPolicy(t *testing.T, allowDomains []string) *policy.Set {
 		Target:               "agent://acme.example/finance/*",
 		DenyTool:             []string{"send_wire_transfer"},
 		AllowDomains:         allowDomains,
-		RequireHumanAboveUSD: 500,
+		RequireHumanAboveUSD: usd(500),
 		MaxSteps:             5,
 	}})
 	if err != nil {

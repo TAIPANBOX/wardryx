@@ -18,6 +18,11 @@ import (
 	"github.com/TAIPANBOX/wardryx/internal/policy"
 )
 
+// usd returns a pointer to v, for constructing a policy.Policy's
+// RequireHumanAboveUSD/DenyAboveUSD fields (*float64, so a caller can say
+// zero and be believed).
+func usd(v float64) *float64 { return &v }
+
 func testDB(t *testing.T) *Postgres {
 	t.Helper()
 	dsn := os.Getenv("DATABASE_URL")
@@ -224,7 +229,7 @@ func TestPgTryRedeemRaceSafe(t *testing.T) {
 func TestPgPutAndGetPolicy(t *testing.T) {
 	p := testDB(t)
 	ctx := context.Background()
-	pol := policy.Policy{Name: "finance-guardrail", Target: "agent://acme.example/finance/*", DenyTool: []string{"send_wire_transfer"}, RequireHumanAboveUSD: 500}
+	pol := policy.Policy{Name: "finance-guardrail", Target: "agent://acme.example/finance/*", DenyTool: []string{"send_wire_transfer"}, RequireHumanAboveUSD: usd(500)}
 	updatedAt := time.Date(2026, 7, 13, 12, 0, 0, 0, time.UTC)
 
 	if err := p.PutPolicy(ctx, "finance", pol, updatedAt); err != nil {
@@ -234,7 +239,7 @@ func TestPgPutAndGetPolicy(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetPolicy: %v", err)
 	}
-	if got.ID != "finance" || got.Policy.Target != pol.Target || got.Policy.RequireHumanAboveUSD != 500 {
+	if got.ID != "finance" || got.Policy.Target != pol.Target || got.Policy.RequireHumanAboveUSD == nil || *got.Policy.RequireHumanAboveUSD != 500 {
 		t.Errorf("GetPolicy = %+v, want id=finance matching %+v", got, pol)
 	}
 	if len(got.Policy.DenyTool) != 1 || got.Policy.DenyTool[0] != "send_wire_transfer" {
@@ -330,8 +335,8 @@ func TestPgPolicyRoundTripsFullPolicyShape(t *testing.T) {
 		Target:               "agent://acme.example/*",
 		DenyTool:             []string{"a", "b"},
 		AllowDomains:         []string{"good.example.com"},
-		RequireHumanAboveUSD: 500,
-		DenyAboveUSD:         5000,
+		RequireHumanAboveUSD: usd(500),
+		DenyAboveUSD:         usd(5000),
 		MaxSteps:             40,
 		DenyIfUnattested:     true,
 	}

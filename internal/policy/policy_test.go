@@ -177,7 +177,7 @@ func TestCompileRejectsEmptyTarget(t *testing.T) {
 }
 
 func TestCompileRejectsNegativeThreshold(t *testing.T) {
-	if _, err := Compile([]Policy{{Target: "agent://x/*", RequireHumanAboveUSD: -1}}); err == nil {
+	if _, err := Compile([]Policy{{Target: "agent://x/*", RequireHumanAboveUSD: usd(-1)}}); err == nil {
 		t.Fatal("Compile with negative require_human_above_usd: expected an error, got nil")
 	}
 }
@@ -189,7 +189,7 @@ func TestCompileRejectsNegativeMaxSteps(t *testing.T) {
 }
 
 func TestCompileRejectsNegativeDenyAboveUSD(t *testing.T) {
-	if _, err := Compile([]Policy{{Target: "agent://x/*", DenyAboveUSD: -1}}); err == nil {
+	if _, err := Compile([]Policy{{Target: "agent://x/*", DenyAboveUSD: usd(-1)}}); err == nil {
 		t.Fatal("Compile with negative deny_above_usd: expected an error, got nil")
 	}
 }

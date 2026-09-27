@@ -29,6 +29,7 @@ package pdp
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 	"sync/atomic"
 
@@ -380,7 +381,7 @@ func (e *Engine) Decide(req DecideRequest) DecideResponse {
 
 	if pol, ok := deniedAboveCeiling(matched, req.EstCostUSD); ok {
 		resp.Decision = Deny
-		resp.Reason = fmt.Sprintf("estimated cost $%.2f exceeds policy %q hard ceiling $%.2f (deny_above_usd); no approval can authorize this", req.EstCostUSD, pol.Name, pol.DenyAboveUSD)
+		resp.Reason = fmt.Sprintf("estimated cost %s exceeds policy %q hard ceiling %s (deny_above_usd); no approval can authorize this", formatUSD(req.EstCostUSD), pol.Name, formatUSD(*pol.DenyAboveUSD))
 		return resp
 	}
 
@@ -390,7 +391,7 @@ func (e *Engine) Decide(req DecideRequest) DecideResponse {
 			verr := approval.VerifyApprovalToken(e.approvalSecret, req.ApprovalToken, req.AgentID, req.RunID, req.ToolNames, req.EstCostUSD)
 			if verr == nil {
 				resp.Decision = Allow
-				resp.Reason = fmt.Sprintf("estimated cost $%.2f exceeds policy %q threshold $%.2f; allowed via a valid approval_token", req.EstCostUSD, pol.Name, pol.RequireHumanAboveUSD)
+				resp.Reason = fmt.Sprintf("estimated cost %s exceeds policy %q threshold %s; allowed via a valid approval_token", formatUSD(req.EstCostUSD), pol.Name, formatUSD(*pol.RequireHumanAboveUSD))
 				return resp
 			}
 			// A token was presented but failed verification: expired,
@@ -399,11 +400,11 @@ func (e *Engine) Decide(req DecideRequest) DecideResponse {
 			// mismatched credential is never treated the same as simply
 			// not having approval yet (see the package doc comment).
 			resp.Decision = Deny
-			resp.Reason = fmt.Sprintf("estimated cost $%.2f exceeds policy %q threshold $%.2f; %s (%v)", req.EstCostUSD, pol.Name, pol.RequireHumanAboveUSD, ReasonApprovalRefused, verr)
+			resp.Reason = fmt.Sprintf("estimated cost %s exceeds policy %q threshold %s; %s (%v)", formatUSD(req.EstCostUSD), pol.Name, formatUSD(*pol.RequireHumanAboveUSD), ReasonApprovalRefused, verr)
 			return resp
 		}
 		resp.Decision = Hold
-		resp.Reason = fmt.Sprintf("estimated cost $%.2f exceeds policy %q threshold $%.2f; human approval required", req.EstCostUSD, pol.Name, pol.RequireHumanAboveUSD)
+		resp.Reason = fmt.Sprintf("estimated cost %s exceeds policy %q threshold %s; human approval required", formatUSD(req.EstCostUSD), pol.Name, formatUSD(*pol.RequireHumanAboveUSD))
 		return resp
 	}
 
@@ -446,7 +447,7 @@ func requestSpecific(matched []policy.Policy) bool {
 		// call presenting a different chain, and a cached chain ALLOW is
 		// worse: it would let an unproven chain through on the strength of a
 		// proven one.
-		if p.MaxSteps > 0 || p.RequireHumanAboveUSD > 0 || p.DenyAboveUSD > 0 ||
+		if p.MaxSteps > 0 || p.RequireHumanAboveUSD != nil || p.DenyAboveUSD != nil ||
 			len(p.AllowDomains) > 0 || p.DenyIfChainUnproven ||
 			p.MaxChainDepth > 0 || p.RequireRootPrincipal != "" {
 			return true
@@ -513,19 +514,22 @@ func unattestedDenied(policies []policy.Policy, method string) (policy.Policy, b
 	return policy.Policy{}, false
 }
 
-// deniedAboveCeiling returns the matched policy with the smallest positive
-// DenyAboveUSD that cost exceeds, if any. As with overThreshold, taking the
-// strictest (lowest) exceeded ceiling, rather than e.g. the first matched
-// policy, means Decide reports the most specific binding constraint when
-// several policies target the same agent. Unlike overThreshold, there is no
-// approval path that can ever satisfy this: a policy match here always
-// means Deny, never Hold, which is exactly why Decide checks it first.
+// deniedAboveCeiling returns the matched policy with the smallest exceeded
+// DenyAboveUSD, if any is SET at all (nil means no ceiling; a non-nil zero
+// is a real ceiling of zero, denying any priced call, see the field's own
+// doc comment and CLAUDE.md's zero-ceiling invariant). As with
+// overThreshold, taking the strictest (lowest) exceeded ceiling, rather
+// than e.g. the first matched policy, means Decide reports the most
+// specific binding constraint when several policies target the same
+// agent. Unlike overThreshold, there is no approval path that can ever
+// satisfy this: a policy match here always means Deny, never Hold, which
+// is exactly why Decide checks it first.
 func deniedAboveCeiling(policies []policy.Policy, cost float64) (policy.Policy, bool) {
 	var best policy.Policy
 	found := false
 	for _, p := range policies {
-		if p.DenyAboveUSD > 0 && cost > p.DenyAboveUSD {
-			if !found || p.DenyAboveUSD < best.DenyAboveUSD {
+		if p.DenyAboveUSD != nil && cost > *p.DenyAboveUSD {
+			if !found || *p.DenyAboveUSD < *best.DenyAboveUSD {
 				best = p
 				found = true
 			}
@@ -534,17 +538,18 @@ func deniedAboveCeiling(policies []policy.Policy, cost float64) (policy.Policy, 
 	return best, found
 }
 
-// overThreshold returns the matched policy with the smallest positive
-// RequireHumanAboveUSD that cost exceeds, if any. Taking the strictest
-// (lowest) exceeded threshold, rather than e.g. the first matched policy,
-// means Decide reports the most specific binding constraint when several
-// policies target the same agent.
+// overThreshold returns the matched policy with the smallest exceeded
+// RequireHumanAboveUSD, if any is SET at all (nil means no threshold; a
+// non-nil zero is a real threshold of zero, holding on any priced call).
+// Taking the strictest (lowest) exceeded threshold, rather than e.g. the
+// first matched policy, means Decide reports the most specific binding
+// constraint when several policies target the same agent.
 func overThreshold(policies []policy.Policy, cost float64) (policy.Policy, bool) {
 	var best policy.Policy
 	found := false
 	for _, p := range policies {
-		if p.RequireHumanAboveUSD > 0 && cost > p.RequireHumanAboveUSD {
-			if !found || p.RequireHumanAboveUSD < best.RequireHumanAboveUSD {
+		if p.RequireHumanAboveUSD != nil && cost > *p.RequireHumanAboveUSD {
+			if !found || *p.RequireHumanAboveUSD < *best.RequireHumanAboveUSD {
 				best = p
 				found = true
 			}
@@ -630,6 +635,32 @@ func containsFold(ss []string, v string) bool {
 		}
 	}
 	return false
+}
+
+// formatUSD renders a USD amount for a Reason string with just enough
+// precision that a sub-cent value is never misread as a different amount.
+//
+// Measured 2026-09-27: a deny_above_usd of $0.000001 printed its refusal
+// reason as "$0.00" (fmt's "$%.2f" rounds it away, and $0.00 reads as "the
+// ceiling is zero", a different and false statement), and a
+// require_human_above_usd of $0.005 printed as "$0.01" (rounded up to a
+// different cent). Both were true of the fixed two-decimal format
+// regardless of this field's zero-vs-unset fix above; a policy naming any
+// amount finer than a cent needs the reason to say what it actually is.
+//
+// The common case (a whole number of cents, which is every dollar amount
+// this service has ever been run with in VALIDATION.md) still prints
+// exactly as before: "$100.00", not "$100" or "$100.000000000001" from a
+// float64 rounding artifact. Only a value the two-decimal form cannot
+// represent exactly falls back to the shortest exact decimal
+// representation, so "$0.000001" and "$0.005" print as themselves rather
+// than as whichever cent they are closest to.
+func formatUSD(v float64) string {
+	twoDecimals := strconv.FormatFloat(v, 'f', 2, 64)
+	if parsed, err := strconv.ParseFloat(twoDecimals, 64); err == nil && parsed == v {
+		return "$" + twoDecimals
+	}
+	return "$" + strconv.FormatFloat(v, 'f', -1, 64)
 }
 
 func attestationLabel(method string) string {

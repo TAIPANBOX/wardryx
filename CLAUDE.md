@@ -613,3 +613,59 @@ decision outcome and every exported signature identical.
     `TestFilterToolsAnswersThePartition`, `TestFilterToolsRefusesABodyOverTheCap`,
     `TestFilterToolsRefusesAMissingAgentID`, `TestFilterToolsSurvivesHostileInput`
     in `internal/api`)*
+
+22. **An explicit zero on `require_human_above_usd` or `deny_above_usd` is a
+    real threshold or ceiling, never silently the same as the field being
+    left out.** Measured 2026-09-27: `PUT /v1/policies/n4-deny-beta` with
+    `{"deny_above_usd":0}` answered 200, the stored policy echoed back with
+    no `deny_above_usd` field at all, and the agent's next call through the
+    enforcement point was allowed. Both fields were a plain `float64` with
+    `omitempty`, so an explicit `0` and the field never being mentioned
+    decoded to the identical Go value: a policy meaning "deny everything
+    above zero" silently became "deny nothing".
+
+    `@decided 2026-09-27`: both fields are `*float64`. `nil` (the field
+    absent from the file or the PUT body) still means no restriction, exactly
+    as before; a non-nil zero now denies (or holds) any action whose cost is
+    more than zero, which is what the field's own long-standing contract
+    ("denies any action whose estimated cost exceeds it") already says a
+    threshold of zero should do. Refusing an explicit zero at load and at PUT
+    instead was considered and rejected: every already-valid policy that
+    simply never mentions one of these fields also decodes to the Go zero
+    value, so "refuse an explicit zero" is only expressible at all once
+    presence is tracked, at which point there is no reason left to forbid
+    the one value an operator actually asked for over "no restriction". This
+    also matches how the sibling field on an `approval_token`, `MaxCostUSD`,
+    already treats zero (README's approval-token section: zero is
+    deliberately never read as "no ceiling").
+
+    A pointer field changes nothing for a policy file that never mentions
+    either field: JSON and YAML both leave the pointer `nil` on an absent
+    key, `omitempty` still drops a `nil` pointer the same way it dropped a
+    zero `float64`, and `PolicyVersion` (a digest of the normalized,
+    marshaled set) is unchanged for every policy in the estate today, since
+    none of them writes either field as a literal `0`. Only a policy that
+    does write an explicit `0` gets a new, and now correctly distinguished,
+    `PolicyVersion`.
+
+    The formatting half of the same measurement: a `deny_above_usd` of
+    `$0.000001` printed its refusal reason as `$0.00` (rounded away by a
+    fixed two-decimal format), and a `require_human_above_usd` of `$0.005`
+    printed as `$0.01` (rounded up to a different cent). Both read as a
+    different number than the one configured. Fixed by printing the
+    ordinary two-decimal form only when it round-trips back to the exact
+    value, and the shortest exact decimal otherwise, so `$100.00` still
+    prints as `$100.00` and a sub-cent figure prints as itself.
+    *(test: `TestDecideZeroDenyAboveUSDCeilingDeniesAnyPricedCall`,
+    `TestDecideZeroRequireHumanAboveUSDThresholdHoldsAnyPricedCall` in
+    `internal/pdp`; `TestExplicitZeroDenyAboveUSDInAYAMLFileIsDistinctFromOmitted`,
+    `TestExplicitZeroRequireHumanAboveUSDInAJSONFileIsDistinctFromOmitted`,
+    `TestRequiresHumanApprovalIsTrueExactlyWhenAHoldCanHappen` in
+    `internal/policy`; `TestPutPolicyWithExplicitZeroDenyAboveUSDIsNotSilentlyDropped`,
+    `TestPutPolicyWithExplicitZeroDenyAboveUSDActuallyDeniesTheNextCall` in
+    `internal/api`; and the formatting fix by
+    `TestSubCentDenyAboveUSDReasonIsNotMisleading`,
+    `TestSubCentRequireHumanAboveUSDReasonIsNotMisleading`, plus the existing
+    `TestDecideDenyAboveUSDHardCeiling`'s "exactly at the ceiling" case for
+    the boundary the zero fix must not move. Scenarios in
+    `features/zero-value-policy-ceilings.feature`.)*

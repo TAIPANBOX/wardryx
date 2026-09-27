@@ -52,9 +52,30 @@ type Policy struct {
 	// what the caller declares up front.
 	AllowDomains []string `yaml:"allow_domains,omitempty" json:"allow_domains,omitempty"`
 	// RequireHumanAboveUSD is the estimated-cost threshold above which a
-	// human must approve the action. Zero (the default) means "no
-	// threshold": Decide never holds solely because this field is unset.
-	RequireHumanAboveUSD float64 `yaml:"require_human_above_usd,omitempty" json:"require_human_above_usd,omitempty"`
+	// human must approve the action. A pointer, not a float64, so an
+	// operator can say "zero" and be believed: nil (the field absent from
+	// the file or the PUT body) means "no threshold", and Decide never
+	// holds solely because this field is unset; a non-nil zero means "hold
+	// on any priced call at all", a real and useful threshold, not the
+	// absence of one.
+	//
+	// @decided 2026-09-27: before this, the field was a plain float64 with
+	// yaml/json ",omitempty", so an explicit zero and an absent field
+	// decoded to the identical Go value and could never be told apart: a
+	// policy meaning "require approval above zero" silently behaved as "no
+	// threshold at all". Making zero a real, distinguishable value (rather
+	// than refusing it at load and PUT) keeps that policy sentence
+	// sayable, matches this field's own documented contract ("holds any
+	// action whose cost exceeds the threshold", and a threshold of zero is
+	// a threshold), and matches how DenyAboveUSD's sibling field on an
+	// approval_token, MaxCostUSD, already treats zero (README's approval
+	// token section: "0 is deliberately never treated as no ceiling").
+	// Refusing zero outright was rejected: since every currently-valid
+	// policy file that simply never mentions this field also decodes to
+	// the Go zero value, "refuse an explicit zero" is only expressible at
+	// all once presence is tracked, at which point there is no reason left
+	// to forbid the one value operators asked for over "no restriction".
+	RequireHumanAboveUSD *float64 `yaml:"require_human_above_usd,omitempty" json:"require_human_above_usd,omitempty"`
 	// DenyAboveUSD is a hard, non-approvable cost ceiling: internal/pdp's
 	// Decide denies any action whose estimated cost exceeds it outright, and
 	// no approval_token -- however validly minted -- can ever turn that deny
@@ -65,9 +86,18 @@ type Policy struct {
 	// approvable band between them and a hard ceiling above it; when a
 	// request exceeds both, the hard ceiling wins and require_human_above_usd
 	// is never reached (see internal/pdp's Decide doc comment for the exact
-	// rule order). Zero (the default) means "no hard ceiling": Decide never
-	// denies solely because this field is unset.
-	DenyAboveUSD float64 `yaml:"deny_above_usd,omitempty" json:"deny_above_usd,omitempty"`
+	// rule order).
+	//
+	// A pointer for the same reason as RequireHumanAboveUSD, and this is the
+	// field the defect measured 2026-09-27 was found on: a PUT of
+	// {"deny_above_usd":0} answered 200, the stored policy echoed back with
+	// no deny_above_usd field at all, and the next priced call through the
+	// enforcement point was allowed, because the old float64 could not tell
+	// "deny everything above zero" from "no ceiling was ever set". nil means
+	// "no hard ceiling", exactly as before; a non-nil zero denies any action
+	// whose cost is more than zero, "everything priced" being exactly what
+	// an operator writing deny_above_usd: 0 asked for.
+	DenyAboveUSD *float64 `yaml:"deny_above_usd,omitempty" json:"deny_above_usd,omitempty"`
 	// MaxSteps caps how many steps a run may take. Enforced by
 	// internal/pdp's Decide against the request's declared Steps: once
 	// Steps reaches or exceeds MaxSteps, the request denies. Zero (the
@@ -175,8 +205,9 @@ func (s *Set) Policies() []Policy {
 }
 
 // RequiresHumanApproval reports whether any loaded policy sets a
-// require_human_above_usd threshold above zero, i.e. whether Decide can
-// ever produce a hold for this Set. main uses it at startup to warn when
+// require_human_above_usd threshold at all, including an explicit zero
+// (which holds on any priced call), i.e. whether Decide can ever produce a
+// hold for this Set. main uses it at startup to warn when
 // WARDRYX_APPROVAL_SECRET is empty but a hold could actually occur: without
 // the secret, the approvals-decide grant path fails closed (internal/api,
 // internal/approval.ErrNoSecret) rather than minting an approval_token.
@@ -185,7 +216,7 @@ func (s *Set) RequiresHumanApproval() bool {
 		return false
 	}
 	for _, c := range s.policies {
-		if c.RequireHumanAboveUSD > 0 {
+		if c.RequireHumanAboveUSD != nil {
 			return true
 		}
 	}
@@ -386,10 +417,10 @@ func validate(p Policy) error {
 	if p.Target == "" {
 		return fmt.Errorf("policy %q: target is required", p.Name)
 	}
-	if p.RequireHumanAboveUSD < 0 {
+	if p.RequireHumanAboveUSD != nil && *p.RequireHumanAboveUSD < 0 {
 		return fmt.Errorf("policy %q: require_human_above_usd must not be negative", p.Name)
 	}
-	if p.DenyAboveUSD < 0 {
+	if p.DenyAboveUSD != nil && *p.DenyAboveUSD < 0 {
 		return fmt.Errorf("policy %q: deny_above_usd must not be negative", p.Name)
 	}
 	if p.MaxSteps < 0 {
@@ -426,6 +457,8 @@ func normalize(policies []Policy) []Policy {
 		np := p
 		np.DenyTool = sortedUnique(p.DenyTool)
 		np.AllowDomains = sortedUnique(p.AllowDomains)
+		np.RequireHumanAboveUSD = cloneUSD(p.RequireHumanAboveUSD)
+		np.DenyAboveUSD = cloneUSD(p.DenyAboveUSD)
 		if np.Name == "" {
 			np.Name = np.Target
 		}
@@ -438,6 +471,21 @@ func normalize(policies []Policy) []Policy {
 		return out[i].Name < out[j].Name
 	})
 	return out
+}
+
+// cloneUSD returns a fresh pointer holding the same value as p, or nil if p
+// is nil. normalize's defensive copy already gives every Policy its own
+// DenyTool/AllowDomains backing arrays (invariant 11's read side: a copy
+// of a struct is not a copy of what it points at); RequireHumanAboveUSD and
+// DenyAboveUSD are pointers for the same presence-tracking reason a slice
+// is a reference, so they get the same treatment here rather than being
+// the one field left aliased to the caller's own copy.
+func cloneUSD(p *float64) *float64 {
+	if p == nil {
+		return nil
+	}
+	v := *p
+	return &v
 }
 
 func sortedUnique(ss []string) []string {

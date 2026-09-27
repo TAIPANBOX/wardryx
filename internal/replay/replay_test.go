@@ -15,6 +15,11 @@ import (
 // proves it can reproduce what DID happen, so these tests are mostly about
 // the honesty of that first pass, and about refusing to guess when it cannot.
 
+// usd returns a pointer to v, for constructing a policy.Policy's
+// RequireHumanAboveUSD/DenyAboveUSD fields (*float64, so a caller can say
+// zero and be believed).
+func usd(v float64) *float64 { return &v }
+
 func compile(t *testing.T, allowDomains []string, threshold float64) *policy.Set {
 	t.Helper()
 	set, err := policy.Compile([]policy.Policy{{
@@ -22,7 +27,7 @@ func compile(t *testing.T, allowDomains []string, threshold float64) *policy.Set
 		Target:               "agent://acme.example/finance/*",
 		DenyTool:             []string{"send_wire_transfer"},
 		AllowDomains:         allowDomains,
-		RequireHumanAboveUSD: threshold,
+		RequireHumanAboveUSD: usd(threshold),
 		MaxSteps:             5,
 	}})
 	if err != nil {

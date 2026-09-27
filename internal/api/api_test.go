@@ -56,7 +56,7 @@ func newTestServerOpts(t *testing.T, singleUse bool, otel *wotel.Exporter) *Serv
 			Target:               "agent://acme.example/finance/*",
 			DenyTool:             []string{"send_wire_transfer"},
 			AllowDomains:         []string{"good.example.com"},
-			RequireHumanAboveUSD: 500,
+			RequireHumanAboveUSD: usd(500),
 			MaxSteps:             5,
 		},
 	})
@@ -1028,7 +1028,7 @@ func newTestServerWithEvents(t *testing.T, path string) (*Server, *event.Chained
 			Target:               "agent://acme.example/finance/*",
 			DenyTool:             []string{"send_wire_transfer"},
 			AllowDomains:         []string{"good.example.com"},
-			RequireHumanAboveUSD: 500,
+			RequireHumanAboveUSD: usd(500),
 			MaxSteps:             5,
 		},
 	})
