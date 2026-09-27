@@ -1,6 +1,7 @@
 package pdp
 
 import (
+	"errors"
 	"strings"
 	"testing"
 
@@ -186,5 +187,30 @@ func TestSubCentApprovalTokenCostExceededReasonIsNotMisleading(t *testing.T) {
 	}
 	if !strings.Contains(resp.Reason, "$0.0016") {
 		t.Errorf("Reason = %q, want it to name the exact requested cost $0.0016", resp.Reason)
+	}
+}
+
+// TestTheTwoFormatUSDCopiesAgree holds internal/approval's copy of formatUSD
+// to this package's: it exists because importing internal/pdp from
+// internal/approval would cycle (invariant 22), and two copies of one money
+// formatter drift silently. It reads approval's copy through the one place it
+// is used, the cost-exceeded error, over a sweep of whole, cent and sub-cent
+// amounts.
+func TestTheTwoFormatUSDCopiesAgree(t *testing.T) {
+	secret := []byte("test-secret")
+	for _, ceiling := range []float64{0.0005, 0.001, 0.0016, 0.01, 0.05, 0.1, 0.125, 1, 1.5, 12.34, 100, 0.000001} {
+		token, _, err := approval.MintApprovalToken(secret, "agent://x/bot", "run-1", []string{"tool"}, ceiling, approval.DefaultTTL)
+		if err != nil {
+			t.Fatalf("MintApprovalToken(%v): %v", ceiling, err)
+		}
+		requested := ceiling*3 + 0.0007
+		err = approval.VerifyApprovalToken(secret, token, "agent://x/bot", "run-1", []string{"tool"}, requested)
+		if !errors.Is(err, approval.ErrTokenCostExceeded) {
+			t.Fatalf("ceiling %v: got %v, want ErrTokenCostExceeded", ceiling, err)
+		}
+		want := "approved ceiling " + formatUSD(ceiling) + " exceeded by requested " + formatUSD(requested)
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("ceiling %v: approval says %q, this package formats %q", ceiling, err.Error(), want)
+		}
 	}
 }
