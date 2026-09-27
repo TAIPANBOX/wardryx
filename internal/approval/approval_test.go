@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -115,6 +116,35 @@ func TestVerifyCostCeiling(t *testing.T) {
 				t.Errorf("VerifyApprovalToken(estCostUSD=%v) = %v, want nil", c.cost, err)
 			}
 		})
+	}
+}
+
+// TestSubCentTokenCostExceededReasonIsNotMisleading mirrors invariant 22's
+// pdp.formatUSD fix (CLAUDE.md), for the one refusal reason that invariant
+// left open: ErrTokenCostExceeded's message formatted both amounts with
+// "%.2f", so a sub-cent MaxCostUSD and a sub-cent estCostUSD both round away
+// to "$0.00" and the operator reads "approved ceiling $0.00 exceeded by
+// requested $0.00", indistinguishable from an actual zero ceiling and no
+// help at all in explaining the refusal.
+func TestSubCentTokenCostExceededReasonIsNotMisleading(t *testing.T) {
+	secret := []byte("test-secret")
+	token, _, err := MintApprovalToken(secret, "agent://x/bot", "run-1", []string{"tool"}, 0.0005, DefaultTTL)
+	if err != nil {
+		t.Fatalf("MintApprovalToken: %v", err)
+	}
+	err = VerifyApprovalToken(secret, token, "agent://x/bot", "run-1", []string{"tool"}, 0.0016)
+	if !errors.Is(err, ErrTokenCostExceeded) {
+		t.Fatalf("VerifyApprovalToken(estCostUSD=0.0016) = %v, want ErrTokenCostExceeded", err)
+	}
+	got := err.Error()
+	if strings.Contains(got, "$0.00 exceeded by requested $0.00") {
+		t.Errorf("VerifyApprovalToken error = %q, ceiling and requested cost both rounded away to $0.00, not distinguishable from an actual zero ceiling", got)
+	}
+	if !strings.Contains(got, "$0.0005") {
+		t.Errorf("VerifyApprovalToken error = %q, want it to name the exact ceiling $0.0005", got)
+	}
+	if !strings.Contains(got, "$0.0016") {
+		t.Errorf("VerifyApprovalToken error = %q, want it to name the exact requested cost $0.0016", got)
 	}
 }
 

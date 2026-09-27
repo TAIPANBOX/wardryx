@@ -62,3 +62,15 @@ Feature: An explicit zero on a cost field is a real threshold, not "unset"
     When a call estimated at $0.006 is held
     Then the reason names the threshold as 0.005, never as $0.01
     # -> internal/pdp:TestSubCentRequireHumanAboveUSDReasonIsNotMisleading
+
+  Scenario: a token's cost-exceeded error prints its ceiling and the requested cost as themselves
+    Given an approval_token was minted with a max_cost_usd of $0.0005
+    When it is presented for a requested cost of $0.0016
+    Then verification fails naming the ceiling as $0.0005 and the requested cost as $0.0016, never both as $0.00
+    # -> internal/approval:TestSubCentTokenCostExceededReasonIsNotMisleading
+
+  Scenario: the same fix reaches the operator-visible /v1/decide reason, not only the internal error
+    Given a policy requires human approval above $0.001 and an approval_token was minted for $0.0005
+    When that token is presented for a requested cost of $0.0016
+    Then the decision is deny, and its reason names $0.0005 and $0.0016, never both as $0.00
+    # -> internal/pdp:TestSubCentApprovalTokenCostExceededReasonIsNotMisleading

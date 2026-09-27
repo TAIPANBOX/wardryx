@@ -37,6 +37,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -207,9 +208,34 @@ func VerifyApprovalToken(secret []byte, token, agentID, runID string, tools []st
 		return ErrTokenBinding
 	}
 	if estCostUSD > c.MaxCostUSD {
-		return fmt.Errorf("%w: approved ceiling $%.2f exceeded by requested $%.2f", ErrTokenCostExceeded, c.MaxCostUSD, estCostUSD)
+		return fmt.Errorf("%w: approved ceiling %s exceeded by requested %s", ErrTokenCostExceeded, formatUSD(c.MaxCostUSD), formatUSD(estCostUSD))
 	}
 	return nil
+}
+
+// formatUSD renders a USD amount for this error's text with just enough
+// precision that a sub-cent value is never misread as a different amount
+// (or, worse, as an actual zero). Byte-for-byte the same algorithm as
+// internal/pdp's formatUSD (CLAUDE.md invariant 22), duplicated rather than
+// imported: internal/pdp already imports internal/approval on the approval
+// branch (invariant 1's documented transitive path, pdp -> approval ->
+// store -> pgx), so the reverse import would be a cycle.
+//
+// Measured 2026-09-27, the same day invariant 22 fixed pdp's two policy-cost
+// reasons: a token's MaxCostUSD of $0.0005 and an estCostUSD of $0.0016 both
+// printed as "$0.00" under a plain "%.2f", so ErrTokenCostExceeded read
+// "approved ceiling $0.00 exceeded by requested $0.00", indistinguishable
+// from an actual zero ceiling and no help at all in explaining the refusal.
+//
+// The common case (a whole number of cents) still prints exactly as before,
+// "$100.00"; only a value the two-decimal form cannot represent exactly
+// falls back to the shortest exact decimal representation.
+func formatUSD(v float64) string {
+	twoDecimals := strconv.FormatFloat(v, 'f', 2, 64)
+	if parsed, err := strconv.ParseFloat(twoDecimals, 64); err == nil && parsed == v {
+		return "$" + twoDecimals
+	}
+	return "$" + strconv.FormatFloat(v, 'f', -1, 64)
 }
 
 func sign(secret []byte, payload string) string {
