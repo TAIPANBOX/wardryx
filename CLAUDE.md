@@ -693,7 +693,7 @@ decision outcome and every exported signature identical.
     still hold.
     *(test: `TestSubCentTokenCostExceededReasonIsNotMisleading` in
     `internal/approval`, and `TestSubCentApprovalTokenCostExceededReasonIsNotMisleading`
-    in `internal/pdp`, and `TestTheTwoFormatUSDCopiesAgree` in `internal/pdp`, which holds the two copies of `formatUSD` to each other over a sweep of amounts (a drifted copy re-planted and caught); the second of the two named above drives a full `Decide` call with a presented,
+    in `internal/pdp`, and `TestTheTwoFormatUSDCopiesAgree` in `internal/pdp`; `TestFormatUSDPrintsNoFloatNoise` in both packages, which requires a computed amount to print rounded to the micro-dollar ("$0.0055", not "$0.0055000000000000005") and a nonzero amount below a micro-dollar never to print as zero, red first on the shortest-representation form, which holds the two copies of `formatUSD` to each other over a sweep of amounts (a drifted copy re-planted and caught); the second of the two named above drives a full `Decide` call with a presented,
     over-ceiling approval_token and asserts the operator-visible `Reason`
     itself, not only the internal error text; both red-first against the
     unfixed `"%.2f"` call. Scenarios in

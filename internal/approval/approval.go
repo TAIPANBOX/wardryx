@@ -231,11 +231,30 @@ func VerifyApprovalToken(secret []byte, token, agentID, runID string, tools []st
 // "$100.00"; only a value the two-decimal form cannot represent exactly
 // falls back to the shortest exact decimal representation.
 func formatUSD(v float64) string {
-	twoDecimals := strconv.FormatFloat(v, 'f', 2, 64)
-	if parsed, err := strconv.ParseFloat(twoDecimals, 64); err == nil && parsed == v {
+	// Round to the micro-dollar, the unit money is counted in, and drop
+	// trailing zeros: a computed amount carries float64 noise
+	// ("0.0055000000000000005"), which is not a figure anybody set.
+	micro := strings.TrimRight(strings.TrimRight(strconv.FormatFloat(v, 'f', 6, 64), "0"), ".")
+	r, err := strconv.ParseFloat(micro, 64)
+	if err != nil {
+		return "$" + strconv.FormatFloat(v, 'f', -1, 64)
+	}
+	// Below a micro-dollar but not zero: never print it as zero, which is
+	// the defect this function exists to prevent.
+	if r == 0 && v != 0 {
+		return "$" + strconv.FormatFloat(v, 'g', -1, 64)
+	}
+	// A whole number of cents keeps the familiar two-decimal form.
+	if twoDecimals := strconv.FormatFloat(r, 'f', 2, 64); mustParse(twoDecimals) == r {
 		return "$" + twoDecimals
 	}
-	return "$" + strconv.FormatFloat(v, 'f', -1, 64)
+	return "$" + micro
+}
+
+// mustParse reads back a decimal strconv itself just formatted.
+func mustParse(s string) float64 {
+	f, _ := strconv.ParseFloat(s, 64)
+	return f
 }
 
 func sign(secret []byte, payload string) string {
