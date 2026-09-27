@@ -20,7 +20,7 @@ func testEngine(t *testing.T) *Engine {
 			Target:               "agent://acme.example/finance/*",
 			DenyTool:             []string{"send_wire_transfer", "delete_account"},
 			AllowDomains:         []string{"good.example.com", "reports.acme.example"},
-			RequireHumanAboveUSD: 500,
+			RequireHumanAboveUSD: usd(500),
 			MaxSteps:             5,
 			DenyIfUnattested:     true,
 		},
@@ -376,8 +376,8 @@ func TestDecideInvalidOnBehalfOfChainDeniesBeforeAnyPolicyRule(t *testing.T) {
 
 func TestDecidePicksStrictestExceededThreshold(t *testing.T) {
 	set, err := policy.Compile([]policy.Policy{
-		{Name: "loose", Target: "agent://x/*", RequireHumanAboveUSD: 1000},
-		{Name: "strict", Target: "agent://x/*", RequireHumanAboveUSD: 100},
+		{Name: "loose", Target: "agent://x/*", RequireHumanAboveUSD: usd(1000)},
+		{Name: "strict", Target: "agent://x/*", RequireHumanAboveUSD: usd(100)},
 	})
 	if err != nil {
 		t.Fatalf("policy.Compile: %v", err)
@@ -601,14 +601,14 @@ func TestDecideCacheable(t *testing.T) {
 		},
 		{
 			name:          "false: matched policy sets require_human_above_usd",
-			policies:      []policy.Policy{{Target: "agent://x/*", RequireHumanAboveUSD: 100}},
+			policies:      []policy.Policy{{Target: "agent://x/*", RequireHumanAboveUSD: usd(100)}},
 			req:           DecideRequest{AgentID: "agent://x/bot"},
 			wantDecision:  Allow,
 			wantCacheable: false,
 		},
 		{
 			name:          "false: matched policy sets deny_above_usd",
-			policies:      []policy.Policy{{Target: "agent://x/*", DenyAboveUSD: 1000}},
+			policies:      []policy.Policy{{Target: "agent://x/*", DenyAboveUSD: usd(1000)}},
 			req:           DecideRequest{AgentID: "agent://x/bot", EstCostUSD: 10},
 			wantDecision:  Allow,
 			wantCacheable: false,
@@ -769,7 +769,7 @@ func TestDecideDenyToolNormalization(t *testing.T) {
 // cost at or under the ceiling is not denied by this rule.
 func TestDecideDenyAboveUSDHardCeiling(t *testing.T) {
 	set, err := policy.Compile([]policy.Policy{
-		{Name: "hard-ceiling", Target: "agent://x/*", DenyAboveUSD: 1000},
+		{Name: "hard-ceiling", Target: "agent://x/*", DenyAboveUSD: usd(1000)},
 	})
 	if err != nil {
 		t.Fatalf("policy.Compile: %v", err)
@@ -849,7 +849,7 @@ func TestDecideDenyAboveUSDHardCeiling(t *testing.T) {
 // ApprovalTokenRequired stays false.
 func TestDecideDenyAboveUSDPrecedesRequireHumanAboveUSDHold(t *testing.T) {
 	set, err := policy.Compile([]policy.Policy{
-		{Name: "both", Target: "agent://x/*", DenyAboveUSD: 1000, RequireHumanAboveUSD: 100},
+		{Name: "both", Target: "agent://x/*", DenyAboveUSD: usd(1000), RequireHumanAboveUSD: usd(100)},
 	})
 	if err != nil {
 		t.Fatalf("policy.Compile: %v", err)

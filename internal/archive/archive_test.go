@@ -16,6 +16,11 @@ import (
 // anything can be fetched back, byte for byte, and can never be confused
 // with a different set that happens to share its short digest.
 
+// usd returns a pointer to v, for constructing a policy.Policy's
+// RequireHumanAboveUSD/DenyAboveUSD fields (*float64, so a caller can say
+// zero and be believed).
+func usd(v float64) *float64 { return &v }
+
 func set(t *testing.T, domains ...string) *policy.Set {
 	t.Helper()
 	compiled, err := policy.Compile([]policy.Policy{{
@@ -23,8 +28,8 @@ func set(t *testing.T, domains ...string) *policy.Set {
 		Target:               "agent://acme.example/finance/*",
 		DenyTool:             []string{"send_wire_transfer"},
 		AllowDomains:         domains,
-		RequireHumanAboveUSD: 500,
-		DenyAboveUSD:         5000,
+		RequireHumanAboveUSD: usd(500),
+		DenyAboveUSD:         usd(5000),
 		MaxSteps:             5,
 		DenyIfUnattested:     true,
 	}})

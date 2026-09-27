@@ -6,7 +6,7 @@
 
 [![CI](https://github.com/TAIPANBOX/wardryx/actions/workflows/ci.yml/badge.svg)](https://github.com/TAIPANBOX/wardryx/actions/workflows/ci.yml)
 ![Go](https://img.shields.io/badge/go-1.27-00ADD8.svg)
-![tests](https://img.shields.io/badge/tests-302-brightgreen.svg)
+![tests](https://img.shields.io/badge/tests-310-brightgreen.svg)
 ![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)
 ![Status](https://img.shields.io/badge/status-deterministic%20PDP-2dd4bf.svg)
 
@@ -128,7 +128,7 @@ Wardryx sits next to, and imports the same shared contract as, the rest of the T
 <img src="docs/decisions.png" alt="Three decision cards: allow forwards the call, deny returns HTTP 403, hold returns HTTP 403 plus an approval_id awaiting approval" width="900">
 </div>
 
-Policies (`internal/policy`) load from a YAML or JSON file or directory. Each policy targets an `agent://` glob and can set `deny_tool`, `allow_domains`, `require_human_above_usd`, `deny_above_usd`, `max_steps`, `deny_if_unattested`, `max_chain_depth`, `require_root_principal`, and `deny_if_chain_unproven`; they compile into an in-memory matcher with a stable `PolicyVersion` (a short sha256 hex digest of the normalized rule set), so every decision ties back to the exact rule generation that produced it.
+Policies (`internal/policy`) load from a YAML or JSON file or directory. Each policy targets an `agent://` glob and can set `deny_tool`, `allow_domains`, `require_human_above_usd`, `deny_above_usd`, `max_steps`, `deny_if_unattested`, `max_chain_depth`, `require_root_principal`, and `deny_if_chain_unproven`; they compile into an in-memory matcher with a stable `PolicyVersion` (a short sha256 hex digest of the normalized rule set), so every decision ties back to the exact rule generation that produced it. Leaving `require_human_above_usd` or `deny_above_usd` out of a policy means no threshold or ceiling at all, exactly as before; writing either one as `0` is not the same thing and means what it says, a threshold or ceiling of zero, holding or denying any priced call (see CLAUDE.md's zero-ceiling invariant).
 
 `Engine.Decide` (`internal/pdp`) matches policies for the requesting agent and applies, in order: an invalid delegation chain denies outright; a requested tool in `deny_tool` denies; a chain longer than a matched `max_chain_depth` denies; a chain whose root is not one a matched `require_root_principal` names denies; a matched `deny_if_chain_unproven` policy on a request the enforcement point did not verify denies; a matched `deny_if_unattested` policy with no live attestation denies; a run's accumulated step count at or over a matched `max_steps` denies; a declared domain absent from a matched `allow_domains` denies; an estimated cost over a matched `deny_above_usd` hard ceiling denies outright (no approval can authorize it, and this precedes the hold below); an estimated cost over a matched `require_human_above_usd` threshold holds, unless a valid `approval_token` is presented (then it allows) or an *invalid* token is presented (then it denies, rather than being quietly treated the same as no token at all); otherwise it allows. A deny from any rule wins outright and short-circuits the rest.
 

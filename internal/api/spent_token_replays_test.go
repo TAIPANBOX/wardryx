@@ -29,7 +29,7 @@ func TestASpentTokenHoldReplaysAsApprovalSpent(t *testing.T) {
 	}
 	set, err := policy.Compile([]policy.Policy{{
 		Name: "finance-guardrail", Target: "agent://acme.example/finance/*",
-		RequireHumanAboveUSD: 500,
+		RequireHumanAboveUSD: usd(500),
 	}})
 	if err != nil {
 		t.Fatalf("policy.Compile: %v", err)
@@ -94,7 +94,7 @@ func TestARefusedTokenDenyReplaysAsApprovalRefused(t *testing.T) {
 	}
 	set, err := policy.Compile([]policy.Policy{{
 		Name: "finance-guardrail", Target: "agent://acme.example/finance/*",
-		RequireHumanAboveUSD: 500,
+		RequireHumanAboveUSD: usd(500),
 	}})
 	if err != nil {
 		t.Fatalf("policy.Compile: %v", err)

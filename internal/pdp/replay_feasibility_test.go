@@ -71,7 +71,7 @@ func compile(t *testing.T, allowDomains []string) *policy.Set {
 		Target:               "agent://acme.example/finance/*",
 		AllowDomains:         allowDomains,
 		MaxSteps:             10,
-		RequireHumanAboveUSD: 500,
+		RequireHumanAboveUSD: usd(500),
 	}})
 	if err != nil {
 		t.Fatalf("policy.Compile: %v", err)
