@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/TAIPANBOX/wardryx/internal/approval"
 	"github.com/TAIPANBOX/wardryx/internal/policy"
 )
 
@@ -140,5 +141,50 @@ func TestSubCentRequireHumanAboveUSDReasonIsNotMisleading(t *testing.T) {
 	}
 	if !strings.Contains(resp.Reason, "0.005") {
 		t.Errorf("Reason = %q, want it to print the threshold as 0.005", resp.Reason)
+	}
+}
+
+// TestSubCentApprovalTokenCostExceededReasonIsNotMisleading is the third
+// case in the same family, on the operator-visible /v1/decide Reason rather
+// than internal/approval's error text directly: a presented approval_token
+// whose verification fails with ErrTokenCostExceeded has its error embedded
+// via "%v" into resp.Reason (see the deny branch of Decide, "; %s (%v)"
+// after ReasonApprovalRefused). Before internal/approval's formatUSD fix, a
+// sub-cent MaxCostUSD and a sub-cent presented cost both printed as "$0.00"
+// in that embedded text too, so the reason an operator actually reads off
+// /v1/decide said "presented approval_token is invalid (approval: ...
+// approved ceiling $0.00 exceeded by requested $0.00)", indistinguishable
+// from an actual zero ceiling.
+func TestSubCentApprovalTokenCostExceededReasonIsNotMisleading(t *testing.T) {
+	set, err := policy.Compile([]policy.Policy{
+		{Name: "penny-gate", Target: "agent://x/*", RequireHumanAboveUSD: usd(0.001)},
+	})
+	if err != nil {
+		t.Fatalf("policy.Compile: %v", err)
+	}
+	engine := New(set, []byte(testSecret))
+
+	token, _, err := approval.MintApprovalToken([]byte(testSecret), "agent://x/bot", "run-1", nil, 0.0005, approval.DefaultTTL)
+	if err != nil {
+		t.Fatalf("MintApprovalToken: %v", err)
+	}
+
+	resp := engine.Decide(DecideRequest{
+		AgentID:       "agent://x/bot",
+		RunID:         "run-1",
+		EstCostUSD:    0.0016,
+		ApprovalToken: token,
+	})
+	if resp.Decision != Deny {
+		t.Fatalf("Decision = %q (reason: %s), want %q: a token approved for $0.0005 must not authorize $0.0016", resp.Decision, resp.Reason, Deny)
+	}
+	if strings.Contains(resp.Reason, "$0.00 exceeded by requested $0.00") {
+		t.Errorf("Reason = %q, ceiling and requested cost both rounded away to $0.00, not distinguishable from an actual zero ceiling", resp.Reason)
+	}
+	if !strings.Contains(resp.Reason, "$0.0005") {
+		t.Errorf("Reason = %q, want it to name the token's exact ceiling $0.0005", resp.Reason)
+	}
+	if !strings.Contains(resp.Reason, "$0.0016") {
+		t.Errorf("Reason = %q, want it to name the exact requested cost $0.0016", resp.Reason)
 	}
 }

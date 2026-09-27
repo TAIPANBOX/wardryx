@@ -669,3 +669,32 @@ decision outcome and every exported signature identical.
     `TestDecideDenyAboveUSDHardCeiling`'s "exactly at the ceiling" case for
     the boundary the zero fix must not move. Scenarios in
     `features/zero-value-policy-ceilings.feature`.)*
+
+    **The same defect, found in a third refusal reason on 2026-09-27, after
+    this invariant's first two fixes shipped.** `internal/approval`'s
+    `ErrTokenCostExceeded` (`VerifyApprovalToken`, returned when a presented
+    `est_cost_usd` exceeds an approval_token's `MaxCostUSD`) still built its
+    message with a plain `"%.2f"`: a token minted for a `MaxCostUSD` of
+    $0.0005, presented for $0.0016, read "approved ceiling $0.00 exceeded by
+    requested $0.00", both amounts rounded away and indistinguishable from an
+    actual zero ceiling. This error reaches an operator two ways: directly
+    from `internal/approval`, and embedded via `Decide`'s `"; %s (%v)"` after
+    `ReasonApprovalRefused` into the `Reason` a `/v1/decide` caller actually
+    reads (`internal/pdp/pdp.go`, the deny branch of `overThreshold`).
+
+    Fixed the same way as the first two: `internal/approval` gained its own
+    unexported `formatUSD`, byte-for-byte the same algorithm as
+    `internal/pdp`'s (duplicated rather than imported, since `internal/pdp`
+    already imports `internal/approval` on the documented transitive path of
+    invariant 1, so the reverse import would be a cycle). Cent-and-above
+    output is unchanged: `formatUSD` prints the ordinary two-decimal form
+    whenever it round-trips back to the exact value, so `TestVerifyCostCeiling`'s
+    existing "a cent over the ceiling" and "exactly at the ceiling" cases
+    still hold.
+    *(test: `TestSubCentTokenCostExceededReasonIsNotMisleading` in
+    `internal/approval`, and `TestSubCentApprovalTokenCostExceededReasonIsNotMisleading`
+    in `internal/pdp`, which drives a full `Decide` call with a presented,
+    over-ceiling approval_token and asserts the operator-visible `Reason`
+    itself, not only the internal error text; both red-first against the
+    unfixed `"%.2f"` call. Scenarios in
+    `features/zero-value-policy-ceilings.feature`.)*
