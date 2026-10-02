@@ -206,6 +206,18 @@ func sortedKeys(m map[string]bool) []string {
 	return out
 }
 
+// unsetAndDerive unsets every name the code reads, so FromEnv and envSet see
+// what an operator who set nothing sees, and returns codeDefaults. t.Setenv
+// first, so the original value comes back after the test.
+func unsetAndDerive(t *testing.T, read map[string]bool) map[string]string {
+	t.Helper()
+	for name := range read {
+		t.Setenv(name, "")
+		os.Unsetenv(name)
+	}
+	return codeDefaults(t)
+}
+
 // checkReadmeEnvDefaults returns every disagreement between the README at
 // path and the code, so a planted fault can be asserted on without a
 // second README on disk.
@@ -213,14 +225,7 @@ func checkReadmeEnvDefaults(t *testing.T, path string) []string {
 	t.Helper()
 	read := namesTheCodeReads(t)
 	table := readmeDefaults(t, path)
-
-	// Unset every name, so FromEnv and envSet see what an operator who set
-	// nothing sees. t.Setenv first, so the original value comes back after.
-	for name := range read {
-		t.Setenv(name, "")
-		os.Unsetenv(name)
-	}
-	derived := codeDefaults(t)
+	derived := unsetAndDerive(t, read)
 
 	var problems []string
 	all := map[string]bool{}
