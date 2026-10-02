@@ -698,3 +698,29 @@ decision outcome and every exported signature identical.
     itself, not only the internal error text; both red-first against the
     unfixed `"%.2f"` call. Scenarios in
     `features/zero-value-policy-ceilings.feature`.)*
+
+23. **The README's environment table states the default the code uses, for
+    every variable the code reads, and for no other.** The table's Default
+    column is the only place an operator reads what an unset variable means.
+    From 1.0 (#53) until #78 its `WARDRYX_APPROVAL_SINGLE_USE` row said the
+    default was `false`, the pre-1.0 reusable token, while `parseBoolClosed`
+    had made it single-use: the README told an operator that the replay-safe
+    setting was one they had to opt into, and nothing compared the two.
+
+    Three sets are held equal: the `WARDRYX_*` names any non-test Go file
+    reads with `os.Getenv`/`os.LookupEnv` and a literal name, the table's
+    rows, and the derivations in the test's `codeDefaults`. Each derivation
+    reads the code `serve` runs (`config.FromEnv`, `api.DefaultUnansweredAfter`,
+    and the `-addr` fallback literal read out of `main.go` exactly as
+    `internal/manifest` reads it) rather than restating a value, so a
+    default that moves in code turns the table red until the cell moves too.
+    A Default cell is `(empty)` or one backticked value; durations compare
+    as durations. The Meaning column does not restate defaults, so the
+    column is the one copy.
+    *(test: `TestReadmeEnvTableStatesTheDefaultsTheCodeUses`, red first on
+    the pre-#78 `false` cell and on seven more planted faults; its teeth are
+    `TestReadmeEnvCheckCatchesPlantedFaults`, four planted faults and one
+    non-fault, itself red when the comparison is neutered. Its limits: prose
+    outside the table (the security notes, the status list) is not read, so
+    a default restated there can still drift; and the unanswered sweep's
+    derivation mirrors `runServe`'s unset branch rather than calling it.)*

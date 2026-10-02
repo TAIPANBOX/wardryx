@@ -6,7 +6,7 @@
 
 [![CI](https://github.com/TAIPANBOX/wardryx/actions/workflows/ci.yml/badge.svg)](https://github.com/TAIPANBOX/wardryx/actions/workflows/ci.yml)
 ![Go](https://img.shields.io/badge/go-1.27-00ADD8.svg)
-![tests](https://img.shields.io/badge/tests-315-brightgreen.svg)
+![tests](https://img.shields.io/badge/tests-317-brightgreen.svg)
 ![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)
 ![Status](https://img.shields.io/badge/status-deterministic%20PDP-2dd4bf.svg)
 
@@ -495,21 +495,21 @@ would the candidate have taken differently.
 
 ## Configuration
 
-Every `WARDRYX_*` variable is read once at process startup (`internal/config`), never per-request. Each `serve` flag falls back to its environment variable when the flag itself is left unset.
+Every `WARDRYX_*` variable is read once at process startup (`internal/config`), never per-request. Each `serve` flag falls back to its environment variable when the flag itself is left unset. The Default column is what applies when the variable is unset, and `TestReadmeEnvTableStatesTheDefaultsTheCodeUses` checks every cell against the code.
 
-| Variable | Flag | Meaning |
-| --- | --- | --- |
-| `WARDRYX_ADDR` | `-addr` | Listen address (default `:8090`) |
-| `WARDRYX_KEYS` | (none) | `key:org[:role],...` bearer keys; with no valid entry, `serve` refuses to start unless `WARDRYX_ALLOW_DEVKEY` is set (see below) |
-| `WARDRYX_ALLOW_DEVKEY` | (none) | Explicit opt-in to the insecure dev key `devkey` -> `default`/`admin` when `WARDRYX_KEYS` has no valid entry; refused outright (not merely warned about) together with a non-loopback `-addr` |
-| `WARDRYX_DB` | `-db` | Postgres DSN; empty uses the in-memory store |
-| `WARDRYX_POLICY` | `-policy` | Policy file or directory (YAML/JSON); empty allows every request |
-| `WARDRYX_EVENTS_PATH` | `-events` | NDJSON agent-event output path; empty disables events |
-| `WARDRYX_POLICY_ARCHIVE` | - | Directory keeping every policy set this process makes effective, named by its `policy_version`; empty disables it, and a decision recorded without it names a version nothing can produce later |
-| `WARDRYX_APPROVAL_SECRET` | (none) | HMAC key for approval tokens; unset fails closed on any mint/verify |
-| `WARDRYX_APPROVAL_SINGLE_USE` | (none) | single-use by default since 1.0: unset, unparsable or `true` makes each granted token allow exactly one `/v1/decide` call; only an explicit `false` keeps a token reusable for its full TTL (see [Stateless human-in-the-loop](#stateless-human-in-the-loop)) |
-| `WARDRYX_APPROVAL_UNANSWERED_AFTER` | (none) | How long a hold may sit undecided before one `approval_unanswered` event is raised for it; a Go duration, unset means 15m, `0` turns the sweep off (see [The hold nobody decided](#the-hold-nobody-decided)) |
-| `WARDRYX_OTLP_ENDPOINT` | `-otlp-endpoint` | OTLP/HTTP endpoint for decision spans (see [OTLP export](#otlp-export)); empty disables it |
+| Variable | Flag | Default | Meaning |
+| --- | --- | --- | --- |
+| `WARDRYX_ADDR` | `-addr` | `:8090` | Listen address |
+| `WARDRYX_KEYS` | (none) | (empty) | `key:org[:role],...` bearer keys; with no valid entry, `serve` refuses to start unless `WARDRYX_ALLOW_DEVKEY` is set (see below) |
+| `WARDRYX_ALLOW_DEVKEY` | (none) | `false` | Explicit opt-in to the insecure dev key `devkey` -> `default`/`admin` when `WARDRYX_KEYS` has no valid entry; refused outright (not merely warned about) together with a non-loopback `-addr` |
+| `WARDRYX_DB` | `-db` | (empty) | Postgres DSN; empty uses the in-memory store |
+| `WARDRYX_POLICY` | `-policy` | (empty) | Policy file or directory (YAML/JSON); empty allows every request |
+| `WARDRYX_EVENTS_PATH` | `-events` | (empty) | NDJSON agent-event output path; empty disables events |
+| `WARDRYX_POLICY_ARCHIVE` | - | (empty) | Directory keeping every policy set this process makes effective, named by its `policy_version`; empty disables it, and a decision recorded without it names a version nothing can produce later |
+| `WARDRYX_APPROVAL_SECRET` | (none) | (empty) | HMAC key for approval tokens; unset fails closed on any mint/verify |
+| `WARDRYX_APPROVAL_SINGLE_USE` | (none) | `true` | `true`, or any value that does not parse as a bool, makes each granted token allow exactly one `/v1/decide` call; only an explicit `false` keeps a token reusable for its full TTL (see [Stateless human-in-the-loop](#stateless-human-in-the-loop)) |
+| `WARDRYX_APPROVAL_UNANSWERED_AFTER` | (none) | `15m` | How long a hold may sit undecided before one `approval_unanswered` event is raised for it; a Go duration; `0` turns the sweep off (see [The hold nobody decided](#the-hold-nobody-decided)) |
+| `WARDRYX_OTLP_ENDPOINT` | `-otlp-endpoint` | (empty) | OTLP/HTTP endpoint for decision spans (see [OTLP export](#otlp-export)); empty disables it |
 
 The `[:role]` segment of a `WARDRYX_KEYS` entry is one of `admin` (every endpoint, including `POST /v1/approvals/{id}/decide`) or `viewer` (every other authenticated endpoint), and defaults to `admin` when the segment is omitted.
 
