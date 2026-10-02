@@ -209,7 +209,7 @@ The token is a compact `base64url(claims) + "." + hex(HMAC-SHA256)` string, wher
 
 Since 1.0 a granted token is **single-use**: the first `/v1/decide` call that redeems it records the redemption, and a second presentation of the same token returns a fresh hold rather than an allow, because replaying an approval is the whole attack. `WARDRYX_APPROVAL_SINGLE_USE=false` restores the pre-1.0 behaviour, a token valid for every `/v1/decide` call within its TTL window, so steps 5-6 above can repeat; an unset or unparsable value is single-use, never silently reusable.
 
-Single-use redemption tracking has the same durability split as approval holds themselves: with `-db`/`WARDRYX_DB` set, `TryRedeem` is a Postgres `INSERT .. ON CONFLICT DO NOTHING` (atomic across every wardryx instance sharing that database); with no `-db`, redemptions live in one process's memory only, so single-use is enforced per-process, not across multiple wardryx instances behind a load balancer. `serve` prints a startup warning to stderr when `WARDRYX_APPROVAL_SINGLE_USE=true` is combined with no `-db`, so this caveat is never silent.
+Single-use redemption tracking has the same durability split as approval holds themselves: with `-db`/`WARDRYX_DB` set, `TryRedeem` is a Postgres `INSERT .. ON CONFLICT DO NOTHING` (atomic across every wardryx instance sharing that database); with no `-db`, redemptions live in one process's memory only, so single-use is enforced per-process, not across multiple wardryx instances behind a load balancer. `serve` prints a startup warning to stderr whenever single-use is on (the default, or `WARDRYX_APPROVAL_SINGLE_USE=true`) with no `-db`, so this caveat is never silent.
 
 ### The hold nobody decided
 
@@ -328,7 +328,7 @@ Wardryx itself never acts: it is the enforcement point, TokenFuse's proxy or any
 | fail-open | the enforcement point treats an unreachable Wardryx as `allow` | availability wins; an outage silently disables policy |
 | fail-closed | the enforcement point treats an unreachable Wardryx as `deny` | policy wins; an outage blocks every governed action until Wardryx recovers |
 
-This mirrors Wardryx's own stated defaults for its *own* availability: with no `-policy`/`WARDRYX_POLICY` configured, `serve` starts anyway and allows every request rather than refusing to start, an explicit, logged choice, not a silent one (see [Security](#security)). Approval tokens follow the same "explicit over implicit" rule: reusable for the full TTL by default (10 minutes), or set `WARDRYX_APPROVAL_SINGLE_USE=true` so each granted token redeems exactly once before falling back to a fresh hold (see [Stateless human-in-the-loop](#stateless-human-in-the-loop)).
+This mirrors Wardryx's own stated defaults for its *own* availability: with no `-policy`/`WARDRYX_POLICY` configured, `serve` starts anyway and allows every request rather than refusing to start, an explicit, logged choice, not a silent one (see [Security](#security)). Approval tokens follow the same "explicit over implicit" rule: single-use by default since 1.0, so each granted token redeems exactly once before falling back to a fresh hold, and reuse for the full TTL (10 minutes) happens only when an operator sets `WARDRYX_APPROVAL_SINGLE_USE=false` (see [Stateless human-in-the-loop](#stateless-human-in-the-loop)).
 
 ---
 
@@ -507,7 +507,7 @@ Every `WARDRYX_*` variable is read once at process startup (`internal/config`), 
 | `WARDRYX_EVENTS_PATH` | `-events` | NDJSON agent-event output path; empty disables events |
 | `WARDRYX_POLICY_ARCHIVE` | - | Directory keeping every policy set this process makes effective, named by its `policy_version`; empty disables it, and a decision recorded without it names a version nothing can produce later |
 | `WARDRYX_APPROVAL_SECRET` | (none) | HMAC key for approval tokens; unset fails closed on any mint/verify |
-| `WARDRYX_APPROVAL_SINGLE_USE` | (none) | `true` makes each granted token allow exactly one `/v1/decide` call; default `false` keeps a token reusable for its full TTL (see [Stateless human-in-the-loop](#stateless-human-in-the-loop)) |
+| `WARDRYX_APPROVAL_SINGLE_USE` | (none) | single-use by default since 1.0: unset, unparsable or `true` makes each granted token allow exactly one `/v1/decide` call; only an explicit `false` keeps a token reusable for its full TTL (see [Stateless human-in-the-loop](#stateless-human-in-the-loop)) |
 | `WARDRYX_APPROVAL_UNANSWERED_AFTER` | (none) | How long a hold may sit undecided before one `approval_unanswered` event is raised for it; a Go duration, unset means 15m, `0` turns the sweep off (see [The hold nobody decided](#the-hold-nobody-decided)) |
 | `WARDRYX_OTLP_ENDPOINT` | `-otlp-endpoint` | OTLP/HTTP endpoint for decision spans (see [OTLP export](#otlp-export)); empty disables it |
 
@@ -544,7 +544,7 @@ Wardryx is itself a security-relevant component, so a few of its own defaults ar
 - With no `-db`/`WARDRYX_DB` configured, approval state lives only in process memory and is lost on restart.
 - A malformed policy file is a **hard error**: `serve` and `check` refuse to start rather than silently loading a smaller rule set than intended.
 - `WARDRYX_APPROVAL_SECRET` unset fails every mint/verify closed; there is no fallback to an unsigned or always-valid token.
-- `WARDRYX_APPROVAL_SINGLE_USE=true` with no `-db`/`WARDRYX_DB` only enforces single-use within that one process, not across multiple wardryx instances sharing the load; `serve` warns about this combination at startup rather than silently giving weaker guarantees than the name implies.
+- Single-use approval tokens (the default since 1.0) with no `-db`/`WARDRYX_DB` are only enforced within that one process, not across multiple wardryx instances sharing the load; `serve` warns about this combination at startup rather than silently giving weaker guarantees than the name implies.
 - `/v1/policies` grants whoever holds an admin bearer key the ability to change enforcement rules at runtime, same trust level `/v1/approvals/{id}/decide` already requires -- there is no separate, narrower role for policy management. A leaked admin key is a policy-tampering risk, not just an approvals-tampering one.
 
 ---
@@ -553,7 +553,7 @@ Wardryx is itself a security-relevant component, so a few of its own defaults ar
 
 - [x] Declarative policy model (YAML/JSON, `agent://` glob targeting, stable `PolicyVersion`)
 - [x] Deterministic decision engine: `deny_tool`, `deny_if_unattested`, `max_steps`, `allow_domains`, `require_human_above_usd`
-- [x] Stateless human-in-the-loop: HMAC-signed approval tokens, configurable TTL, optional single-use redemption (`WARDRYX_APPROVAL_SINGLE_USE`)
+- [x] Stateless human-in-the-loop: HMAC-signed approval tokens, configurable TTL, single-use redemption by default, switchable off with `WARDRYX_APPROVAL_SINGLE_USE=false`
 - [x] HTTP API: `/v1/decide`, `/v1/approvals/{id}/decide`, `/v1/approvals`, `/v1/policies` (admin policy-as-code, see [Policy-as-code](#policy-as-code)), `/healthz` (liveness), `/readyz` (readiness: reads the store, see [When the store is down](#when-the-store-is-down)), bearer-key auth with org/role scoping
 - [x] Storage: Postgres (`pgx/v5`, embedded schema) and in-memory, behind one `Store` interface; approvals and policy-as-code documents
 - [x] `agent-event` NDJSON output (`policy_allow` / `policy_deny` / `approval_*` / `policy_updated`)
