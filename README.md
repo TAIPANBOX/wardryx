@@ -6,7 +6,7 @@
 
 [![CI](https://github.com/TAIPANBOX/wardryx/actions/workflows/ci.yml/badge.svg)](https://github.com/TAIPANBOX/wardryx/actions/workflows/ci.yml)
 ![Go](https://img.shields.io/badge/go-1.27-00ADD8.svg)
-![tests](https://img.shields.io/badge/tests-317-brightgreen.svg)
+![tests](https://img.shields.io/badge/tests-319-brightgreen.svg)
 ![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)
 ![Status](https://img.shields.io/badge/status-deterministic%20PDP-2dd4bf.svg)
 
@@ -209,7 +209,7 @@ The token is a compact `base64url(claims) + "." + hex(HMAC-SHA256)` string, wher
 
 Since 1.0 a granted token is **single-use**: the first `/v1/decide` call that redeems it records the redemption, and a second presentation of the same token returns a fresh hold rather than an allow, because replaying an approval is the whole attack. `WARDRYX_APPROVAL_SINGLE_USE=false` restores the pre-1.0 behaviour, a token valid for every `/v1/decide` call within its TTL window, so steps 5-6 above can repeat; an unset or unparsable value is single-use, never silently reusable.
 
-Single-use redemption tracking has the same durability split as approval holds themselves: with `-db`/`WARDRYX_DB` set, `TryRedeem` is a Postgres `INSERT .. ON CONFLICT DO NOTHING` (atomic across every wardryx instance sharing that database); with no `-db`, redemptions live in one process's memory only, so single-use is enforced per-process, not across multiple wardryx instances behind a load balancer. `serve` prints a startup warning to stderr whenever single-use is on (the default, or `WARDRYX_APPROVAL_SINGLE_USE=true`) with no `-db`, so this caveat is never silent.
+Single-use redemption tracking has the same durability split as approval holds themselves: with `-db`/`WARDRYX_DB` set, `TryRedeem` is a Postgres `INSERT .. ON CONFLICT DO NOTHING` (atomic across every wardryx instance sharing that database); with no `-db`, redemptions live in one process's memory only, so single-use is enforced per-process, not across multiple wardryx instances behind a load balancer. `serve` prints a startup warning to stderr whenever single-use is on (anything but an explicit `WARDRYX_APPROVAL_SINGLE_USE=false`) with no `-db`, so this caveat is never silent.
 
 ### The hold nobody decided
 
@@ -495,7 +495,7 @@ would the candidate have taken differently.
 
 ## Configuration
 
-Every `WARDRYX_*` variable is read once at process startup (`internal/config`), never per-request. Each `serve` flag falls back to its environment variable when the flag itself is left unset. The Default column is what applies when the variable is unset, and `TestReadmeEnvTableStatesTheDefaultsTheCodeUses` checks every cell against the code.
+Every `WARDRYX_*` variable is read once at process startup (`internal/config`), never per-request. Each `serve` flag falls back to its environment variable when the flag itself is left unset. The Default column is what applies when the variable is unset, and `TestReadmeEnvTableStatesTheDefaultsTheCodeUses` checks every cell against the code; `TestReadmeProseNeverContradictsTheCodeDefaults` holds the rest of this README to the same defaults.
 
 | Variable | Flag | Default | Meaning |
 | --- | --- | --- | --- |

@@ -721,6 +721,30 @@ decision outcome and every exported signature identical.
     the pre-#78 `false` cell and on seven more planted faults; its teeth are
     `TestReadmeEnvCheckCatchesPlantedFaults`, four planted faults and one
     non-fault, itself red when the comparison is neutered. Its limits: prose
-    outside the table (the security notes, the status list) is not read, so
-    a default restated there can still drift; and the unanswered sweep's
-    derivation mirrors `runServe`'s unset branch rather than calling it.)*
+    outside the table is invariant 24's subject, not this test's; and the
+    unanswered sweep's derivation mirrors `runServe`'s unset branch rather
+    than calling it.)*
+
+24. **README prose outside the environment table never contradicts a
+    default the code uses.** The single-use default drifted in prose, not
+    only in the table: until #78, three sentences told an operator to set
+    `WARDRYX_APPROVAL_SINGLE_USE=true` to get what was already the default,
+    and the status list called it "optional". Prose cannot be parsed as a
+    table, so the test reads three claim shapes that need no understanding
+    of English, against the same `codeDefaults` invariant 23 uses:
+    `WARDRYX_X=V` where V is already X's default (an operator is never told
+    to set a variable to the value it has, so this describes an old default
+    as an opt-in); "`WARDRYX_X`, default V" within a short span of the name
+    with nothing backticked between, where V must be the code's default
+    ("15 minutes" reads as `15m`); and a switch that is on by default called
+    "optional" or "opt-in" in a sentence naming it. Code blocks are read
+    too, the environment table's rows are not.
+    *(test: `TestReadmeProseNeverContradictsTheCodeDefaults`, red first on
+    the real pre-#78 README, where it names all four drifted sentences, and
+    on a flipped `parseBoolClosed` and a changed `api.DefaultUnansweredAfter`
+    with the README unchanged; its teeth are
+    `TestReadmeProseCheckCatchesPlantedFaults`, six planted faults, three of
+    them verbatim pre-#78 sentences, and two non-faults, itself red when
+    `sameSetting` is neutered. Its limits: a default restated in words that
+    name no variable ("tokens are reusable by default") and paraphrase in
+    general are not read; those stay with review.)*
