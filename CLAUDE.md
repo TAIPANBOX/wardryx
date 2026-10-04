@@ -748,3 +748,124 @@ decision outcome and every exported signature identical.
     `sameSetting` is neutered. Its limits: a default restated in words that
     name no variable ("tokens are reusable by default") and paraphrase in
     general are not read; those stay with review.)*
+
+25. **A typed risk signal can add a hold and nothing else.** `@decided
+    2026-10-04`: the first consumer of a typed answer is this plane, a signal may
+    turn a call into a hold and never into a deny, and the signal is recorded so
+    a replay reproduces the decision. A signal is a
+    probability about the world ("this tool call is destructive, 0.95"), and a
+    probability must never refuse an action by itself. `hold_if_signal` is the
+    only rule that reads one. It is evaluated after every deny rule and after
+    the cost gate, so it can turn an allow into a hold and can change no other
+    verdict: a deny stays the same deny, a cost hold keeps its own reason, and
+    nothing a signal says ever produces an allow. A granted `approval_token`
+    lifts a signal hold exactly as it lifts a cost hold (single-use under the
+    default), and a token that does not verify HOLDS again here where it denies
+    at the cost gate, because without the signal the same call was allowed and
+    a signal must not be able to turn an allow into a refusal. A policy that
+    tries to make a signal deny is refused at load and at PUT with a sentence
+    saying a signal can only hold: `deny_if_signal` in any value, and any key
+    inside `hold_if_signal` beyond `name`, `values` and `min_probability`
+    (`decision`, `action`, `on_match`, anything else), in the strict decoder
+    of a policy file and in the lax one the policy API uses alike. `name`,
+    `values` and `min_probability` are required, the last because a rule with
+    no threshold would hold on any probability. A decision under a policy that
+    carries the rule is never `cacheable`: a signal belongs to one call's
+    arguments, not to the agent and tool set an enforcement point's cache keys
+    on, and that holds for the signal-driven hold, an approved allow, an allow
+    reached while the rule could have fired on other arguments, and a deny
+    under such a policy alike. A policy without the rule keeps its `PolicyVersion` byte for byte.
+    *(test: `TestADestructiveSignalHoldsACallThatWasAllowed`,
+    `TestASignalAtTheThresholdHoldsAndBelowItDoesNot`,
+    `TestAValueTheRuleDoesNotListChangesNothing`,
+    `TestASignalNeverChangesADeny`, `TestASignalNeverRemovesACostHold`,
+    `TestASignalHoldIsLiftedByAValidApprovalTokenAndNeverTurnsIntoADeny`,
+    `TestSignalsNeverChangeADenyOrRemoveAHoldOverRandomPolicies` (200 seeds),
+    `TestADecisionThatCanReadASignalIsNeverCacheable`,
+    `TestEverySignalDependentDecisionIsMarkedNotCacheable` in `internal/pdp`,
+    `TestTheCacheableHintIsFalseForEverySignalDependentDecisionOverTheWire` in
+    `internal/api`;
+    `TestAPolicyThatTriesToMakeASignalDenyIsRefusedAtLoad`,
+    `TestTheSameRefusalHoldsInJSONAndInsideAList`,
+    `TestCompileRefusesADenyIfSignalThatArrivedThroughALaxDecoder`,
+    `TestAPolicyWithoutASignalRuleKeepsItsPolicyVersion` in `internal/policy`;
+    mutants named in the PR that added it, each caught: hold to deny, the
+    threshold comparison flipped two ways, the rule evaluated before the deny
+    rules with a token lifting it to allow, an invalid token denying, the rule
+    missing from the cacheability check)*
+
+26. **A signal is read by the decision and fetched outside it, and a failure
+    to fetch is no signal.** `pdp.Decide` reads `DecideRequest.Signals` the way
+    it reads `EstCostUSD` and never fetches one; the fetch is `internal/enrich`,
+    called from the API layer in `handleDecide`, which imports the PDP and is
+    imported by nothing the decision or its replay stands on (`internal/pdp`,
+    `internal/policy`, `internal/replay`, `internal/approval`,
+    `internal/archive`), by any chain of imports. With `WARDRYX_TYPRYX_URL`
+    unset, the default, nothing is asked of anyone and no decision changes.
+    Set, a request carrying a `tool_call` is classified under typryx's
+    `action.risk_class` using exactly the tool, the arguments and the target,
+    and only when the answer could matter: the first verdict is an allow, no
+    cost gate was reached, and a matching policy reads the signal (a signal no
+    policy reads is spend for nothing). Any timeout, transport error, 4xx or
+    5xx, `unanswered`, redirect, oversized body, or answer that is not a clean
+    answer to the question asked is NO signal: the call is decided exactly as it
+    would have been, the failure is counted by reason at `GET /v1/status`, and
+    each reason class is logged once until typryx next answers. Failing open on
+    the signal is the safe direction because of invariant 25: a signal can only
+    add a hold, so failing closed would hold every call whenever typryx is
+    down. The key comes from a file read once at start, never argv, never a log
+    line, never an error. A caller may not claim the source `typryx`, so the
+    record cannot say wardryx asked a classifier when a caller merely said so.
+    Caller-supplied signals are kept and the enrichment appends its own after
+    them. A tool call the enforcement point marked `arguments_truncated` has no
+    arguments (one that says both is refused), so nothing is asked and there is
+    no signal, counted as `arguments_truncated`. Caps: 16 signals, 128 bytes a text field, 12 KiB of arguments (under
+    the 16 KiB a typryx template accepts, so anything accepted here fits what
+    is sent), an unusable setting stops `serve` naming its variable.
+    *(gate: `scripts/decision-path-purity.sh`, three cases in
+    `gates-have-teeth.sh`; test: `TestTheDecisionPathAndReplayCannotReachTheEnrichment`,
+    `TestTyprxSayingDestructiveHoldsTheCallAndTheSignalIsRecorded`,
+    `TestATyprxThatFailsLeavesTheOriginalDecisionAndNoSignal`,
+    `TestAnUnreachableTyprxLeavesTheOriginalDecision`,
+    `TestTyprxIsAskedOnlyWhenTheAnswerCouldChangeTheVerdict`,
+    `TestHostileSignalAndToolCallInputIsRefusedAtTheAPI` in `internal/api`;
+    `TestAnythingButACleanAnswerIsNoSignalAndIsCountedByReason`,
+    `TestATyprxThatTimesOutIsNoSignalWithinTheBudget`,
+    `TestARedirectIsNotFollowedAndTheKeyGoesNowhereElse`,
+    `TestTheKeyNeverReachesTheLogOrTheStats` in `internal/enrich`;
+    `TestAnUnusableTyprxConfigurationRefusesToStartNamingTheVariable`,
+    `TestTheKeyNeverAppearsInARefusal` in `cmd/wardryx`;
+    `TestATyprxURLThatCannotBeUsedRefusesToStartNamingIt` in
+    `internal/manifest`, against the real binary)*
+
+27. **A decision records every signal it read, and a replay feeds them back
+    and asks nobody.** The decision event and the approval context carry each
+    signal in full (`name`, `value`, `probability`, `source`, `answer_id`) and
+    carry the key only when the decision used any, so a decision that used none
+    is recorded as it always was. The tool call a signal was derived from is
+    recorded as `tool_call` (`name`, `target`, `arguments_sha256`, the sha-256
+    of the arguments exactly as received, and `arguments_truncated`), never the
+    arguments themselves: they can carry customer data. The hash ties a signal
+    to the call it was about, and the signal's answer id finds the classifier's
+    own record. `Decide` does not read `tool_call`; the signals are what replay
+    feeds back. `wardryx replay` puts the recorded signals to the
+    PDP with the rest of the question, so a hold caused by a signal reproduces
+    with the classifier unreachable; a record whose signals are not the shape
+    the emitter writes is `unreadable`, by name, never guessed. A hold a person
+    granted replays as `approval-decided`, as a cost hold does.
+    *(test: `TestEverySignalUsedIsRecordedInTheEventAndTheApprovalContext`,
+    `TestADecisionWithNoSignalsCarriesNoSignalsKey`,
+    `TestToolArgumentsNeverReachTheRecord`,
+    `TestTheToolCallIsRecordedAsNameTargetAndAHashOfItsArguments`,
+    `TestTruncatedArgumentsAreNeverAskedAboutAndAreRecordedAsTruncated`,
+    `TestAReplayReproducesASignalHoldWithTyprxUnreachable`,
+    `TestAReplayOfACallerSuppliedSignalHoldAlsoReproduces`,
+    `TestAGrantedSignalHoldReplaysAsApprovalDecided` in `internal/api`;
+    `TestARecordedSignalIsFedBackAndTheHoldReproduces`,
+    `TestAHoldWhoseSignalWasNotRecordedIsADivergenceNotAReproduction`,
+    `TestACandidateWithoutTheRuleChangesTheRecordedHold`,
+    `TestMalformedRecordedSignalsAreUnreadableNotGuessed` in
+    `internal/replay`; `TestDecisionInputCoversEveryDecideRequestField`; mutants
+    named in the PR, each caught: replay ignoring the recorded signals,
+    replay able to reach the enrichment, the approval context dropping the
+    signals, the arguments written to the event)*

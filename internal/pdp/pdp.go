@@ -125,6 +125,12 @@ type DecideRequest struct {
 	// earlier hold. A valid token turns what would be a "hold" into an
 	// "allow".
 	ApprovalToken string
+	// Signals are typed facts about this request that somebody else
+	// established before calling (see Signal).
+	Signals []Signal
+	// ToolCall is the concrete call this request is about to make, when the
+	// enforcement point knows it. Decide does not branch on it.
+	ToolCall *ToolCall
 }
 
 // DecideResponse is the PDP's verdict.
@@ -145,7 +151,8 @@ type DecideResponse struct {
 	ApprovalID string
 	// ApprovalTokenRequired reports whether this action is gated by human
 	// approval at all -- true whenever the estimated cost exceeds a matched
-	// policy's require_human_above_usd threshold, whether or not a valid
+	// policy's require_human_above_usd threshold, or a matched policy's
+	// hold_if_signal rule is satisfied, whether or not a valid
 	// token ultimately satisfied it. False when no cost rule was ever
 	// reached (e.g. a deny fired first) or no matched policy sets a
 	// threshold. It is also false when a matched policy's deny_above_usd
@@ -270,7 +277,18 @@ func (e *Engine) SetPolicies(policies *policy.Set) {
 //  10. a matched policy's require_human_above_usd, exceeded by EstCostUSD,
 //     resolves to Hold, unless a valid ApprovalToken was presented (then
 //     Allow) or an *invalid* one was presented (then Deny);
-//  11. otherwise, Allow.
+//  11. a matched policy's hold_if_signal, satisfied by one of req.Signals,
+//     resolves to Hold, unless a valid ApprovalToken was presented (then
+//     Allow); an invalid token holds, it never denies;
+//  12. otherwise, Allow.
+//
+// Rule 11 is the only rule a signal can reach, and it is last on purpose: it
+// runs only once every deny rule and the cost gate have declined, so a signal
+// can turn an allow into a hold and can change nothing else. It never turns a
+// deny into anything, never replaces another rule's hold or its reason, and
+// never allows. Its invalid-token branch holds where rule 10's denies, because
+// without the signal that same call would have been allowed, and a signal
+// must not be able to turn an allow into a refusal.
 //
 // A deny from any rule wins outright: it short-circuits every later rule
 // and Decide never has to reconcile a deny against a later hold or allow.
@@ -408,6 +426,24 @@ func (e *Engine) Decide(req DecideRequest) DecideResponse {
 		return resp
 	}
 
+	if pol, sig, ok := heldBySignal(matched, req.Signals); ok {
+		// Reached only when no deny rule and no cost gate fired, so the cost
+		// gate's own behaviour, token branches included, is exactly what it
+		// was before signals existed.
+		resp.ApprovalTokenRequired = true
+		why := fmt.Sprintf("policy %q hold_if_signal: signal %q is %q at probability %s (the rule holds from %s)",
+			pol.Name, sig.Name, sig.Value, formatProbability(sig.Probability), formatProbability(*pol.HoldIfSignal.MinProbability))
+		if req.ApprovalToken != "" &&
+			approval.VerifyApprovalToken(e.approvalSecret, req.ApprovalToken, req.AgentID, req.RunID, req.ToolNames, req.EstCostUSD) == nil {
+			resp.Decision = Allow
+			resp.Reason = why + "; allowed via a valid approval_token"
+			return resp
+		}
+		resp.Decision = Hold
+		resp.Reason = why + "; human approval required"
+		return resp
+	}
+
 	resp.Decision = Allow
 	if len(matched) == 0 {
 		resp.Reason = fmt.Sprintf("allowed: no policy targets agent %s", req.AgentID)
@@ -447,9 +483,15 @@ func requestSpecific(matched []policy.Policy) bool {
 		// call presenting a different chain, and a cached chain ALLOW is
 		// worse: it would let an unproven chain through on the strength of a
 		// proven one.
+		//
+		// HoldIfSignal joins them for the same reason: a signal belongs to one
+		// call (its arguments), not to the agent and tool set, so a decision
+		// that could have read one must never be reused for the next call under
+		// the same agent and tool set.
 		if p.MaxSteps > 0 || p.RequireHumanAboveUSD != nil || p.DenyAboveUSD != nil ||
 			len(p.AllowDomains) > 0 || p.DenyIfChainUnproven ||
-			p.MaxChainDepth > 0 || p.RequireRootPrincipal != "" {
+			p.MaxChainDepth > 0 || p.RequireRootPrincipal != "" ||
+			p.HoldIfSignal != nil {
 			return true
 		}
 	}

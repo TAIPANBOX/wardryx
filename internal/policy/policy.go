@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"github.com/TAIPANBOX/agent-stack-go/chain"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -138,6 +139,118 @@ type Policy struct {
 	// dropping its chain and having nothing to check. Empty (the default)
 	// means no requirement.
 	RequireRootPrincipal string `yaml:"require_root_principal,omitempty" json:"require_root_principal,omitempty"`
+	// HoldIfSignal holds a request that carries a matching typed signal (for
+	// example, a tool call a classifier says is destructive with probability
+	// 0.8 or more). It can only ever produce a hold: a signal is a
+	// probability about the world, and a probability must never refuse an
+	// action by itself. See SignalRule.
+	//
+	// Nil, the default, imposes nothing. A policy without it is byte for byte
+	// what it was before this field existed, PolicyVersion included.
+	HoldIfSignal *SignalRule `yaml:"hold_if_signal,omitempty" json:"hold_if_signal,omitempty"`
+	// DenyIfSignal is not a rule. It exists so that a policy which tries to
+	// make a signal refuse something is refused at load and at PUT with a
+	// sentence saying why, in a decoder that is strict about unknown fields
+	// (a policy file) and in one that is not (the policy-as-code API), instead
+	// of being silently dropped by the second. Any value, even false, is
+	// refused. It never survives into a compiled Set.
+	DenyIfSignal any `yaml:"deny_if_signal,omitempty" json:"deny_if_signal,omitempty"`
+}
+
+// SignalRule is the body of hold_if_signal: hold when a signal named Name
+// carries one of Values with probability at least MinProbability.
+//
+// Name, Values and MinProbability are all required, and MinProbability is a
+// pointer so that an absent threshold can be refused rather than read as zero,
+// which would hold on a coin flip. Any other key is refused with a sentence
+// saying that a signal can only hold, so no spelling of "...and deny" (a
+// decision, action or on_match key) can ride along unread.
+type SignalRule struct {
+	// Name is the signal this rule reads, e.g. "action.risk_class".
+	Name string `yaml:"name" json:"name"`
+	// Values are the signal values that hold, e.g. destructive.
+	Values []string `yaml:"values" json:"values"`
+	// MinProbability is the lowest probability that holds, in [0, 1].
+	MinProbability *float64 `yaml:"min_probability" json:"min_probability"`
+}
+
+// signalRuleKeys are the only keys hold_if_signal has.
+var signalRuleKeys = map[string]bool{"name": true, "values": true, "min_probability": true}
+
+func refuseSignalRuleKey(key string) error {
+	return fmt.Errorf("hold_if_signal has no key %q: a signal can only hold, never deny, so the rule takes exactly name, values and min_probability", key)
+}
+
+// UnmarshalJSON refuses any key a hold-only rule does not have, in the strict
+// and the non-strict decoder alike.
+func (r *SignalRule) UnmarshalJSON(data []byte) error {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return fmt.Errorf("hold_if_signal must be an object with name, values and min_probability: %w", err)
+	}
+	for k := range raw {
+		if !signalRuleKeys[k] {
+			return refuseSignalRuleKey(k)
+		}
+	}
+	type plain SignalRule
+	var p plain
+	if err := json.Unmarshal(data, &p); err != nil {
+		return err
+	}
+	*r = SignalRule(p)
+	return nil
+}
+
+// UnmarshalYAML is UnmarshalJSON's twin for a YAML policy file.
+func (r *SignalRule) UnmarshalYAML(n *yaml.Node) error {
+	if n.Kind != yaml.MappingNode {
+		return fmt.Errorf("hold_if_signal must be a mapping with name, values and min_probability")
+	}
+	for i := 0; i+1 < len(n.Content); i += 2 {
+		if k := n.Content[i].Value; !signalRuleKeys[k] {
+			return refuseSignalRuleKey(k)
+		}
+	}
+	type plain SignalRule
+	var p plain
+	if err := n.Decode(&p); err != nil {
+		return err
+	}
+	*r = SignalRule(p)
+	return nil
+}
+
+// validate checks a rule on its own terms.
+func (r *SignalRule) validate(policyName string) error {
+	if strings.TrimSpace(r.Name) == "" {
+		return fmt.Errorf("policy %q: hold_if_signal.name is required", policyName)
+	}
+	if len(r.Values) == 0 {
+		return fmt.Errorf("policy %q: hold_if_signal.values is required: a rule that lists no value could never hold", policyName)
+	}
+	for _, v := range r.Values {
+		if strings.TrimSpace(v) == "" {
+			return fmt.Errorf("policy %q: hold_if_signal.values must not contain a blank value", policyName)
+		}
+	}
+	if r.MinProbability == nil {
+		return fmt.Errorf("policy %q: hold_if_signal.min_probability is required: a rule with no threshold would hold on any probability", policyName)
+	}
+	if p := *r.MinProbability; math.IsNaN(p) || p < 0 || p > 1 {
+		return fmt.Errorf("policy %q: hold_if_signal.min_probability must be a number between 0 and 1", policyName)
+	}
+	return nil
+}
+
+func (r *SignalRule) clone() *SignalRule {
+	if r == nil {
+		return nil
+	}
+	c := *r
+	c.Values = sortedUnique(r.Values)
+	c.MinProbability = cloneUSD(r.MinProbability)
+	return &c
 }
 
 // compiled pairs a normalized Policy with its compiled glob matcher.
@@ -216,7 +329,10 @@ func (s *Set) RequiresHumanApproval() bool {
 		return false
 	}
 	for _, c := range s.policies {
-		if c.RequireHumanAboveUSD != nil {
+		// A hold_if_signal rule is the other way a hold can happen, and a hold
+		// with no approval secret cannot be granted: the warning is owed to
+		// both.
+		if c.RequireHumanAboveUSD != nil || c.HoldIfSignal != nil {
 			return true
 		}
 	}
@@ -333,7 +449,11 @@ func isUnknownFieldError(err error) bool {
 	msg := err.Error()
 	// gopkg.in/yaml.v3 with KnownFields: "field X not found in type ..."
 	// encoding/json with DisallowUnknownFields: "unknown field \"X\""
-	return strings.Contains(msg, "not found in type") || strings.Contains(msg, "unknown field")
+	// hold_if_signal's own decoders refuse a key a hold-only rule does not have
+	// (see SignalRule): that is the same finding as an unknown field, and must
+	// not fall through to the single-document attempt either.
+	return strings.Contains(msg, "not found in type") || strings.Contains(msg, "unknown field") ||
+		strings.Contains(msg, "hold_if_signal has no key")
 }
 
 // strictJSON and strictYAML refuse a field the Policy struct does not declare.
@@ -437,6 +557,14 @@ func validate(p Policy) error {
 			"policy %q: max_chain_depth %d is above the stack-wide cap of %d, so it could never fire",
 			p.Name, p.MaxChainDepth, chain.MaxDepth)
 	}
+	if p.DenyIfSignal != nil {
+		return fmt.Errorf("policy %q: deny_if_signal is refused: a signal is a probability, and a probability can only hold an action for a person, never deny it; use hold_if_signal", p.Name)
+	}
+	if p.HoldIfSignal != nil {
+		if err := p.HoldIfSignal.validate(p.Name); err != nil {
+			return err
+		}
+	}
 	if p.RequireRootPrincipal != "" {
 		if _, err := compileGlob(p.RequireRootPrincipal); err != nil {
 			return fmt.Errorf("policy %q: require_root_principal %q is not a valid glob: %w",
@@ -459,6 +587,7 @@ func normalize(policies []Policy) []Policy {
 		np.AllowDomains = sortedUnique(p.AllowDomains)
 		np.RequireHumanAboveUSD = cloneUSD(p.RequireHumanAboveUSD)
 		np.DenyAboveUSD = cloneUSD(p.DenyAboveUSD)
+		np.HoldIfSignal = p.HoldIfSignal.clone()
 		if np.Name == "" {
 			np.Name = np.Target
 		}

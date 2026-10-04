@@ -44,6 +44,8 @@ package api
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -57,6 +59,7 @@ import (
 	"github.com/TAIPANBOX/agent-stack-go/event"
 	"github.com/TAIPANBOX/wardryx/internal/approval"
 	"github.com/TAIPANBOX/wardryx/internal/archive"
+	"github.com/TAIPANBOX/wardryx/internal/enrich"
 	wotel "github.com/TAIPANBOX/wardryx/internal/otel"
 	"github.com/TAIPANBOX/wardryx/internal/pdp"
 	"github.com/TAIPANBOX/wardryx/internal/policy"
@@ -128,7 +131,13 @@ type Server struct {
 	// outage remembers whether the store was reachable the last time a
 	// bounded call asked, so the log carries one line per outage.
 	outage storeOutage
+	// enricher, when set, adds a typed signal to a decide request that
+	// carries a tool call. Nil is the default and means nothing is asked.
+	enricher *enrich.Typryx
 }
+
+// SetSignalEnricher attaches the optional signal enrichment.
+func (s *Server) SetSignalEnricher(e *enrich.Typryx) { s.enricher = e }
 
 // storeOutage is the one bit that turns "the store failed" into "the store
 // went down", so the log says so once when it happens and once when it is
@@ -431,6 +440,113 @@ type decideRequestDTO struct {
 	// every caller that has not been upgraded look like one that verifies.
 	ChainProven   bool   `json:"chain_proven,omitempty"`
 	ApprovalToken string `json:"approval_token,omitempty"`
+	// Signals are typed facts the caller established before asking.
+	Signals []signalDTO `json:"signals,omitempty"`
+	// ToolCall is the concrete call this request is about to make.
+	ToolCall *toolCallDTO `json:"tool_call,omitempty"`
+}
+
+type signalDTO struct {
+	Name        string   `json:"name"`
+	Value       string   `json:"value"`
+	Probability *float64 `json:"probability"`
+	Source      string   `json:"source"`
+	AnswerID    string   `json:"answer_id,omitempty"`
+}
+
+type toolCallDTO struct {
+	Name      string          `json:"name"`
+	Arguments json.RawMessage `json:"arguments,omitempty"`
+	Target    string          `json:"target,omitempty"`
+	// ArgumentsTruncated: the enforcement point could not send the arguments
+	// (too large). Then there are none to read, and none are asked about.
+	ArgumentsTruncated bool `json:"arguments_truncated,omitempty"`
+}
+
+// decideSignalInputs turns the optional signals and tool call of a decide
+// request into what the engine reads, refusing anything malformed with a
+// sentence that names the field and never echoes the value.
+//
+// A caller may not claim the source wardryx stamps on the signals it asks for
+// itself: the record would then say wardryx asked a classifier when a caller
+// merely said so.
+func decideSignalInputs(dto decideRequestDTO) ([]pdp.Signal, *pdp.ToolCall, string) {
+	var signals []pdp.Signal
+	if len(dto.Signals) > pdp.MaxSignals {
+		return nil, nil, fmt.Sprintf("at most %d signals per request, got %d", pdp.MaxSignals, len(dto.Signals))
+	}
+	for i, d := range dto.Signals {
+		if d.Probability == nil {
+			return nil, nil, fmt.Sprintf("signals[%d].probability is required", i)
+		}
+		if strings.EqualFold(strings.TrimSpace(d.Source), enrich.Source) {
+			return nil, nil, fmt.Sprintf("signals[%d].source %q is reserved for signals wardryx asks for itself", i, enrich.Source)
+		}
+		signals = append(signals, pdp.Signal{Name: d.Name, Value: d.Value, Probability: *d.Probability, Source: d.Source, AnswerID: d.AnswerID})
+	}
+	if err := pdp.ValidateSignals(signals); err != nil {
+		return nil, nil, err.Error()
+	}
+	if dto.ToolCall == nil {
+		return signals, nil, ""
+	}
+	tc := pdp.ToolCall{Name: dto.ToolCall.Name, Arguments: dto.ToolCall.Arguments, Target: dto.ToolCall.Target, ArgumentsTruncated: dto.ToolCall.ArgumentsTruncated}
+	if err := pdp.ValidateToolCall(tc); err != nil {
+		return nil, nil, err.Error()
+	}
+	return signals, &tc, ""
+}
+
+// withEnrichedSignals appends a typed signal about the request's tool call
+// when one could change the verdict, and decides again with it.
+//
+// It lives here, in the layer around the engine, and not in the engine: the
+// decision path never fetches anything (invariant 1), so a decision is a pure
+// function of the request it is handed, and what this adds is just one more
+// input, recorded like the rest.
+//
+// It asks only when the answer could matter, which is also when asking is
+// worth its latency and its cost: the first verdict is an allow, no cost gate
+// was reached, and some matching policy actually reads a signal of this name.
+// A deny, a cost hold, or a hold the caller's own signals already caused cannot
+// be changed by a signal, so none of them is asked about.
+//
+// Any failure to get a signal returns the request and verdict untouched. That
+// is the safe direction because a signal can only add a hold.
+func (s *Server) withEnrichedSignals(ctx context.Context, req pdp.DecideRequest, resp pdp.DecideResponse) (pdp.DecideRequest, pdp.DecideResponse) {
+	if s.enricher == nil || req.ToolCall == nil {
+		return req, resp
+	}
+	if resp.Decision != pdp.Allow || resp.ApprovalTokenRequired {
+		return req, resp
+	}
+	if !s.engine.ReadsSignal(req.AgentID, enrich.SignalName) {
+		return req, resp
+	}
+	sig, ok := s.enricher.Enrich(ctx, *req.ToolCall)
+	if !ok {
+		return req, resp
+	}
+	// A fresh slice: the caller's own signals stay first and untouched.
+	req.Signals = append(append([]pdp.Signal(nil), req.Signals...), sig)
+	return req, s.engine.Decide(req)
+}
+
+// signalsRecord is how a list of signals is written into an event and into an
+// approval's context: every field of every signal used, so a replay feeds back
+// exactly what the decision read and an approver sees what was claimed.
+func signalsRecord(signals []pdp.Signal) []any {
+	out := make([]any, 0, len(signals))
+	for _, sg := range signals {
+		out = append(out, map[string]any{
+			"name":        sg.Name,
+			"value":       sg.Value,
+			"probability": sg.Probability,
+			"source":      sg.Source,
+			"answer_id":   sg.AnswerID,
+		})
+	}
+	return out
 }
 
 // decisionInput is the question a decision answered: every input Decide read,
@@ -454,7 +570,7 @@ type decideRequestDTO struct {
 // TestDecisionInputCoversEveryDecideRequestField holds this to the shape of
 // pdp.DecideRequest itself, so a new PDP input cannot quietly skip the record.
 func decisionInput(req pdp.DecideRequest, resp pdp.DecideResponse) map[string]any {
-	return map[string]any{
+	in := map[string]any{
 		"tool_names":         req.ToolNames,
 		"domains":            req.Domains,
 		"steps":              req.Steps,
@@ -471,6 +587,28 @@ func decisionInput(req pdp.DecideRequest, resp pdp.DecideResponse) map[string]an
 		// disagreeing about the past.
 		"approval_token_required": resp.ApprovalTokenRequired,
 	}
+	// Every signal the decision read, and only when there were any: a decision
+	// that used none is recorded exactly as it was before signals existed. The
+	// tool call is recorded as name, target and a hash only.
+	if len(req.Signals) > 0 {
+		in["signals"] = signalsRecord(req.Signals)
+	}
+	// What the signals were derived from, without the data itself: the tool
+	// and target by name, and a hash of the arguments exactly as received, so
+	// an auditor can tie a recorded signal to the call it was about and replay
+	// can say the call was truncated. The arguments can carry customer data and
+	// are never written down. Decide does not read this; the signals above are
+	// what replay feeds back.
+	if tc := req.ToolCall; tc != nil {
+		sum := sha256.Sum256(tc.Arguments)
+		in["tool_call"] = map[string]any{
+			"name":                tc.Name,
+			"target":              tc.Target,
+			"arguments_sha256":    hex.EncodeToString(sum[:]),
+			"arguments_truncated": tc.ArgumentsTruncated,
+		}
+	}
+	return in
 }
 
 type decideResponseDTO struct {
@@ -498,6 +636,12 @@ func (s *Server) handleDecide(w http.ResponseWriter, r *http.Request, principal 
 		return
 	}
 
+	signals, toolCall, refusal := decideSignalInputs(dto)
+	if refusal != "" {
+		writeError(w, http.StatusBadRequest, refusal)
+		return
+	}
+
 	req := pdp.DecideRequest{
 		AgentID:           dto.AgentID,
 		RunID:             dto.RunID,
@@ -510,8 +654,11 @@ func (s *Server) handleDecide(w http.ResponseWriter, r *http.Request, principal 
 		AttestationMethod: dto.AttestationMethod,
 		ChainProven:       dto.ChainProven,
 		ApprovalToken:     dto.ApprovalToken,
+		Signals:           signals,
+		ToolCall:          toolCall,
 	}
 	resp := s.engine.Decide(req)
+	req, resp = s.withEnrichedSignals(r.Context(), req, resp)
 
 	// WARDRYX_APPROVAL_SINGLE_USE: an Allow with ApprovalTokenRequired set
 	// only ever happens when a presented approval_token just verified (see
@@ -563,7 +710,7 @@ func (s *Server) handleDecide(w http.ResponseWriter, r *http.Request, principal 
 		}
 
 	case pdp.Hold:
-		held, err := approval.Request(r.Context(), s.store, req.AgentID, req.RunID, req.ToolNames, map[string]any{
+		holdContext := map[string]any{
 			"org":                principal.Org,
 			"model":              req.Model,
 			"est_cost_usd":       req.EstCostUSD,
@@ -572,7 +719,13 @@ func (s *Server) handleDecide(w http.ResponseWriter, r *http.Request, principal 
 			"chain_proven":       req.ChainProven,
 			"reason":             resp.Reason,
 			"policy_version":     resp.PolicyVersion,
-		})
+		}
+		// A person deciding this hold sees every signal that was used, with
+		// who said it and the answer id that finds the classifier's record.
+		if len(req.Signals) > 0 {
+			holdContext["signals"] = signalsRecord(req.Signals)
+		}
+		held, err := approval.Request(r.Context(), s.store, req.AgentID, req.RunID, req.ToolNames, holdContext)
 		if err != nil {
 			writeInternalError(w, "recording the approval hold", err)
 			return
@@ -866,6 +1019,19 @@ type statusDTO struct {
 	// What /v1/decide actually evaluates against. Zero here, and only here,
 	// means every request really is allowed.
 	EffectivePolicies int `json:"effective_policies"`
+	// Signals is present only when signal enrichment is configured: off means
+	// off, including in what this route says about it.
+	Signals *signalsStatusDTO `json:"signals,omitempty"`
+}
+
+// signalsStatusDTO is what enrichment has done since the process started: how
+// often it asked, how often that produced a signal, and why it did not.
+type signalsStatusDTO struct {
+	Source    string           `json:"source"`
+	TimeoutMS int64            `json:"timeout_ms"`
+	Asked     int64            `json:"asked"`
+	Signalled int64            `json:"signalled"`
+	NoSignal  map[string]int64 `json:"no_signal"`
 }
 
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request, _ Principal) {
@@ -874,12 +1040,23 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request, _ Principa
 		writeInternalError(w, "reading status", err)
 		return
 	}
-	writeJSON(w, http.StatusOK, statusDTO{
+	out := statusDTO{
 		PolicyVersion:     s.engine.PolicyVersion(),
 		BasePolicies:      len(s.basePolicies),
 		StorePolicies:     len(stored),
 		EffectivePolicies: len(s.basePolicies) + len(stored),
-	})
+	}
+	if s.enricher != nil {
+		st := s.enricher.Stats()
+		out.Signals = &signalsStatusDTO{
+			Source:    enrich.Source,
+			TimeoutMS: s.enricher.Timeout().Milliseconds(),
+			Asked:     st.Asked,
+			Signalled: st.Signalled,
+			NoSignal:  st.NoSignal,
+		}
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 func (s *Server) handleListPolicies(w http.ResponseWriter, r *http.Request, _ Principal) {

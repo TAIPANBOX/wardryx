@@ -72,14 +72,45 @@ for pkg in "${PURE_PKGS[@]}"; do
 	done <<<"$imports"
 done
 
+# The signal enrichment (internal/enrich) asks an outside service, so nothing
+# the decision or its replay stands on may reach it, by ANY chain of imports.
+# This one IS transitive, and rightly so: the claim is not "this package's own
+# code is clean" but "a replay can reproduce a decision with the service
+# unreachable", which a hop through a helper would break just as surely. The
+# enrichment imports the PDP (for the Signal type), so the PDP and the policy
+# package cannot import it without a cycle; replay, approval and archive are
+# the packages that could, and the list names all five.
+ENRICH_PKG="github.com/TAIPANBOX/wardryx/internal/enrich"
+NO_ENRICH_PKGS=(./internal/pdp ./internal/policy ./internal/replay ./internal/approval ./internal/archive)
+
+if ! go list "$ENRICH_PKG" >/dev/null 2>&1; then
+	echo "measured nothing: $ENRICH_PKG does not exist, so nothing could be checked against it."
+	echo "If the package was renamed, rename it here too."
+	exit 2
+fi
+
+for pkg in "${NO_ENRICH_PKGS[@]}"; do
+	deps="$(go list -deps -f '{{.ImportPath}}' "$pkg" 2>/dev/null)"
+	if [ -z "$deps" ]; then
+		echo "measured nothing: go list -deps printed nothing for $pkg"
+		exit 2
+	fi
+	if printf '%s\n' "$deps" | grep -qx "$ENRICH_PKG"; then
+		echo "FAIL: $pkg depends on $ENRICH_PKG"
+		fail=1
+	fi
+done
+
 if [ "$fail" -ne 0 ]; then
 	echo
 	echo "A decision that reads a clock, a random source, the network or a"
 	echo "database in its own code cannot be replayed during an audit, and it is"
 	echo "not the same decision twice. See CLAUDE.md invariant 1."
 	echo
-	echo "Resolve the value at the API layer (internal/api) and pass it in."
+	echo "Resolve the value at the API layer (internal/api) and pass it in. A"
+	echo "signal from an outside service is such a value: it arrives as a field of"
+	echo "the request and is recorded, never fetched from inside the decision."
 	exit 1
 fi
 
-echo "OK: decision-path packages import no clock, randomness, network or DB directly."
+echo "OK: decision-path packages import no clock, randomness, network or DB directly, and none can reach the signal enrichment."

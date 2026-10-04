@@ -311,6 +311,18 @@ func question(ev event.Event) (pdp.DecideRequest, string, bool, error) {
 		return pdp.DecideRequest{}, "", false, fmt.Errorf("policy_version is not a version: %#v", version)
 	}
 
+	// Signals are the one member that is optional on the record, and only
+	// because a decision that used none is written without the key, exactly as
+	// every decision was before signals existed: absent means none were used,
+	// not that the question was not written down. What IS recorded is fed back
+	// as it was. Nothing here, or anywhere this package can reach, asks the
+	// service that first produced a signal: replaying a decision with that
+	// service unreachable must give the same answer.
+	signals, err := recordedSignals(ev.Data["signals"])
+	if err != nil {
+		return pdp.DecideRequest{}, "", false, err
+	}
+
 	return pdp.DecideRequest{
 		AgentID:           ev.AgentID,
 		RunID:             ev.RunID,
@@ -322,7 +334,43 @@ func question(ev event.Event) (pdp.DecideRequest, string, bool, error) {
 		EstCostUSD:        number(cost),
 		AttestationMethod: text(attestation),
 		ChainProven:       chainProven == true,
+		Signals:           signals,
 	}, v, tokenRequired == true, nil
+}
+
+// recordedSignals reads back the signals one event recorded. Absent is none; a
+// record whose signals are not the shape the emitter writes, or fail the same
+// validation the API applies, is not a question that can be put again.
+func recordedSignals(v any) ([]pdp.Signal, error) {
+	if v == nil {
+		return nil, nil
+	}
+	raw, ok := v.([]any)
+	if !ok {
+		return nil, fmt.Errorf("the recorded signals are not a list")
+	}
+	out := make([]pdp.Signal, 0, len(raw))
+	for i, item := range raw {
+		m, ok := item.(map[string]any)
+		if !ok {
+			return nil, fmt.Errorf("recorded signals[%d] is not an object", i)
+		}
+		p, ok := m["probability"].(float64)
+		if !ok {
+			return nil, fmt.Errorf("recorded signals[%d] has no numeric probability", i)
+		}
+		out = append(out, pdp.Signal{
+			Name:        text(m["name"]),
+			Value:       text(m["value"]),
+			Probability: p,
+			Source:      text(m["source"]),
+			AnswerID:    text(m["answer_id"]),
+		})
+	}
+	if err := pdp.ValidateSignals(out); err != nil {
+		return nil, fmt.Errorf("the recorded signals are malformed: %v", err)
+	}
+	return out, nil
 }
 
 // JSON gives back float64 for every number, []any for every list, and null

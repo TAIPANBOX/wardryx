@@ -73,6 +73,15 @@
           },
           "WARDRYX_POLICY_ARCHIVE": {
             "required": false
+          },
+          "WARDRYX_TYPRYX_KEY_FILE": {
+            "required": false
+          },
+          "WARDRYX_TYPRYX_TIMEOUT_MS": {
+            "required": false
+          },
+          "WARDRYX_TYPRYX_URL": {
+            "required": false
           }
         },
         "starts_with_empty_environment": false,

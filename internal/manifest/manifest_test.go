@@ -13,6 +13,7 @@
 package manifest
 
 import (
+	"context"
 	"encoding/json"
 	"net"
 	"net/http"
@@ -448,5 +449,50 @@ func TestARefusingServiceExitsRatherThanListens(t *testing.T) {
 		if !strings.Contains(string(out), want) {
 			t.Errorf("the refusal does not mention %s, want both ways out named.\ngot:\n%s", want, out)
 		}
+	}
+}
+
+// TestATyprxURLThatCannotBeUsedRefusesToStartNamingIt is the process-level half
+// of the signal enrichment's configuration: cmd/wardryx's own tests prove
+// typryxFromConfig returns an error, and nothing before this proved runServe
+// actually returns it. A refactor that dropped the check would pass every unit
+// test and start with enrichment silently off while the operator believes it
+// is on. The key and the URL both come in through the environment only.
+func TestATyprxURLThatCannotBeUsedRefusesToStartNamingIt(t *testing.T) {
+	if testing.Short() {
+		t.Skip("starts a process")
+	}
+	m, r := load(t)
+	svc := service(t, m)
+
+	bin := filepath.Join(t.TempDir(), "wardryx")
+	build := exec.Command("go", "build", "-o", bin, svc.Checked.Package)
+	build.Dir = r
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("building the declared package: %v\n%s", err, out)
+	}
+
+	for _, c := range []struct{ name, url, timeout, want string }{
+		{"a URL with no scheme", "typryx:4320", "", "WARDRYX_TYPRYX_URL"},
+		{"a timeout that is not a number", "http://127.0.0.1:1", "soon", "WARDRYX_TYPRYX_TIMEOUT_MS"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			// Bounded: a regression that lets the service start would leave it
+			// listening forever, and the test must fail rather than wait.
+			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+			defer cancel()
+			cmd := exec.CommandContext(ctx, bin, "serve", "-addr", "127.0.0.1:0")
+			cmd.Env = []string{"WARDRYX_ALLOW_DEVKEY=1", "WARDRYX_TYPRYX_URL=" + c.url, "WARDRYX_TYPRYX_TIMEOUT_MS=" + c.timeout}
+			out, err := cmd.CombinedOutput()
+			if ctx.Err() != nil {
+				t.Fatalf("it kept running with an unusable typryx setting, want it to refuse to start.\nits output was:\n%s", out)
+			}
+			if err == nil {
+				t.Fatalf("it exited 0 with an unusable typryx setting, want a nonzero exit.\nits output was:\n%s", out)
+			}
+			if !strings.Contains(string(out), c.want) {
+				t.Errorf("the refusal does not name %s.\ngot:\n%s", c.want, out)
+			}
+		})
 	}
 }
