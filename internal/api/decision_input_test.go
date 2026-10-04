@@ -31,6 +31,8 @@ var fieldHome = map[string]string{
 	"AttestationMethod": "data:attestation_method",
 	"ChainProven":       "data:chain_proven",
 	"ApprovalToken":     "excluded: a live credential never enters an append-only record",
+	"Signals":           "data:signals",
+	"ToolCall":          "data:tool_call",
 }
 
 // fullRequest populates every DecideRequest field with a distinguishable
@@ -49,6 +51,10 @@ func fullRequest() pdp.DecideRequest {
 		AttestationMethod: "tpm",
 		ChainProven:       true,
 		ApprovalToken:     "tok-secret-must-not-be-recorded",
+		Signals: []pdp.Signal{{
+			Name: "action.risk_class", Value: "destructive", Probability: 0.95, Source: "classifier", AnswerID: "ans-1",
+		}},
+		ToolCall: &pdp.ToolCall{Name: "s3.delete_object", Arguments: []byte(`{"key":"x"}`), Target: "s3://b"},
 	}
 }
 

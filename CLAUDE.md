@@ -748,3 +748,105 @@ decision outcome and every exported signature identical.
     `sameSetting` is neutered. Its limits: a default restated in words that
     name no variable ("tokens are reusable by default") and paraphrase in
     general are not read; those stay with review.)*
+
+25. **A typed risk signal can add a hold and nothing else.** `@decided
+    2026-10-04`: a signal may turn a call into a hold and never into a deny, and
+    the signal is recorded so a replay reproduces the decision. A signal is a
+    probability about the world ("this tool call is destructive, 0.95"), and a
+    probability must never refuse an action by itself. `hold_if_signal` is the
+    only rule that reads one. It is evaluated after every deny rule and after
+    the cost gate, so it can turn an allow into a hold and can change no other
+    verdict: a deny stays the same deny, a cost hold keeps its own reason, and
+    nothing a signal says ever produces an allow. A granted `approval_token`
+    lifts a signal hold exactly as it lifts a cost hold (single-use under the
+    default), and a token that does not verify HOLDS again here where it denies
+    at the cost gate, because without the signal the same call was allowed and
+    a signal must not be able to turn an allow into a refusal. A policy that
+    tries to make a signal deny is refused at load and at PUT with a sentence
+    saying a signal can only hold: `deny_if_signal` in any value, and any key
+    inside `hold_if_signal` beyond `name`, `values` and `min_probability`
+    (`decision`, `action`, `on_match`, anything else), in the strict decoder
+    of a policy file and in the lax one the policy API uses alike. `name`,
+    `values` and `min_probability` are required, the last because a rule with
+    no threshold would hold on any probability. A decision under a policy that
+    carries the rule is never `cacheable`: a signal belongs to one call's
+    arguments, not to the agent and tool set an enforcement point's cache keys
+    on, and that holds for the signal-driven hold, an approved allow, an allow
+    reached while the rule could have fired on other arguments, and a deny
+    under such a policy alike. A policy without the rule keeps its `PolicyVersion` byte for byte.
+    *(test: `TestADestructiveSignalHoldsACallThatWasAllowed`,
+    `TestASignalAtTheThresholdHoldsAndBelowItDoesNot`,
+    `TestAValueTheRuleDoesNotListChangesNothing`,
+    `TestASignalNeverChangesADeny`, `TestASignalNeverRemovesACostHold`,
+    `TestASignalHoldIsLiftedByAValidApprovalTokenAndNeverTurnsIntoADeny`,
+    `TestSignalsNeverChangeADenyOrRemoveAHoldOverRandomPolicies` (200 seeds),
+    `TestADecisionThatCanReadASignalIsNeverCacheable`,
+    `TestEverySignalDependentDecisionIsMarkedNotCacheable` in `internal/pdp`,
+    `TestTheCacheableHintIsFalseForEverySignalDependentDecisionOverTheWire` in
+    `internal/api`;
+    `TestAPolicyThatTriesToMakeASignalDenyIsRefusedAtLoad`,
+    `TestTheSameRefusalHoldsInJSONAndInsideAList`,
+    `TestCompileRefusesADenyIfSignalThatArrivedThroughALaxDecoder`,
+    `TestAPolicyWithoutASignalRuleKeepsItsPolicyVersion` in `internal/policy`;
+    mutants named in the PR that added it, each caught: hold to deny, the
+    threshold comparison flipped two ways, the rule evaluated before the deny
+    rules with a token lifting it to allow, an invalid token denying, the rule
+    missing from the cacheability check)*
+
+26. **A signal is an input to the decision, supplied by the caller, and
+    nothing the decision stands on can fetch one.** `@claude 2026-10-04,
+    delegated by the owner`: the core does not change for an optional add-on,
+    which joins it by configuration only. So `/v1/decide` takes `signals` and
+    `tool_call` as fields of the request, and whatever produces them (a
+    classifier behind a proxy placed in front of this service) is deployment
+    configuration this repository neither names nor calls: it holds no client,
+    no URL and no variable for one, so a deployment without a producer runs the
+    identical service, and the policy plane is not an egress path that sends a
+    call's arguments to anyone. `pdp.Decide` reads `DecideRequest.Signals` the
+    way it reads `EstCostUSD`. Nothing in `internal/pdp`, `internal/policy`,
+    `internal/replay`, `internal/approval` or `internal/archive`, or any package
+    of this module in their import closure, imports `net/http` or `os/exec`:
+    a decision cannot make an outbound call, and a replay cannot ask anybody.
+    A signal's `source` is the caller's claim, recorded and never branched on,
+    and a lying caller is believed, which costs a delay for a person and
+    nothing else because of invariant 25. Caps: 16 signals, 128 bytes a text
+    field, 12 KiB of tool arguments. A tool call the enforcement point marked
+    `arguments_truncated` carries no arguments, and one that says both is a 400.
+    *(gate: `scripts/decision-path-purity.sh`, three cases in
+    `gates-have-teeth.sh`; test: `TestTheDecisionPathAndReplayCannotMakeAnOutboundCall`,
+    `TestHostileSignalAndToolCallInputIsRefusedAtTheAPI`,
+    `TestAnySourceTheCallerNamesIsRecordedAsClaimed`,
+    `TestTruncatedArgumentsAreAcceptedWithNoArgumentsAndRecordedAsTruncated`,
+    `TestTruncatedArgumentsBesideArgumentsAreRefused` in `internal/api`;
+    `TestSignalValidationRefusesTheMalformed`,
+    `TestToolCallValidationCapsWhatCanBeSent`,
+    `TestATruncatedToolCallIsConsistentOrRefused` in `internal/pdp`)*
+
+27. **A decision records every signal it read, and a replay feeds them back
+    and asks nobody.** The decision event and the approval context carry each
+    signal in full (`name`, `value`, `probability`, `source`, `answer_id`) and
+    carry the key only when the decision used any, so a decision that used none
+    is recorded as it always was. The tool call a request carried is recorded
+    as `tool_call` (`name`, `target`, `arguments_sha256`, the sha-256 of the
+    arguments exactly as received, and `arguments_truncated`), never the
+    arguments themselves: they can carry customer data. The hash ties a signal
+    to the call it was about. `Decide` does not read `tool_call`; the signals
+    are what replay feeds back. `wardryx replay` puts the recorded signals to
+    the PDP with the rest of the question, so a hold caused by a signal
+    reproduces with whatever produced it unreachable; a record whose signals
+    are not the shape the emitter writes is `unreadable`, by name, never
+    guessed. A hold a person granted replays as `approval-decided`, as a cost
+    hold does.
+    *(test: `TestEverySignalUsedIsRecordedInTheEventAndTheApprovalContext`,
+    `TestADecisionWithNoSignalsCarriesNoSignalsKey`,
+    `TestToolArgumentsNeverReachTheRecord`,
+    `TestTheToolCallIsRecordedAsNameTargetAndAHashOfItsArguments`,
+    `TestADecisionWithNoToolCallRecordsNoToolCallKey`,
+    `TestAReplayReproducesASignalHoldFromTheRecordAlone`,
+    `TestAReplayOfACallerSuppliedSignalHoldAlsoReproduces`,
+    `TestAGrantedSignalHoldReplaysAsApprovalDecided` in `internal/api`;
+    `TestARecordedSignalIsFedBackAndTheHoldReproduces`,
+    `TestAHoldWhoseSignalWasNotRecordedIsADivergenceNotAReproduction`,
+    `TestACandidateWithoutTheRuleChangesTheRecordedHold`,
+    `TestMalformedRecordedSignalsAreUnreadableNotGuessed` in
+    `internal/replay`; `TestDecisionInputCoversEveryDecideRequestField`)*

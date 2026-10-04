@@ -99,6 +99,7 @@ PREDICATES = {
     "deniedDomain": "allow_domains",
     "deniedAboveCeiling": "deny_above_usd",
     "overThreshold": "require_human_above_usd",
+    "heldBySignal": "hold_if_signal",
 }
 # DISCOVERED, not declared. The deny checks are `if [...] ok := <fn>(...)` or
 # `if err := <fn>(...)`, and every one of them is found here. `PREDICATES` then

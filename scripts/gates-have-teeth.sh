@@ -192,6 +192,15 @@ run_case "decision-path-purity: the PDP takes randomness" fail \
 	"$(py 'edit("internal/pdp/pdp.go", "import (", "import (\n\t_ \"crypto/rand\"")')" \
 	"imports 'crypto/rand' directly"
 
+# A decision's replay that could reach code making an outbound call could not
+# reproduce a recorded decision with the outside world unreachable, which is
+# what the recorded signals are for. internal/otel is a real package of this
+# module that posts over HTTP.
+run_case "decision-path-purity: replay reaches a package that makes outbound calls" fail \
+	'./scripts/decision-path-purity.sh' \
+	"$(py 'edit("internal/replay/replay.go", "import (", "import (\n\t_ \"github.com/TAIPANBOX/wardryx/internal/otel\"")')" \
+	"which imports 'net/http'"
+
 run_case "no-raw-error-in-response: a driver error written into a body" fail \
 	'./scripts/no-raw-error-in-response.sh' \
 	"$(py 'edit("internal/api/api.go", "writeInternalError(w, \"listing policies\", err)", "writeError(w, http.StatusInternalServerError, err.Error())")')" \
@@ -273,6 +282,12 @@ run_case "no-raw-error-in-response: an error logged and not returned" pass \
 	'./scripts/no-raw-error-in-response.sh' \
 	"$(py 'edit("internal/api/api.go", "func writeError(w http.ResponseWriter", "func loggedNotReturned(err error) { log.Printf(\"x: %v\", err.Error()) }\n\nfunc writeError(w http.ResponseWriter")')"
 
+# Another internal package is not an outbound call. A gate that flagged any
+# internal import would be flagging the structure it exists to protect.
+run_case "decision-path-purity: replay imports another internal package" pass \
+	'./scripts/decision-path-purity.sh' \
+	"$(py 'edit("internal/replay/replay.go", "import (", "import (\n\t_ \"github.com/TAIPANBOX/wardryx/internal/store\"")')"
+
 run_case "decision-path-purity: a pure stdlib import on the decision path" pass \
 	'./scripts/decision-path-purity.sh' \
 	"$(py 'edit("internal/pdp/pdp.go", "import (", "import (\n\t_ \"sort\"")')"
@@ -303,6 +318,11 @@ run_case "decide-order: the doc comment is gone" fail \
 	"$(py 'edit("internal/pdp/pdp.go",
         "// Decide evaluates req against",
         "// Decide handles the request")')" \
+	"measured nothing"
+
+run_case "decision-path-purity: a package of the decision's closure is gone" fail \
+	'./scripts/decision-path-purity.sh' \
+	"$(py 'import shutil; shutil.rmtree("internal/archive")')" \
 	"measured nothing"
 
 run_case "no-raw-error-in-response: no internal/api left to read" fail \

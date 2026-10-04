@@ -44,6 +44,8 @@ package api
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -431,6 +433,74 @@ type decideRequestDTO struct {
 	// every caller that has not been upgraded look like one that verifies.
 	ChainProven   bool   `json:"chain_proven,omitempty"`
 	ApprovalToken string `json:"approval_token,omitempty"`
+	// Signals are typed facts the caller established before asking.
+	Signals []signalDTO `json:"signals,omitempty"`
+	// ToolCall is the concrete call this request is about to make.
+	ToolCall *toolCallDTO `json:"tool_call,omitempty"`
+}
+
+type signalDTO struct {
+	Name        string   `json:"name"`
+	Value       string   `json:"value"`
+	Probability *float64 `json:"probability"`
+	Source      string   `json:"source"`
+	AnswerID    string   `json:"answer_id,omitempty"`
+}
+
+type toolCallDTO struct {
+	Name      string          `json:"name"`
+	Arguments json.RawMessage `json:"arguments,omitempty"`
+	Target    string          `json:"target,omitempty"`
+	// ArgumentsTruncated: the enforcement point could not send the arguments
+	// (too large). Then there are none to read, and none are asked about.
+	ArgumentsTruncated bool `json:"arguments_truncated,omitempty"`
+}
+
+// decideSignalInputs turns the optional signals and tool call of a decide
+// request into what the engine reads, refusing anything malformed with a
+// sentence that names the field and never echoes the value.
+//
+// A signal's source is the caller's own claim about who established it. It is
+// recorded and never branched on, and it is believed the way chain_proven is.
+func decideSignalInputs(dto decideRequestDTO) ([]pdp.Signal, *pdp.ToolCall, string) {
+	var signals []pdp.Signal
+	if len(dto.Signals) > pdp.MaxSignals {
+		return nil, nil, fmt.Sprintf("at most %d signals per request, got %d", pdp.MaxSignals, len(dto.Signals))
+	}
+	for i, d := range dto.Signals {
+		if d.Probability == nil {
+			return nil, nil, fmt.Sprintf("signals[%d].probability is required", i)
+		}
+		signals = append(signals, pdp.Signal{Name: d.Name, Value: d.Value, Probability: *d.Probability, Source: d.Source, AnswerID: d.AnswerID})
+	}
+	if err := pdp.ValidateSignals(signals); err != nil {
+		return nil, nil, err.Error()
+	}
+	if dto.ToolCall == nil {
+		return signals, nil, ""
+	}
+	tc := pdp.ToolCall{Name: dto.ToolCall.Name, Arguments: dto.ToolCall.Arguments, Target: dto.ToolCall.Target, ArgumentsTruncated: dto.ToolCall.ArgumentsTruncated}
+	if err := pdp.ValidateToolCall(tc); err != nil {
+		return nil, nil, err.Error()
+	}
+	return signals, &tc, ""
+}
+
+// signalsRecord is how a list of signals is written into an event and into an
+// approval's context: every field of every signal used, so a replay feeds back
+// exactly what the decision read and an approver sees what was claimed.
+func signalsRecord(signals []pdp.Signal) []any {
+	out := make([]any, 0, len(signals))
+	for _, sg := range signals {
+		out = append(out, map[string]any{
+			"name":        sg.Name,
+			"value":       sg.Value,
+			"probability": sg.Probability,
+			"source":      sg.Source,
+			"answer_id":   sg.AnswerID,
+		})
+	}
+	return out
 }
 
 // decisionInput is the question a decision answered: every input Decide read,
@@ -454,7 +524,7 @@ type decideRequestDTO struct {
 // TestDecisionInputCoversEveryDecideRequestField holds this to the shape of
 // pdp.DecideRequest itself, so a new PDP input cannot quietly skip the record.
 func decisionInput(req pdp.DecideRequest, resp pdp.DecideResponse) map[string]any {
-	return map[string]any{
+	in := map[string]any{
 		"tool_names":         req.ToolNames,
 		"domains":            req.Domains,
 		"steps":              req.Steps,
@@ -471,6 +541,28 @@ func decisionInput(req pdp.DecideRequest, resp pdp.DecideResponse) map[string]an
 		// disagreeing about the past.
 		"approval_token_required": resp.ApprovalTokenRequired,
 	}
+	// Every signal the decision read, and only when there were any: a decision
+	// that used none is recorded exactly as it was before signals existed. The
+	// tool call is recorded as name, target and a hash only.
+	if len(req.Signals) > 0 {
+		in["signals"] = signalsRecord(req.Signals)
+	}
+	// What the signals were derived from, without the data itself: the tool
+	// and target by name, and a hash of the arguments exactly as received, so
+	// an auditor can tie a recorded signal to the call it was about and replay
+	// can say the call was truncated. The arguments can carry customer data and
+	// are never written down. Decide does not read this; the signals above are
+	// what replay feeds back.
+	if tc := req.ToolCall; tc != nil {
+		sum := sha256.Sum256(tc.Arguments)
+		in["tool_call"] = map[string]any{
+			"name":                tc.Name,
+			"target":              tc.Target,
+			"arguments_sha256":    hex.EncodeToString(sum[:]),
+			"arguments_truncated": tc.ArgumentsTruncated,
+		}
+	}
+	return in
 }
 
 type decideResponseDTO struct {
@@ -498,6 +590,12 @@ func (s *Server) handleDecide(w http.ResponseWriter, r *http.Request, principal 
 		return
 	}
 
+	signals, toolCall, refusal := decideSignalInputs(dto)
+	if refusal != "" {
+		writeError(w, http.StatusBadRequest, refusal)
+		return
+	}
+
 	req := pdp.DecideRequest{
 		AgentID:           dto.AgentID,
 		RunID:             dto.RunID,
@@ -510,6 +608,8 @@ func (s *Server) handleDecide(w http.ResponseWriter, r *http.Request, principal 
 		AttestationMethod: dto.AttestationMethod,
 		ChainProven:       dto.ChainProven,
 		ApprovalToken:     dto.ApprovalToken,
+		Signals:           signals,
+		ToolCall:          toolCall,
 	}
 	resp := s.engine.Decide(req)
 
@@ -563,7 +663,7 @@ func (s *Server) handleDecide(w http.ResponseWriter, r *http.Request, principal 
 		}
 
 	case pdp.Hold:
-		held, err := approval.Request(r.Context(), s.store, req.AgentID, req.RunID, req.ToolNames, map[string]any{
+		holdContext := map[string]any{
 			"org":                principal.Org,
 			"model":              req.Model,
 			"est_cost_usd":       req.EstCostUSD,
@@ -572,7 +672,13 @@ func (s *Server) handleDecide(w http.ResponseWriter, r *http.Request, principal 
 			"chain_proven":       req.ChainProven,
 			"reason":             resp.Reason,
 			"policy_version":     resp.PolicyVersion,
-		})
+		}
+		// A person deciding this hold sees every signal that was used, with
+		// who said it and the answer id that finds the classifier's record.
+		if len(req.Signals) > 0 {
+			holdContext["signals"] = signalsRecord(req.Signals)
+		}
+		held, err := approval.Request(r.Context(), s.store, req.AgentID, req.RunID, req.ToolNames, holdContext)
 		if err != nil {
 			writeInternalError(w, "recording the approval hold", err)
 			return

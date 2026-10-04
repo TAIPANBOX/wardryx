@@ -72,14 +72,53 @@ for pkg in "${PURE_PKGS[@]}"; do
 	done <<<"$imports"
 done
 
+# A typed signal is an INPUT to a decision (a field of the request), never
+# something the decision fetches. So nothing the decision or its replay stands
+# on, in this module, may make an outbound call: no package in their import
+# closure that belongs to this module may import net/http or os/exec itself.
+# That is what lets a replay reproduce a recorded decision with whatever
+# produced the signal unreachable, and it is what would catch a "helper" that
+# a decision reached for to go and ask somebody.
+#
+# This one IS transitive over the module's own packages, unlike the check
+# above: the claim is about everything the decision stands on, and a hop
+# through an internal helper would break it just as surely. It reads only this
+# module's packages: third-party code (pgx, yaml) is the other gate's reading.
+MODULE="github.com/TAIPANBOX/wardryx/"
+CLOSURE_PKGS=(./internal/pdp ./internal/policy ./internal/replay ./internal/approval ./internal/archive)
+OUTBOUND=("net/http" "os/exec")
+
+for pkg in "${CLOSURE_PKGS[@]}"; do
+	if ! rows="$(go list -deps -f '{{.ImportPath}} {{join .Imports " "}}' "$pkg" 2>/dev/null)" || [ -z "$rows" ]; then
+		echo "measured nothing: go list -deps printed nothing for $pkg"
+		exit 2
+	fi
+	while read -r importer imports; do
+		case "$importer" in
+		"$MODULE"*) ;;
+		*) continue ;;
+		esac
+		for imp in $imports; do
+			for bad in "${OUTBOUND[@]}"; do
+				if [ "$imp" = "$bad" ]; then
+					echo "FAIL: $pkg depends on ${importer#"$MODULE"}, which imports '$imp'"
+					fail=1
+				fi
+			done
+		done
+	done <<<"$rows"
+done
+
 if [ "$fail" -ne 0 ]; then
 	echo
 	echo "A decision that reads a clock, a random source, the network or a"
 	echo "database in its own code cannot be replayed during an audit, and it is"
 	echo "not the same decision twice. See CLAUDE.md invariant 1."
 	echo
-	echo "Resolve the value at the API layer (internal/api) and pass it in."
+	echo "Resolve the value at the API layer (internal/api) and pass it in. A"
+	echo "signal from an outside service is such a value: it arrives as a field of"
+	echo "the request and is recorded, never fetched from inside the decision."
 	exit 1
 fi
 
-echo "OK: decision-path packages import no clock, randomness, network or DB directly."
+echo "OK: decision-path packages import no clock, randomness, network or DB directly, and nothing they stand on in this module makes an outbound call."
