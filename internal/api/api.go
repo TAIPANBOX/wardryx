@@ -44,8 +44,6 @@ package api
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -554,12 +552,14 @@ func decisionInput(req pdp.DecideRequest, resp pdp.DecideResponse) map[string]an
 	// are never written down. Decide does not read this; the signals above are
 	// what replay feeds back.
 	if tc := req.ToolCall; tc != nil {
-		sum := sha256.Sum256(tc.Arguments)
 		in["tool_call"] = map[string]any{
 			"name":                tc.Name,
 			"target":              tc.Target,
-			"arguments_sha256":    hex.EncodeToString(sum[:]),
+			"arguments_sha256":    approval.ArgumentsSHA256(tc.Arguments),
 			"arguments_truncated": tc.ArgumentsTruncated,
+			// The digest an approval of this call is bound to, so the record
+			// ties a hold and its token to the exact call.
+			"digest": tc.Digest(),
 		}
 	}
 	return in
@@ -655,7 +655,7 @@ func (s *Server) handleDecide(w http.ResponseWriter, r *http.Request, principal 
 		// policy_deny above, distinct from approval_requested (which
 		// covers only a *fresh* hold).
 		if dto.ApprovalToken != "" {
-			verr := approval.VerifyApprovalToken(s.approvalSecret, dto.ApprovalToken, req.AgentID, req.RunID, req.ToolNames, req.EstCostUSD)
+			verr := approval.VerifyApprovalTokenForCall(s.approvalSecret, dto.ApprovalToken, req.AgentID, req.RunID, req.ToolNames, req.EstCostUSD, req.ToolCall.Digest())
 			if errors.Is(verr, approval.ErrTokenExpired) {
 				s.emit(evApprovalTimeout, event.SeverityHigh, req.AgentID, req.RunID, req.OnBehalfOf,
 					map[string]any{"reason": "presented approval_token had expired"})
@@ -677,6 +677,18 @@ func (s *Server) handleDecide(w http.ResponseWriter, r *http.Request, principal 
 		// who said it and the answer id that finds the classifier's record.
 		if len(req.Signals) > 0 {
 			holdContext["signals"] = signalsRecord(req.Signals)
+		}
+		// The call a person is asked to approve, by name and target and the
+		// digest the grant will bind the token to; never the arguments, which
+		// can carry customer data. Absent when the request carried no call, in
+		// which case the grant binds none, as it always did.
+		if tc := req.ToolCall; tc != nil {
+			holdContext[approval.ContextKeyToolCall] = map[string]any{
+				"name":                    tc.Name,
+				"target":                  tc.Target,
+				"arguments_truncated":     tc.ArgumentsTruncated,
+				approval.ContextKeyDigest: tc.Digest(),
+			}
 		}
 		held, err := approval.Request(r.Context(), s.store, req.AgentID, req.RunID, req.ToolNames, holdContext)
 		if err != nil {

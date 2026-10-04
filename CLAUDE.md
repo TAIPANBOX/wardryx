@@ -828,9 +828,10 @@ decision outcome and every exported signature identical.
     carry the key only when the decision used any, so a decision that used none
     is recorded as it always was. The tool call a request carried is recorded
     as `tool_call` (`name`, `target`, `arguments_sha256`, the sha-256 of the
-    arguments exactly as received, and `arguments_truncated`), never the
-    arguments themselves: they can carry customer data. The hash ties a signal
-    to the call it was about. `Decide` does not read `tool_call`; the signals
+    arguments exactly as received, `arguments_truncated`, and, since
+    invariant 28, `digest`, the value an approval of the call is bound to),
+    never the arguments themselves: they can carry customer data. The hash
+    ties a signal to the call it was about. `Decide` does not read `tool_call`; the signals
     are what replay feeds back. `wardryx replay` puts the recorded signals to
     the PDP with the rest of the question, so a hold caused by a signal
     reproduces with whatever produced it unreachable; a record whose signals
@@ -850,3 +851,75 @@ decision outcome and every exported signature identical.
     `TestACandidateWithoutTheRuleChangesTheRecordedHold`,
     `TestMalformedRecordedSignalsAreUnreadableNotGuessed` in
     `internal/replay`; `TestDecisionInputCoversEveryDecideRequestField`)*
+
+28. **An approval is for the call a person read, not for the tool.** `@decided
+    2026-10-04`: an approval for a call that a policy held is bound to that
+    call's arguments. Before this, a token bound agent, run, tool set and cost,
+    so a person who approved "delete repo X" had also approved "delete repo Y"
+    with the same tool for the token's lifetime; single-use limited it to one
+    use but not to the call that was read. Now, when a hold is created for a
+    request that carries a `tool_call`, the approval's context records the
+    call's `name`, `target`, `arguments_truncated` and `digest` (never the
+    arguments), the approvals list and `wardryx approvals` show the tool and
+    target, and the granted token carries the same digest in a signed, versioned
+    claim. The digest is `approval.ToolCallDigest`: a sha-256 over a fixed
+    domain tag, then name and target each with an 8-byte length prefix, then the
+    sha-256 of the arguments exactly as received (the same value the event
+    records as `arguments_sha256`), then the truncated flag. Verification
+    (`approval.VerifyApprovalTokenForCall`, which `Decide` and the timeout check
+    call with the presented call's digest) refuses a token whose digest differs
+    from the presented call's, and refuses a digest-bound token on a request
+    with no `tool_call`. Under a cost threshold that refusal is the same deny as
+    any invalid token; under a signal hold it holds again with an approval of
+    its own, as invariant 25 requires. A refused attempt does not redeem the
+    token (redemption happens only after an allow), so single-use still allows
+    the approved call once. The digest is compared with `hmac.Equal`, as the
+    signature is. A grant refuses (`ErrToolCallContext`) before writing anything
+    when a hold's context names a tool call but holds no well-formed digest, so
+    a damaged hold can never become a token that binds nothing.
+
+    **Format and back-compat.** A token minted for a hold whose request carried
+    no `tool_call` is minted exactly as before (no `v`, no `tcd`), verifies on a
+    request with no `tool_call` exactly as before, and every token minted before
+    this change verifies as it did. A token with a digest is claims version 2
+    (`v: 2`, `tcd`); a version other than absent or 2 is refused
+    (`ErrTokenVersion`), as is a version-absent token that carries a digest and a
+    version-2 token without a well-formed one. Limits, named: a token with no
+    digest also verifies on a request that carries a call (it was granted with
+    no call in view, so nobody was shown one, and it binds what it always did);
+    a call whose arguments were truncated binds only name, target and the flag;
+    the digest is over the argument bytes as received, so the same JSON
+    re-spaced is another call and is refused; the caller is believed to describe
+    the call it will make, the same boundary as a signal (invariant 26); and a
+    build from before this change verifies a bound token without checking the
+    digest (it ignores unknown claims), which is the old behaviour and never
+    wider, so a rollback loses the binding for tokens still inside their TTL.
+    *(test: `TestAnApprovalForOneCallIsRefusedForAnotherCallOfTheSameTool`,
+    `TestACostHoldIsBoundToTheCallAndARefusedCallDenies`,
+    `TestTheSameCallPresentedWithItsTokenIsAllowed`,
+    `TestSingleUseStillHoldsForABoundTokenAndARefusedCallDoesNotSpendIt`,
+    `TestATokenBoundToACallIsRefusedOnARequestThatCarriesNone`,
+    `TestATokenGrantedForARequestWithNoCallIsTheTokenItAlwaysWas`,
+    `TestTheApprovalShowsTheCallAndTheTokenEventAndContextAgree`,
+    `TestArgumentsWrittenWithOtherWhitespaceAreAnotherCall`,
+    `TestAHoldWhoseCallDigestIsDamagedCannotBeGrantedUnbound` in
+    `internal/api`; `TestASignalHoldIsLiftedOnlyForTheCallThatWasApproved`,
+    `TestACostGateTokenForOneCallDeniesAnotherAndNamesNeitherDigest` in
+    `internal/pdp`; `TestTheDigestSeparatesEveryPartOfTheCall`,
+    `TestTheDigestCannotBeForgedByMovingBytesBetweenNameAndTarget`,
+    `TestATokenBoundToACallVerifiesForThatCallOnly`,
+    `TestALegacyTokenOnARequestWithNoToolCallIsAcceptedAsBefore`,
+    `TestATokenInTheExactPreChangeFormatStillVerifies`,
+    `TestHostileTokensAreRefusedWithoutPanic`,
+    `TestALegacyVersionTokenCarryingADigestIsRefusedNotTreatedAsUnbound`,
+    `TestEveryPrefixOfATokenAndRandomBytesAreRefusedWithoutPanic`,
+    `TestAHoldWithADamagedCallDigestIsNotGrantedUnboundAndStaysPending`,
+    `TestTheSignatureAndTheDigestAreComparedInConstantTime` (reads the verifier's
+    source: the compare is not behaviourally observable),
+    `TestNoProductionCodeOutsideThisPackageUsesTheUnboundEntryPoints` in
+    `internal/approval`; `TestTheApprovalsListNamesTheCallBeingApproved` in
+    `cmd/wardryx`; scenarios in `features/approval-bound-to-the-call.feature`;
+    mutants named in the PR that added it, each caught: digest ignored at
+    verify, digest over the name only, target left out of the digest, the
+    constant-time compare replaced, the legacy path accepting a digest-bound
+    token without the digest)*

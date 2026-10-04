@@ -21,6 +21,7 @@ import (
 
 	"github.com/TAIPANBOX/agent-stack-go/event"
 	"github.com/TAIPANBOX/wardryx/internal/api"
+	"github.com/TAIPANBOX/wardryx/internal/approval"
 	"github.com/TAIPANBOX/wardryx/internal/archive"
 	"github.com/TAIPANBOX/wardryx/internal/config"
 	wotel "github.com/TAIPANBOX/wardryx/internal/otel"
@@ -592,16 +593,36 @@ func runApprovals(args []string) error {
 	}
 
 	tw := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(tw, "APPROVAL_ID\tAGENT\tRUN\tSTATUS\tDECIDED_BY\tREQUESTED_AT")
+	fmt.Fprintln(tw, "APPROVAL_ID\tAGENT\tRUN\tCALL\tSTATUS\tDECIDED_BY\tREQUESTED_AT")
 	for _, a := range list {
 		status := "pending"
 		if !a.Pending() {
 			status = a.Decision
 		}
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n",
-			a.ApprovalID, a.AgentID, a.RunID, status, orDash(a.DecidedBy), a.RequestedAt.UTC().Format("2006-01-02 15:04:05Z"))
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+			a.ApprovalID, a.AgentID, a.RunID, approvalCall(a), status, orDash(a.DecidedBy), a.RequestedAt.UTC().Format("2006-01-02 15:04:05Z"))
 	}
 	return tw.Flush()
+}
+
+// approvalCall names the tool call a person is approving, as "name target", or
+// "-" when the held request carried none. Never the arguments: the approval
+// context does not hold them.
+func approvalCall(a store.Approval) string {
+	tc, _ := a.Context[approval.ContextKeyToolCall].(map[string]any)
+	if tc == nil {
+		return "-"
+	}
+	name, _ := tc["name"].(string)
+	target, _ := tc["target"].(string)
+	switch {
+	case name == "":
+		return "-"
+	case target == "":
+		return name
+	default:
+		return name + " " + target
+	}
 }
 
 func orDash(s string) string {
