@@ -9,6 +9,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/TAIPANBOX/wardryx/internal/approval"
 	"github.com/TAIPANBOX/wardryx/internal/policy"
 )
 
@@ -67,6 +68,20 @@ type ToolCall struct {
 	// ArgumentsTruncated says the enforcement point cut the arguments off
 	// (they were too large to send), so Arguments is empty and means nothing.
 	ArgumentsTruncated bool
+}
+
+// Digest is the digest an approval for this call is bound to
+// (approval.ToolCallDigest): name, target, a sha-256 of the arguments exactly as
+// received, and the truncated flag. It is the same value the decision event
+// records as tool_call.digest and the same one a granted token carries, so the
+// record, the hold a person saw and the token agree. A nil call has no digest
+// and returns "", which is how a request that carries no tool call presents
+// itself to approval.VerifyApprovalTokenForCall.
+func (tc *ToolCall) Digest() string {
+	if tc == nil {
+		return ""
+	}
+	return approval.ToolCallDigest(tc.Name, tc.Target, tc.Arguments, tc.ArgumentsTruncated)
 }
 
 // ValidateSignals refuses a malformed list of signals. It names the index and

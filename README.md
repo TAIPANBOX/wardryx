@@ -6,7 +6,7 @@
 
 [![CI](https://github.com/TAIPANBOX/wardryx/actions/workflows/ci.yml/badge.svg)](https://github.com/TAIPANBOX/wardryx/actions/workflows/ci.yml)
 ![Go](https://img.shields.io/badge/go-1.27-00ADD8.svg)
-![tests](https://img.shields.io/badge/tests-362-brightgreen.svg)
+![tests](https://img.shields.io/badge/tests-394-brightgreen.svg)
 ![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)
 ![Status](https://img.shields.io/badge/status-deterministic%20PDP-2dd4bf.svg)
 
@@ -194,7 +194,8 @@ Response (a hold, in this example, because `send_wire_transfer`'s cost is above 
                 (pending row written to store; nothing blocks)
 
 3. admin    -> POST /v1/approvals/{id}/decide {"decision":"grant", ...} -> wardryx
-                (wardryx mints an approval_token bound to agent_id/run_id/tool set)
+                (wardryx mints an approval_token bound to agent_id/run_id/tool set,
+                 and, when the held request carried a tool_call, to that call)
 4. wardryx  -> {"approval_token": "..."}                        -> admin
 
 5. agent    -> POST /v1/decide (same action, approval_token set) -> wardryx
@@ -203,7 +204,9 @@ Response (a hold, in this example, because `send_wire_transfer`'s cost is above 
 
 No connection is ever parked waiting for the human: the agent (or its orchestrator) polls `GET /v1/approvals` or is notified out of band, and the eventual grant is proven by the signed token, not by wardryx remembering an open request. This mirrors the stateless kill-switch pattern already used elsewhere in the TAIPANBOX stack (TokenFuse).
 
-The token is a compact `base64url(claims) + "." + hex(HMAC-SHA256)` string, where `claims` is `{agent_id, run_id, tools (sorted), max_cost_usd, exp}`. Verification recomputes the HMAC over the still-encoded payload before decoding anything, checks the expiry (default 10 minutes from grant), checks that the agent/run/tool-set presented at `/v1/decide` exactly match what was granted, and checks that the presented `est_cost_usd` does not exceed `max_cost_usd`. `WARDRYX_APPROVAL_SECRET` is fail-closed: unset, minting and verifying both refuse rather than accept, since there is no such thing as an unsigned or always-valid token.
+The token is a compact `base64url(claims) + "." + hex(HMAC-SHA256)` string, where `claims` is `{agent_id, run_id, tools (sorted), max_cost_usd, exp, nonce}`, plus `v` and `tcd` when the token is bound to a tool call (below). Verification recomputes the HMAC over the still-encoded payload before decoding anything, checks the expiry (default 10 minutes from grant), checks that the agent/run/tool-set presented at `/v1/decide` exactly match what was granted, and checks that the presented `est_cost_usd` does not exceed `max_cost_usd`. `WARDRYX_APPROVAL_SECRET` is fail-closed: unset, minting and verifying both refuse rather than accept, since there is no such thing as an unsigned or always-valid token.
+
+**An approval is for the call a person read.** When the held request carries a `tool_call`, the approval records the call's `name`, `target`, `arguments_truncated` and a `digest` (never the arguments), so `GET /v1/approvals` and `wardryx approvals` show the tool and target being approved, and the granted token carries the same digest in a signed claim (`v: 2`, `tcd`). The digest is a sha-256 over the tool name, the target, the sha-256 of the arguments exactly as received (the `arguments_sha256` the decision event records) and the truncated flag, each part length-prefixed so none can be moved into another. A token bound to a call is refused for any other call: another argument, target, tool name or truncation, and the same JSON re-spaced, is a different call. It is also refused on a request that carries no `tool_call`. Under a cost threshold the refusal is the same deny as any invalid token; under a signal hold the other call holds again and gets an approval of its own. A refused attempt does not use up a single-use token. A hold created for a request with no `tool_call`, and every token minted before this change, keep working exactly as they did: the token carries neither a version nor a digest and binds agent, run, tool set and cost only. Two limits: a call whose arguments were truncated (too large to send) binds only name, target and the flag, and a build from before this change checks a bound token without the digest, so a rollback drops the binding for tokens still inside their TTL.
 
 `max_cost_usd` is a real ceiling, not a label carried along for reference: it is set to the exact `est_cost_usd` that triggered the hold (the amount a human is actually approving, not merely the policy's `require_human_above_usd` threshold it crossed), and `/v1/decide` rejects any later presentation of the token whose `est_cost_usd` exceeds it, even with a correct signature, an unexpired token, and a matching agent/run/tool set. A legitimate retry at the same or a lower cost still succeeds, since the check is "at or under the ceiling", not "exactly equal". This makes a granted approval narrower than it might look: it authorizes spend up to a specific dollar figure for that agent/run/tool set, not blanket permission for whatever the agent tries next under the same token. A token minted before `max_cost_usd` existed decodes it as `0`, and `0` is deliberately never treated as "no ceiling": such a token fails closed against any positive `est_cost_usd`, the same as a token whose ceiling was explicitly set to zero.
 
@@ -316,7 +319,7 @@ hold_if_signal:
 
 **A signal is an input, never something wardryx fetches.** The caller of `/v1/decide` sends `signals` (at most 16) and, optionally, the `tool_call` they are about (`name`, `arguments` as raw JSON up to 12 KiB, `target`, and `arguments_truncated` when the arguments were too large to send, in which case none are sent). Wardryx believes a signal the way it believes `chain_proven`: a false signal costs a person a delay and cannot cost anything else, and the `source` is the caller's own claim, recorded and never branched on. Who produces signals is deployment configuration outside this service: for example a proxy placed in front of wardryx that classifies tool calls and adds a signal to the request it forwards. Nothing in `internal/pdp`, `internal/policy` or `internal/replay` makes a network call, and `scripts/decision-path-purity.sh` fails if anything they stand on in this module imports `net/http` or `os/exec`. A deployment with no signal producer runs exactly as it did before: `hold_if_signal` simply never fires.
 
-**What is recorded.** The decision event and the approval context carry every signal the decision read (name, value, probability, source, answer id), so a person deciding the hold sees who said what, and `wardryx replay` feeds the recorded signals back: a hold caused by a signal reproduces with whatever produced it unreachable. The tool call is recorded as its name, its target, a sha-256 of its arguments exactly as received, and whether they were truncated, never the arguments, since they can carry customer data. A decision that carried neither is recorded as it always was.
+**What is recorded.** The decision event and the approval context carry every signal the decision read (name, value, probability, source, answer id), so a person deciding the hold sees who said what, and `wardryx replay` feeds the recorded signals back: a hold caused by a signal reproduces with whatever produced it unreachable. The tool call is recorded as its name, its target, a sha-256 of its arguments exactly as received, whether they were truncated, and the `digest` an approval of the call is bound to, never the arguments, since they can carry customer data. A decision that carried neither is recorded as it always was.
 
 ---
 
@@ -426,7 +429,7 @@ WARDRYX_KEYS="$KEYS" ./bin/wardryx serve -addr :9000 -policy ./policies -db "$DS
 ./bin/wardryx check ./passports ./policies/finance.yaml
 ./bin/wardryx check -format json ./passports ./policies/finance.yaml
 
-# approvals: list pending/decided approvals from Postgres
+# approvals: list pending/decided approvals from Postgres, naming the tool call each one is about
 ./bin/wardryx approvals -db "$DSN"
 
 # replay: what a candidate policy would have done to decisions already taken

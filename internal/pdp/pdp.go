@@ -122,8 +122,9 @@ type DecideRequest struct {
 	ChainProven bool
 	// ApprovalToken, if non-empty, is presented as proof that a human
 	// already approved this exact (agent_id, run_id, tool-set) after an
-	// earlier hold. A valid token turns what would be a "hold" into an
-	// "allow".
+	// earlier hold, and, when that hold's request carried a ToolCall, that
+	// exact call (CLAUDE.md invariant 28). A valid token turns what would be a
+	// "hold" into an "allow".
 	ApprovalToken string
 	// Signals are typed facts about this request that somebody else
 	// established before calling (see Signal).
@@ -406,7 +407,7 @@ func (e *Engine) Decide(req DecideRequest) DecideResponse {
 	if pol, ok := overThreshold(matched, req.EstCostUSD); ok {
 		resp.ApprovalTokenRequired = true
 		if req.ApprovalToken != "" {
-			verr := approval.VerifyApprovalToken(e.approvalSecret, req.ApprovalToken, req.AgentID, req.RunID, req.ToolNames, req.EstCostUSD)
+			verr := approval.VerifyApprovalTokenForCall(e.approvalSecret, req.ApprovalToken, req.AgentID, req.RunID, req.ToolNames, req.EstCostUSD, req.ToolCall.Digest())
 			if verr == nil {
 				resp.Decision = Allow
 				resp.Reason = fmt.Sprintf("estimated cost %s exceeds policy %q threshold %s; allowed via a valid approval_token", formatUSD(req.EstCostUSD), pol.Name, formatUSD(*pol.RequireHumanAboveUSD))
@@ -434,7 +435,7 @@ func (e *Engine) Decide(req DecideRequest) DecideResponse {
 		why := fmt.Sprintf("policy %q hold_if_signal: signal %q is %q at probability %s (the rule holds from %s)",
 			pol.Name, sig.Name, sig.Value, formatProbability(sig.Probability), formatProbability(*pol.HoldIfSignal.MinProbability))
 		if req.ApprovalToken != "" &&
-			approval.VerifyApprovalToken(e.approvalSecret, req.ApprovalToken, req.AgentID, req.RunID, req.ToolNames, req.EstCostUSD) == nil {
+			approval.VerifyApprovalTokenForCall(e.approvalSecret, req.ApprovalToken, req.AgentID, req.RunID, req.ToolNames, req.EstCostUSD, req.ToolCall.Digest()) == nil {
 			resp.Decision = Allow
 			resp.Reason = why + "; allowed via a valid approval_token"
 			return resp

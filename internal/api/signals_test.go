@@ -15,6 +15,7 @@ import (
 	"testing"
 
 	"github.com/TAIPANBOX/agent-stack-go/event"
+	"github.com/TAIPANBOX/wardryx/internal/approval"
 	"github.com/TAIPANBOX/wardryx/internal/archive"
 	"github.com/TAIPANBOX/wardryx/internal/pdp"
 	"github.com/TAIPANBOX/wardryx/internal/policy"
@@ -481,7 +482,11 @@ func TestTheToolCallIsRecordedAsNameTargetAndAHashOfItsArguments(t *testing.T) {
 	if tc == nil {
 		t.Fatalf("a decision that carried a tool call records no tool_call: %#v", hold.Data)
 	}
-	want := map[string]any{"name": "s3.delete_object", "target": "s3://prod-backups", "arguments_sha256": hex.EncodeToString(sum[:]), "arguments_truncated": false}
+	// "digest" is what an approval of this call is bound to (invariant 28): the
+	// record carries it so a hold and its token tie back to the exact call. It
+	// is a hash, so the no-raw-arguments assertions below still stand.
+	want := map[string]any{"name": "s3.delete_object", "target": "s3://prod-backups", "arguments_sha256": hex.EncodeToString(sum[:]), "arguments_truncated": false,
+		"digest": approval.ToolCallDigest("s3.delete_object", "s3://prod-backups", ask.ToolCall.Arguments, false)}
 	for k, w := range want {
 		if tc[k] != w {
 			t.Errorf("tool_call[%q] = %#v, want %#v", k, tc[k], w)
