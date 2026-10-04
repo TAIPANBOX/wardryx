@@ -37,7 +37,7 @@ func signalHoldEvent(version string, signals any) event.Event {
 }
 
 func destructiveSignal() []any {
-	return []any{map[string]any{"name": "action.risk_class", "value": "destructive", "probability": 0.95, "source": "typryx", "answer_id": "ans-1"}}
+	return []any{map[string]any{"name": "action.risk_class", "value": "destructive", "probability": 0.95, "source": "classifier", "answer_id": "ans-1"}}
 }
 
 func TestARecordedSignalIsFedBackAndTheHoldReproduces(t *testing.T) {
@@ -89,10 +89,10 @@ func TestMalformedRecordedSignalsAreUnreadableNotGuessed(t *testing.T) {
 	cases := map[string]any{
 		"not a list":              "destructive",
 		"an item that is text":    []any{"destructive"},
-		"no probability":          []any{map[string]any{"name": "action.risk_class", "value": "destructive", "source": "typryx"}},
-		"a string probability":    []any{map[string]any{"name": "action.risk_class", "value": "destructive", "probability": "0.95", "source": "typryx"}},
-		"a probability above one": []any{map[string]any{"name": "action.risk_class", "value": "destructive", "probability": 1.5, "source": "typryx"}},
-		"no name":                 []any{map[string]any{"value": "destructive", "probability": 0.95, "source": "typryx"}},
+		"no probability":          []any{map[string]any{"name": "action.risk_class", "value": "destructive", "source": "classifier"}},
+		"a string probability":    []any{map[string]any{"name": "action.risk_class", "value": "destructive", "probability": "0.95", "source": "classifier"}},
+		"a probability above one": []any{map[string]any{"name": "action.risk_class", "value": "destructive", "probability": 1.5, "source": "classifier"}},
+		"no name":                 []any{map[string]any{"value": "destructive", "probability": 0.95, "source": "classifier"}},
 	}
 	for name, signals := range cases {
 		t.Run(name, func(t *testing.T) {

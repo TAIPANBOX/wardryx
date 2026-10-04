@@ -23,7 +23,6 @@ import (
 	"github.com/TAIPANBOX/wardryx/internal/api"
 	"github.com/TAIPANBOX/wardryx/internal/archive"
 	"github.com/TAIPANBOX/wardryx/internal/config"
-	"github.com/TAIPANBOX/wardryx/internal/enrich"
 	wotel "github.com/TAIPANBOX/wardryx/internal/otel"
 	"github.com/TAIPANBOX/wardryx/internal/passports"
 	"github.com/TAIPANBOX/wardryx/internal/pdp"
@@ -153,48 +152,6 @@ flags:
 
 // --- serve ---
 
-// typryxFromConfig builds the optional signal enrichment from the environment,
-// or returns nil when no typryx was named, which is the default and means
-// nothing is ever asked of anyone. A configuration that names one and cannot
-// be used is an error that names the variable, never a silent fallback to
-// "off": an operator who set a URL and mistyped it would read the silence as
-// "on". The key is read here, once, and appears in no error and no log line.
-func typryxFromConfig(cfg config.Config) (*enrich.Typryx, error) {
-	if cfg.TypryxURL == "" {
-		return nil, nil
-	}
-	if cfg.TypryxTimeoutMS < 0 {
-		return nil, fmt.Errorf("WARDRYX_TYPRYX_TIMEOUT_MS must be a whole number of milliseconds greater than zero")
-	}
-	timeout := time.Duration(cfg.TypryxTimeoutMS) * time.Millisecond
-	if timeout > enrich.MaxTimeout {
-		return nil, fmt.Errorf("WARDRYX_TYPRYX_TIMEOUT_MS must be at most %d", enrich.MaxTimeout.Milliseconds())
-	}
-	key := ""
-	if cfg.TypryxKeyFile != "" {
-		k, err := enrich.ReadKeyFile(cfg.TypryxKeyFile)
-		if err != nil {
-			return nil, fmt.Errorf("WARDRYX_TYPRYX_KEY_FILE: %v", err)
-		}
-		key = k
-	}
-	c, err := enrich.NewTypryx(cfg.TypryxURL, key, timeout)
-	if err != nil {
-		return nil, fmt.Errorf("WARDRYX_TYPRYX_URL: %v", err)
-	}
-	return c, nil
-}
-
-// typryxWarning says so when typryx settings are present with no URL to give
-// them meaning, so an operator who set a key file and forgot the URL is not
-// left believing enrichment is on.
-func typryxWarning(cfg config.Config) string {
-	if cfg.TypryxURL == "" && (cfg.TypryxKeyFile != "" || cfg.TypryxTimeoutMS != 0) {
-		return "wardryx: WARDRYX_TYPRYX_KEY_FILE or WARDRYX_TYPRYX_TIMEOUT_MS is set but WARDRYX_TYPRYX_URL is not, so signal enrichment is OFF"
-	}
-	return ""
-}
-
 func runServe(args []string) error {
 	cfg := config.FromEnv()
 	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
@@ -209,16 +166,6 @@ func runServe(args []string) error {
 	}
 	if err := fs.Parse(args); err != nil {
 		return err
-	}
-
-	// Before anything is opened: a typryx that cannot be used is a refusal
-	// that names its variable, and nothing has been touched yet.
-	enricher, err := typryxFromConfig(cfg)
-	if err != nil {
-		return fmt.Errorf("refusing to start: %w", err)
-	}
-	if w := typryxWarning(cfg); w != "" {
-		fmt.Fprintln(os.Stderr, w)
 	}
 
 	policies, err := policy.Load(*policyPath)
@@ -290,10 +237,6 @@ func runServe(args []string) error {
 	engine := pdp.New(policies, []byte(cfg.ApprovalSecret))
 	basePolicies := policies.Policies()
 	srv := api.New(engine, st, events, otelExporter, keys, []byte(cfg.ApprovalSecret), cfg.ApprovalSingleUse, basePolicies)
-	if enricher != nil {
-		srv.SetSignalEnricher(enricher)
-		fmt.Fprintf(os.Stderr, "wardryx: asking typryx for action.risk_class on tool calls a hold_if_signal policy reads (timeout %s); a signal can only add a hold, and any failure is no signal\n", enricher.Timeout())
-	}
 
 	// Attached before anything is restored or served, because it keeps the
 	// set already in force as a side effect: the file-loaded base decides

@@ -14,7 +14,6 @@ import (
 
 	"github.com/TAIPANBOX/wardryx/internal/api"
 	"github.com/TAIPANBOX/wardryx/internal/config"
-	"github.com/TAIPANBOX/wardryx/internal/enrich"
 )
 
 // The README's environment table is the one place an operator reads what a
@@ -50,12 +49,6 @@ func codeDefaults(t *testing.T) map[string]string {
 	if !envSet("WARDRYX_APPROVAL_UNANSWERED_AFTER") {
 		unanswered = api.DefaultUnansweredAfter
 	}
-	// Signal enrichment's timeout: unset means serve builds the client with the
-	// package default (typryxFromConfig, a zero timeout).
-	typryxTimeout := int64(cfg.TypryxTimeoutMS)
-	if !envSet("WARDRYX_TYPRYX_TIMEOUT_MS") {
-		typryxTimeout = enrich.DefaultTimeout.Milliseconds()
-	}
 	return map[string]string{
 		"WARDRYX_ADDR":                      orDefault(cfg.Addr, serveAddrFallback(t)),
 		"WARDRYX_KEYS":                      cfg.Keys,
@@ -68,9 +61,6 @@ func codeDefaults(t *testing.T) map[string]string {
 		"WARDRYX_APPROVAL_SINGLE_USE":       strconv.FormatBool(cfg.ApprovalSingleUse),
 		"WARDRYX_APPROVAL_UNANSWERED_AFTER": unanswered.String(),
 		"WARDRYX_OTLP_ENDPOINT":             cfg.OTLPEndpoint,
-		"WARDRYX_TYPRYX_URL":                cfg.TypryxURL,
-		"WARDRYX_TYPRYX_KEY_FILE":           cfg.TypryxKeyFile,
-		"WARDRYX_TYPRYX_TIMEOUT_MS":         strconv.FormatInt(typryxTimeout, 10),
 	}
 }
 

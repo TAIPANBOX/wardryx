@@ -6,35 +6,29 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"io"
-	"log"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"sync/atomic"
 	"testing"
-	"time"
 
 	"github.com/TAIPANBOX/agent-stack-go/event"
 	"github.com/TAIPANBOX/wardryx/internal/archive"
-	"github.com/TAIPANBOX/wardryx/internal/enrich"
 	"github.com/TAIPANBOX/wardryx/internal/pdp"
 	"github.com/TAIPANBOX/wardryx/internal/policy"
 	"github.com/TAIPANBOX/wardryx/internal/replay"
 	"github.com/TAIPANBOX/wardryx/internal/store"
 )
 
-// A typed risk signal reaches a decision two ways: a caller supplies it, or
-// wardryx asks typryx for it. These tests drive both through the real handler,
-// with a fake typryx that can misbehave, and hold the record and the replay to
-// what was actually used.
+// A typed risk signal reaches a decision as a field of the request: whoever
+// calls /v1/decide, an enforcement point or a proxy in front of wardryx,
+// supplies it. These tests drive that through the real handler and hold the
+// record and the replay to what was actually used.
 
 const (
 	sigAgent = "agent://acme.example/support/bot1"
-	riskOK   = `{"answer_id":"ans-7","template":"action.risk_class","type":"choice","answer":"destructive","probabilities":{"read_only":0.02,"reversible_change":0.02,"destructive":0.94,"external_send":0.01,"financial":0.01}}`
 	argMark  = "SECRET-ARG-MARKER-9f3"
 )
 
@@ -117,47 +111,6 @@ func plainAsk() decideRequestDTO {
 }
 
 // fakeTyprx counts and records what wardryx asks, and answers as told.
-type fakeTyprx struct {
-	srv   *httptest.Server
-	asks  atomic.Int64
-	last  atomic.Value // []byte
-	keyIn atomic.Value // string
-}
-
-func newFakeTyprx(t *testing.T, handler func(w http.ResponseWriter, r *http.Request)) *fakeTyprx {
-	t.Helper()
-	f := &fakeTyprx{}
-	f.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		f.asks.Add(1)
-		b, _ := io.ReadAll(r.Body)
-		f.last.Store(b)
-		f.keyIn.Store(r.Header.Get("X-Typryx-Key"))
-		handler(w, r)
-	}))
-	t.Cleanup(f.srv.Close)
-	return f
-}
-
-func answerWith(body string) func(http.ResponseWriter, *http.Request) {
-	return func(w http.ResponseWriter, r *http.Request) { _, _ = io.WriteString(w, body) }
-}
-
-func (h *sigHarness) withTyprx(t *testing.T, f *fakeTyprx, timeout time.Duration) *enrich.Typryx {
-	t.Helper()
-	c, err := enrich.NewTypryx(f.srv.URL, "test-typryx-key", timeout)
-	if err != nil {
-		t.Fatalf("NewTypryx: %v", err)
-	}
-	h.srv.SetSignalEnricher(c)
-	return c
-}
-
-func quiet(t *testing.T) {
-	t.Helper()
-	prev := log.Writer()
-	log.SetOutput(io.Discard)
-	t.Cleanup(func() { log.SetOutput(prev) })
-}
 
 // --- a caller supplies the signal ---
 
@@ -259,8 +212,7 @@ func TestHostileSignalAndToolCallInputIsRefusedAtTheAPI(t *testing.T) {
 		"a name over the cap":               sig(`{"name":"` + strings.Repeat("n", 129) + `","value":"v","probability":0.5,"source":"s"}`),
 		"a control character in a value":    sig(`{"name":"n","value":"a\u0000b` + mark + `","probability":0.5,"source":"s"}`),
 		"no source":                         sig(`{"name":"n","value":"v","probability":0.5}`),
-		"a caller claiming to be typryx":    sig(`{"name":"n","value":"v","probability":0.5,"source":"typryx"}`),
-		"typryx in another case":            sig(`{"name":"n","value":"v","probability":0.5,"source":" Typryx "}`),
+		"a source over the cap":             sig(`{"name":"n","value":"v","probability":0.5,"source":"` + strings.Repeat("s", 129) + `"}`),
 		"seventeen signals":                 sig(many(pdp.MaxSignals + 1)),
 		"five thousand signals":             sig(many(5000)),
 		"signals as an object":              `{"agent_id":"` + sigAgent + `","run_id":"r","signals":{"a":1}}`,
@@ -306,230 +258,31 @@ func TestHostileSignalAndToolCallInputIsRefusedAtTheAPI(t *testing.T) {
 	})
 }
 
-// --- wardryx asks typryx ---
-
-func TestTyprxSayingDestructiveHoldsTheCallAndTheSignalIsRecorded(t *testing.T) {
-	quiet(t)
+func TestAnySourceTheCallerNamesIsRecordedAsClaimed(t *testing.T) {
 	h := newSigHarness(t, false)
-	f := newFakeTyprx(t, answerWith(riskOK))
-	h.withTyprx(t, f, time.Second)
-
-	got := decodeBody[decideResponseDTO](t, h.decide(t, plainAsk()))
-	if got.Decision != pdp.Hold {
-		t.Fatalf("typryx says destructive at 0.94 and the call is %s (%s), want hold", got.Decision, got.Reason)
-	}
-	if f.asks.Load() != 1 {
-		t.Fatalf("typryx asked %d times, want 1", f.asks.Load())
-	}
-	if k, _ := f.keyIn.Load().(string); k != "test-typryx-key" {
-		t.Errorf("typryx saw key %q", k)
-	}
-	var sent struct {
-		Template string
-		State    map[string]json.RawMessage
-	}
-	b, _ := f.last.Load().([]byte)
-	if err := json.Unmarshal(b, &sent); err != nil {
-		t.Fatalf("what typryx was sent is not JSON: %v", err)
-	}
-	if sent.Template != "action.risk_class" || len(sent.State) != 3 {
-		t.Fatalf("typryx was sent %s, want the template and exactly tool, arguments, target", b)
-	}
-
-	var hold *event.Event
-	evs := h.read(t)
-	for i := range evs {
-		if evs[i].Type == "approval_requested" {
-			hold = &evs[i]
-		}
-	}
-	if hold == nil {
-		t.Fatal("no approval_requested event")
-	}
-	list, _ := hold.Data["signals"].([]any)
-	if len(list) != 1 {
-		t.Fatalf("recorded signals = %#v", hold.Data["signals"])
-	}
-	s, _ := list[0].(map[string]any)
-	if s["source"] != "typryx" || s["value"] != "destructive" || s["answer_id"] != "ans-7" || s["probability"] != 0.94 || s["name"] != "action.risk_class" {
-		t.Fatalf("recorded signal = %#v", s)
-	}
-}
-
-func TestTyprxSayingSomethingBelowOrOutsideTheRuleLeavesTheCallAllowed(t *testing.T) {
-	quiet(t)
-	cases := map[string]string{
-		"read_only at 0.99":        strings.NewReplacer(`"answer":"destructive"`, `"answer":"read_only"`, `"read_only":0.02`, `"read_only":0.99`, `"destructive":0.94`, `"destructive":0.003`).Replace(riskOK),
-		"destructive at 0.5":       strings.Replace(riskOK, `"destructive":0.94`, `"destructive":0.5`, 1),
-		"destructive just under":   strings.Replace(riskOK, `"destructive":0.94`, `"destructive":0.7999`, 1),
-		"reversible_change at 0.9": strings.NewReplacer(`"answer":"destructive"`, `"answer":"reversible_change"`, `"reversible_change":0.02`, `"reversible_change":0.9`).Replace(riskOK),
-	}
-	for name, body := range cases {
-		t.Run(name, func(t *testing.T) {
-			h := newSigHarness(t, false)
-			h.withTyprx(t, newFakeTyprx(t, answerWith(body)), time.Second)
-			got := decodeBody[decideResponseDTO](t, h.decide(t, plainAsk()))
-			if got.Decision != pdp.Allow {
-				t.Fatalf("%s: the call is %s (%s), want allow", name, got.Decision, got.Reason)
-			}
-		})
-	}
-}
-
-// Every way typryx can fail: the call is decided exactly as it would have been
-// with no enrichment at all, nothing is recorded as a signal, and the failure
-// is counted where an operator can read it.
-func TestATyprxThatFailsLeavesTheOriginalDecisionAndNoSignal(t *testing.T) {
-	quiet(t)
-	release := make(chan struct{})
-	t.Cleanup(func() { close(release) })
-	cases := []struct {
-		name    string
-		timeout time.Duration
-		handler func(http.ResponseWriter, *http.Request)
-		class   string
-	}{
-		{"times out", 60 * time.Millisecond, func(w http.ResponseWriter, r *http.Request) {
-			select {
-			case <-release:
-			case <-r.Context().Done():
-			case <-time.After(3 * time.Second):
-			}
-			_, _ = io.WriteString(w, riskOK)
-		}, "timeout"},
-		{"answers 500", time.Second, func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(500) }, "http_5xx"},
-		{"answers unanswered", time.Second, answerWith(`{"answer_id":"a","template":"action.risk_class","type":"choice","unanswered":true,"reason":"backend_error"}`), "unanswered"},
-		{"answers garbage", time.Second, answerWith(`<html>not what was asked</html>`), "malformed"},
-		{"answers an answer that is not one of its probabilities", time.Second, answerWith(strings.Replace(riskOK, `"answer":"destructive"`, `"answer":"explode"`, 1)), "malformed"},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			// What the call is with no enrichment, as the control.
-			control := newSigHarness(t, false)
-			want := decodeBody[decideResponseDTO](t, control.decide(t, plainAsk()))
-
-			h := newSigHarness(t, false)
-			c := h.withTyprx(t, newFakeTyprx(t, tc.handler), tc.timeout)
-			got := decodeBody[decideResponseDTO](t, h.decide(t, plainAsk()))
-			if got.Decision != want.Decision || got.Reason != want.Reason {
-				t.Fatalf("typryx %s: the call is %s (%s), want the original %s (%s)", tc.name, got.Decision, got.Reason, want.Decision, want.Reason)
-			}
-			for _, ev := range h.read(t) {
-				if _, present := ev.Data["signals"]; present {
-					t.Fatalf("typryx %s but a signal was recorded: %#v", tc.name, ev.Data["signals"])
-				}
-			}
-			if n := c.Stats().NoSignal[tc.class]; n != 1 {
-				t.Fatalf("typryx %s: %q counted %d times, stats %+v", tc.name, tc.class, n, c.Stats())
-			}
-		})
-	}
-}
-
-func TestAnUnreachableTyprxLeavesTheOriginalDecision(t *testing.T) {
-	quiet(t)
-	h := newSigHarness(t, false)
-	f := newFakeTyprx(t, answerWith(riskOK))
-	c := h.withTyprx(t, f, time.Second)
-	f.srv.Close()
-	got := decodeBody[decideResponseDTO](t, h.decide(t, plainAsk()))
-	if got.Decision != pdp.Allow {
-		t.Fatalf("with typryx down the call is %s (%s), want allow", got.Decision, got.Reason)
-	}
-	if c.Stats().NoSignal["unreachable"] != 1 {
-		t.Fatalf("stats = %+v", c.Stats())
-	}
-}
-
-// Asking costs time and, with a hosted model behind typryx, money. It is asked
-// only when the answer could change the verdict.
-func TestTyprxIsAskedOnlyWhenTheAnswerCouldChangeTheVerdict(t *testing.T) {
-	quiet(t)
-	deny := policy.Policy{Name: "no-delete", Target: "agent://acme.example/support/*", DenyTool: []string{"s3.delete_object"}, HoldIfSignal: riskPol().HoldIfSignal}
-	cost := riskPol()
-	cost.RequireHumanAboveUSD = usd(10)
-	noRule := policy.Policy{Name: "plain", Target: "agent://acme.example/support/*", DenyTool: []string{"other"}}
-	elsewhere := riskPol()
-	elsewhere.Target = "agent://acme.example/finance/*"
-
-	cases := []struct {
-		name string
-		pols []policy.Policy
-		ask  func() decideRequestDTO
-		asks int64
-	}{
-		{"a policy reads the signal and the call is allowed so far", []policy.Policy{riskPol()}, plainAsk, 1},
-		{"no policy reads any signal", []policy.Policy{noRule}, plainAsk, 0},
-		{"the signal policy targets another agent", []policy.Policy{elsewhere}, plainAsk, 0},
-		{"a deny rule already refuses the call", []policy.Policy{deny}, plainAsk, 0},
-		{"a cost hold already holds the call", []policy.Policy{cost}, func() decideRequestDTO { a := plainAsk(); a.EstCostUSD = 50; return a }, 0},
-		{"the caller's own signal already holds the call", []policy.Policy{riskPol()}, func() decideRequestDTO {
-			a := plainAsk()
-			a.Signals = []signalDTO{callerSignal("destructive", 0.99)}
-			return a
-		}, 0},
-		{"the request carries no tool call", []policy.Policy{riskPol()}, func() decideRequestDTO { a := plainAsk(); a.ToolCall = nil; return a }, 0},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			h := newSigHarness(t, false, tc.pols...)
-			f := newFakeTyprx(t, answerWith(riskOK))
-			h.withTyprx(t, f, time.Second)
-			rec := h.decide(t, tc.ask())
-			if rec.Code != http.StatusOK {
-				t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
-			}
-			if f.asks.Load() != tc.asks {
-				t.Fatalf("typryx asked %d times, want %d", f.asks.Load(), tc.asks)
-			}
-		})
-	}
-}
-
-func TestWithNoEnrichmentConfiguredATyprxIsNeverAsked(t *testing.T) {
-	h := newSigHarness(t, false)
-	got := decodeBody[decideResponseDTO](t, h.decide(t, plainAsk()))
-	if got.Decision != pdp.Allow {
-		t.Fatalf("a tool call with no enricher configured: %s (%s), want allow", got.Decision, got.Reason)
-	}
-	status := decodeBody[map[string]any](t, doRequest(t, h.srv.Handler(), http.MethodGet, "/v1/status", adminKey, nil))
-	if _, present := status["signals"]; present {
-		t.Fatalf("/v1/status mentions signal enrichment while it is off: %#v", status["signals"])
-	}
-}
-
-func TestCallerSignalsAreKeptAndEnrichmentAppendsItsOwn(t *testing.T) {
-	quiet(t)
-	h := newSigHarness(t, false)
-	h.withTyprx(t, newFakeTyprx(t, answerWith(riskOK)), time.Second)
 	ask := plainAsk()
-	ask.Signals = []signalDTO{callerSignal("read_only", 0.9)} // harmless, so the call is still allowed and typryx is asked
-	got := decodeBody[decideResponseDTO](t, h.decide(t, ask))
-	if got.Decision != pdp.Hold {
-		t.Fatalf("the call is %s (%s), want hold from the appended typryx signal", got.Decision, got.Reason)
-	}
-	var hold event.Event
+	ask.Signals = []signalDTO{callerSignal("destructive", 0.95)}
+	ask.Signals[0].Source = "some-other-classifier"
+	h.decide(t, ask)
 	for _, ev := range h.read(t) {
-		if ev.Type == "approval_requested" {
-			hold = ev
+		if ev.Type != "approval_requested" {
+			continue
 		}
+		list, _ := ev.Data["signals"].([]any)
+		first, _ := list[0].(map[string]any)
+		if first["source"] != "some-other-classifier" {
+			t.Fatalf("recorded source = %#v", first["source"])
+		}
+		return
 	}
-	list, _ := hold.Data["signals"].([]any)
-	if len(list) != 2 {
-		t.Fatalf("recorded signals = %#v, want the caller's then typryx's", hold.Data["signals"])
-	}
-	first, _ := list[0].(map[string]any)
-	second, _ := list[1].(map[string]any)
-	if first["source"] != "classifier" || second["source"] != "typryx" {
-		t.Fatalf("order/provenance wrong: %#v then %#v", first, second)
-	}
+	t.Fatal("no hold recorded")
 }
 
 func TestToolArgumentsNeverReachTheRecord(t *testing.T) {
-	quiet(t)
 	h := newSigHarness(t, false)
-	h.withTyprx(t, newFakeTyprx(t, answerWith(riskOK)), time.Second)
-	held := decodeBody[decideResponseDTO](t, h.decide(t, plainAsk()))
+	ask := plainAsk()
+	ask.Signals = []signalDTO{callerSignal("destructive", 0.95)}
+	held := decodeBody[decideResponseDTO](t, h.decide(t, ask))
 	if held.Decision != pdp.Hold {
 		t.Fatalf("setup: %s", held.Decision)
 	}
@@ -548,8 +301,6 @@ func TestToolArgumentsNeverReachTheRecord(t *testing.T) {
 	}
 }
 
-// A granted approval lifts a signal hold, once under single-use, and a token
-// that does not verify holds again and never denies.
 func TestAGrantedApprovalLiftsASignalHoldOnceAndABadTokenNeverDenies(t *testing.T) {
 	h := newSigHarness(t, true)
 	ask := plainAsk()
@@ -577,57 +328,27 @@ func TestAGrantedApprovalLiftsASignalHoldOnceAndABadTokenNeverDenies(t *testing.
 	}
 }
 
-func TestStatusCountsWhatEnrichmentDid(t *testing.T) {
-	quiet(t)
+// --- replay: the recorded signal, nothing fetched ---
+
+// A decision held because of a signal reproduces from the record alone, and a
+// candidate policy without the rule changes it, which proves the recorded
+// signal is what drove the replayed hold. Replay here has no client of any
+// kind to ask with: nothing it stands on can make an outbound call
+// (scripts/decision-path-purity.sh).
+func TestAReplayReproducesASignalHoldFromTheRecordAlone(t *testing.T) {
 	h := newSigHarness(t, false)
-	h.withTyprx(t, newFakeTyprx(t, func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(500) }), time.Second)
-	h.decide(t, plainAsk())
-	h.decide(t, plainAsk())
-	status := decodeBody[struct {
-		Signals *struct {
-			Source    string           `json:"source"`
-			TimeoutMS int64            `json:"timeout_ms"`
-			Asked     int64            `json:"asked"`
-			Signalled int64            `json:"signalled"`
-			NoSignal  map[string]int64 `json:"no_signal"`
-		} `json:"signals"`
-	}](t, doRequest(t, h.srv.Handler(), http.MethodGet, "/v1/status", adminKey, nil))
-	s := status.Signals
-	if s == nil || s.Source != "typryx" || s.TimeoutMS != 1000 || s.Asked != 2 || s.Signalled != 0 || s.NoSignal["http_5xx"] != 2 {
-		t.Fatalf("status signals = %+v", s)
-	}
-}
-
-// --- replay: the recorded signal, not a new ask ---
-
-// The decision that was held because typryx said destructive must reproduce
-// with typryx gone: replay feeds the recorded signal back and asks nobody. A
-// candidate policy without the rule must then change it, which proves the
-// recorded signal is what drove the replayed hold.
-func TestAReplayReproducesASignalHoldWithTyprxUnreachable(t *testing.T) {
-	quiet(t)
-	h := newSigHarness(t, false)
-	f := newFakeTyprx(t, answerWith(riskOK))
-	h.withTyprx(t, f, time.Second)
-
-	held := decodeBody[decideResponseDTO](t, h.decide(t, plainAsk()))
+	ask := plainAsk()
+	ask.Signals = []signalDTO{callerSignal("destructive", 0.95)}
+	held := decodeBody[decideResponseDTO](t, h.decide(t, ask))
 	if held.Decision != pdp.Hold {
 		t.Fatalf("setup: %s (%s)", held.Decision, held.Reason)
 	}
 	events := h.read(t)
 
-	f.srv.Close() // typryx is gone from here on
-	asksBefore := f.asks.Load()
-
 	report := replay.Run(events, h.arch, nil)
 	if report.Total != 1 || report.Reproduced != 1 || report.Diverged != 0 || report.Unreadable != 0 {
-		t.Fatalf("with typryx down the signal hold did not reproduce:\n%s", replay.Format(report, "events", ""))
+		t.Fatalf("the signal hold did not reproduce:\n%s", replay.Format(report, "events", ""))
 	}
-	if f.asks.Load() != asksBefore {
-		t.Fatal("replay asked typryx")
-	}
-
-	// The same history against a policy that no longer holds on signals.
 	plain, err := policy.Compile([]policy.Policy{{Name: "plain", Target: "agent://acme.example/support/*", DenyTool: []string{"other"}}})
 	if err != nil {
 		t.Fatal(err)
@@ -637,7 +358,6 @@ func TestAReplayReproducesASignalHoldWithTyprxUnreachable(t *testing.T) {
 		t.Fatalf("the candidate without the rule did not turn the recorded hold into an allow:\n%s", replay.Format(cf, "events", "plain"))
 	}
 }
-
 func TestAReplayOfACallerSuppliedSignalHoldAlsoReproduces(t *testing.T) {
 	h := newSigHarness(t, false)
 	ask := plainAsk()
@@ -668,72 +388,61 @@ func TestAGrantedSignalHoldReplaysAsApprovalDecided(t *testing.T) {
 
 // --- the gate on the whole feature ---
 
-// The decision path and replay must not be able to reach the enrichment, by
-// any chain of imports. scripts/decision-path-purity.sh holds the same thing
+// Nothing the decision or its replay stands on, in this module, may make an
+// outbound call: no package of this module in their import closure imports
+// net/http or os/exec. scripts/decision-path-purity.sh holds the same thing
 // as a gate; this is the test form, so the binding exists in Go too.
-func TestTheDecisionPathAndReplayCannotReachTheEnrichment(t *testing.T) {
+func TestTheDecisionPathAndReplayCannotMakeAnOutboundCall(t *testing.T) {
+	const module = "github.com/TAIPANBOX/wardryx/"
+	checked := 0
 	for _, pkg := range []string{"internal/pdp", "internal/policy", "internal/replay", "internal/approval", "internal/archive"} {
-		deps := goListDeps(t, "github.com/TAIPANBOX/wardryx/"+pkg)
-		for _, d := range deps {
-			if strings.HasSuffix(d, "/internal/enrich") {
-				t.Errorf("%s depends on %s", pkg, d)
+		out, err := exec.Command("go", "list", "-deps", "-f", "{{.ImportPath}} {{join .Imports \" \"}}", module+pkg).Output()
+		if err != nil {
+			t.Fatalf("go list -deps %s: %v", pkg, err)
+		}
+		for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+			fields := strings.Fields(line)
+			if len(fields) == 0 || !strings.HasPrefix(fields[0], module) {
+				continue
+			}
+			checked++
+			for _, imp := range fields[1:] {
+				if imp == "net/http" || imp == "os/exec" {
+					t.Errorf("%s depends on %s, which imports %s", pkg, fields[0], imp)
+				}
 			}
 		}
 	}
-	// The control: the enrichment itself does depend on the pdp, so a list
-	// that came back empty would look exactly like a clean answer.
-	if deps := goListDeps(t, "github.com/TAIPANBOX/wardryx/internal/enrich"); !contains(deps, "github.com/TAIPANBOX/wardryx/internal/pdp") {
-		t.Fatalf("go list -deps measured nothing: internal/enrich does not list internal/pdp (%d deps)", len(deps))
+	// The control: a list that came back empty would look exactly like a
+	// clean answer, and internal/api (not in the closure) really does import
+	// net/http.
+	if checked < 5 {
+		t.Fatalf("go list -deps measured nothing: only %d module package(s) read", checked)
 	}
-}
-
-func contains(ss []string, v string) bool {
-	for _, s := range ss {
-		if s == v {
-			return true
-		}
+	out, err := exec.Command("go", "list", "-f", "{{join .Imports \" \"}}", module+"internal/otel").Output()
+	if err != nil || !strings.Contains(string(out), "net/http") {
+		t.Fatalf("the control failed: internal/otel should import net/http (%v)", err)
 	}
-	return false
-}
-
-func goListDeps(t *testing.T, pkg string) []string {
-	t.Helper()
-	out, err := exec.Command("go", "list", "-deps", "-f", "{{.ImportPath}}", pkg).Output()
-	if err != nil {
-		t.Fatalf("go list -deps %s: %v", pkg, err)
-	}
-	return strings.Fields(string(out))
 }
 
 // --- the cacheable hint, over the wire ---
 
+// An enforcement point caches decisions keyed on the agent and tool set with no
+// arguments in the key. Nothing a signal touched may be offered for reuse.
 func TestTheCacheableHintIsFalseForEverySignalDependentDecisionOverTheWire(t *testing.T) {
-	quiet(t)
-	build := func(t *testing.T, typryx string) *sigHarness {
-		h := newSigHarness(t, false)
-		if typryx != "" {
-			h.withTyprx(t, newFakeTyprx(t, answerWith(typryx)), time.Second)
-		}
-		return h
-	}
 	cases := map[string]func(t *testing.T) decideResponseDTO{
 		"a hold from a caller's signal": func(t *testing.T) decideResponseDTO {
 			a := plainAsk()
 			a.Signals = []signalDTO{callerSignal("destructive", 0.95)}
-			return decodeBody[decideResponseDTO](t, build(t, "").decide(t, a))
+			return decodeBody[decideResponseDTO](t, newSigHarness(t, false).decide(t, a))
 		},
-		"a hold from typryx": func(t *testing.T) decideResponseDTO {
-			return decodeBody[decideResponseDTO](t, build(t, riskOK).decide(t, plainAsk()))
+		"an allow after a signal that did not fire": func(t *testing.T) decideResponseDTO {
+			a := plainAsk()
+			a.Signals = []signalDTO{callerSignal("read_only", 0.97)}
+			return decodeBody[decideResponseDTO](t, newSigHarness(t, false).decide(t, a))
 		},
-		"an allow after typryx said read_only": func(t *testing.T) decideResponseDTO {
-			body := strings.NewReplacer(`"answer":"destructive"`, `"answer":"read_only"`, `"read_only":0.02`, `"read_only":0.97`, `"destructive":0.94`, `"destructive":0.01`).Replace(riskOK)
-			return decodeBody[decideResponseDTO](t, build(t, body).decide(t, plainAsk()))
-		},
-		"an allow after typryx failed": func(t *testing.T) decideResponseDTO {
-			return decodeBody[decideResponseDTO](t, build(t, `not json`).decide(t, plainAsk()))
-		},
-		"an allow with typryx not configured": func(t *testing.T) decideResponseDTO {
-			return decodeBody[decideResponseDTO](t, build(t, "").decide(t, plainAsk()))
+		"an allow with no signal at all, under a policy that could have fired": func(t *testing.T) decideResponseDTO {
+			return decodeBody[decideResponseDTO](t, newSigHarness(t, false).decide(t, plainAsk()))
 		},
 	}
 	for name, run := range cases {
@@ -744,15 +453,20 @@ func TestTheCacheableHintIsFalseForEverySignalDependentDecisionOverTheWire(t *te
 			}
 		})
 	}
+	// The control: a policy with no signal rule is still cacheable, so the
+	// hint has not simply been switched off.
+	plain := newSigHarness(t, false, policy.Policy{Name: "plain", Target: "agent://acme.example/support/*", DenyTool: []string{"other"}})
+	if got := decodeBody[decideResponseDTO](t, plain.decide(t, plainAsk())); !got.Cacheable {
+		t.Fatal("control: a policy with no signal rule stopped being cacheable")
+	}
 }
 
 // --- what is recorded about the tool call ---
 
 func TestTheToolCallIsRecordedAsNameTargetAndAHashOfItsArguments(t *testing.T) {
-	quiet(t)
 	h := newSigHarness(t, false)
-	h.withTyprx(t, newFakeTyprx(t, answerWith(riskOK)), time.Second)
 	ask := plainAsk()
+	ask.Signals = []signalDTO{callerSignal("destructive", 0.95)}
 	if got := decodeBody[decideResponseDTO](t, h.decide(t, ask)); got.Decision != pdp.Hold {
 		t.Fatalf("setup: %s", got.Decision)
 	}
@@ -765,7 +479,7 @@ func TestTheToolCallIsRecordedAsNameTargetAndAHashOfItsArguments(t *testing.T) {
 	}
 	tc, _ := hold.Data["tool_call"].(map[string]any)
 	if tc == nil {
-		t.Fatalf("a decision that used a signal derived from a tool call records no tool_call: %#v", hold.Data)
+		t.Fatalf("a decision that carried a tool call records no tool_call: %#v", hold.Data)
 	}
 	want := map[string]any{"name": "s3.delete_object", "target": "s3://prod-backups", "arguments_sha256": hex.EncodeToString(sum[:]), "arguments_truncated": false}
 	for k, w := range want {
@@ -794,14 +508,10 @@ func TestADecisionWithNoToolCallRecordsNoToolCallKey(t *testing.T) {
 	}
 }
 
-// --- tokenfuse sends arguments_truncated when the arguments were too large ---
+// --- an enforcement point sends arguments_truncated when the arguments were too large ---
 
-func TestTruncatedArgumentsAreNeverAskedAboutAndAreRecordedAsTruncated(t *testing.T) {
-	quiet(t)
+func TestTruncatedArgumentsAreAcceptedWithNoArgumentsAndRecordedAsTruncated(t *testing.T) {
 	h := newSigHarness(t, false)
-	f := newFakeTyprx(t, answerWith(riskOK))
-	h.withTyprx(t, f, time.Second)
-
 	for name, body := range map[string]string{
 		"arguments absent": `{"agent_id":"` + sigAgent + `","run_id":"r1","tool_names":["s3.delete_object"],"tool_call":{"name":"s3.delete_object","target":"s3://b","arguments_truncated":true}}`,
 		"arguments null":   `{"agent_id":"` + sigAgent + `","run_id":"r2","tool_names":["s3.delete_object"],"tool_call":{"name":"s3.delete_object","arguments":null,"target":"s3://b","arguments_truncated":true}}`,
@@ -809,11 +519,8 @@ func TestTruncatedArgumentsAreNeverAskedAboutAndAreRecordedAsTruncated(t *testin
 		rec := doRaw(t, h.srv.Handler(), http.MethodPost, "/v1/decide", adminKey, body)
 		got := decodeBody[decideResponseDTO](t, rec)
 		if rec.Code != http.StatusOK || got.Decision != pdp.Allow {
-			t.Fatalf("%s: %d %s (%s), want allow: with no arguments there is nothing to classify", name, rec.Code, got.Decision, got.Reason)
+			t.Fatalf("%s: %d %s (%s), want allow", name, rec.Code, got.Decision, got.Reason)
 		}
-	}
-	if f.asks.Load() != 0 {
-		t.Fatalf("typryx was asked %d time(s) about a call whose arguments were never sent", f.asks.Load())
 	}
 	for _, ev := range h.read(t) {
 		tc, _ := ev.Data["tool_call"].(map[string]any)

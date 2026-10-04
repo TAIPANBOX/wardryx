@@ -22,9 +22,9 @@ const (
 	// MaxToolNameBytes and MaxToolTargetBytes bound a tool call's text fields.
 	MaxToolNameBytes   = 256
 	MaxToolTargetBytes = 1024
-	// MaxToolArgumentsBytes bounds a tool call's raw JSON arguments. Smaller
-	// than the 16384-byte state a typryx template accepts, so that any call
-	// wardryx accepts also fits what enrichment sends for it.
+	// MaxToolArgumentsBytes bounds a tool call's raw JSON arguments. An
+	// enforcement point that has more marks the call arguments_truncated and
+	// sends none, so a bound here costs it nothing it could not already say.
 	MaxToolArgumentsBytes = 12 << 10
 )
 
@@ -34,9 +34,10 @@ const (
 // Decide only READS signals. It never fetches one, and nothing in this package
 // can: a signal is an input exactly like EstCostUSD, so the same request
 // against the same policy set yields the same decision, which is what lets a
-// recorded decision be replayed with typryx, or whatever produced the signal,
-// unreachable. The trust boundary is the one ChainProven and
-// AttestationMethod already have: a caller that lies is believed. That costs
+// recorded decision be replayed with whatever produced the signal unreachable.
+//
+// The trust boundary is the one ChainProven and AttestationMethod already
+// have: a caller that lies is believed. That costs
 // little here, because a signal can only ever ADD a hold (see
 // policy.Policy.HoldIfSignal): a false signal is a delay for a person, never a
 // refusal and never an allow.
@@ -132,19 +133,6 @@ func validText(s string, max int, required bool) error {
 		return fmt.Errorf("is required")
 	}
 	return nil
-}
-
-// ReadsSignal reports whether any policy matching agentID holds on a signal of
-// this name. It is how the layer outside the decision path learns whether
-// asking a classifier could change anything: a signal no policy reads is spend
-// for nothing.
-func (e *Engine) ReadsSignal(agentID, name string) bool {
-	for _, p := range e.policies.Load().Match(agentID) {
-		if p.HoldIfSignal != nil && foldEqual(p.HoldIfSignal.Name, name) {
-			return true
-		}
-	}
-	return false
 }
 
 // heldBySignal returns the first matched policy whose hold_if_signal rule one

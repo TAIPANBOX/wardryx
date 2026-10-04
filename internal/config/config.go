@@ -74,21 +74,6 @@ type Config struct {
 	// /v1/decide outcome. Empty disables OTLP export entirely -- see
 	// internal/otel and internal/api.Server.exportSpan.
 	OTLPEndpoint string
-	// TypryxURL is WARDRYX_TYPRYX_URL: the base URL of a typryx deployment.
-	// Empty, the default, turns signal enrichment off: nothing is asked of
-	// anyone, and every decision is exactly what it was without the feature.
-	// Env-only, so no URL is ever on argv.
-	TypryxURL string
-	// TypryxKeyFile is WARDRYX_TYPRYX_KEY_FILE: a file holding the typryx
-	// credential, read once at start. A path and never the key itself, so the
-	// key is on neither argv nor the environment, and never logged. Env-only.
-	TypryxKeyFile string
-	// TypryxTimeoutMS is WARDRYX_TYPRYX_TIMEOUT_MS: how long one ask of typryx
-	// may take. 0 means unset (enrich.DefaultTimeout applies, 150 ms); a
-	// positive whole number is itself; -1 means the variable is set to
-	// something that is not one, which serve refuses by name: there is no
-	// uncapped opt-out and no guessed number.
-	TypryxTimeoutMS int
 }
 
 // FromEnv reads every WARDRYX_* variable once. Call it a single time per
@@ -107,25 +92,7 @@ func FromEnv() Config {
 		ApprovalSingleUse:  parseBoolClosed(os.Getenv("WARDRYX_APPROVAL_SINGLE_USE")),
 		ApprovalUnanswered: parseDuration(os.Getenv("WARDRYX_APPROVAL_UNANSWERED_AFTER")),
 		OTLPEndpoint:       os.Getenv("WARDRYX_OTLP_ENDPOINT"),
-		TypryxURL:          os.Getenv("WARDRYX_TYPRYX_URL"),
-		TypryxKeyFile:      os.Getenv("WARDRYX_TYPRYX_KEY_FILE"),
-		TypryxTimeoutMS:    parseTimeoutMS(os.Getenv("WARDRYX_TYPRYX_TIMEOUT_MS")),
 	}
-}
-
-// parseTimeoutMS reads a whole number of milliseconds greater than zero as
-// itself, unset as 0, and anything else (zero, a negative, a fraction, a unit,
-// a number too big for an int) as -1, so the caller can tell "not set" from
-// "set wrongly" and refuse the second by name.
-func parseTimeoutMS(s string) int {
-	if s == "" {
-		return 0
-	}
-	n, err := strconv.Atoi(s)
-	if err != nil || n <= 0 {
-		return -1
-	}
-	return n
 }
 
 // parseDuration reports a Go duration, or zero when the variable is unset or

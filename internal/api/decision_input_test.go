@@ -52,7 +52,7 @@ func fullRequest() pdp.DecideRequest {
 		ChainProven:       true,
 		ApprovalToken:     "tok-secret-must-not-be-recorded",
 		Signals: []pdp.Signal{{
-			Name: "action.risk_class", Value: "destructive", Probability: 0.95, Source: "typryx", AnswerID: "ans-1",
+			Name: "action.risk_class", Value: "destructive", Probability: 0.95, Source: "classifier", AnswerID: "ans-1",
 		}},
 		ToolCall: &pdp.ToolCall{Name: "s3.delete_object", Arguments: []byte(`{"key":"x"}`), Target: "s3://b"},
 	}

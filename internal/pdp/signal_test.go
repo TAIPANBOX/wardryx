@@ -292,22 +292,6 @@ func TestADecisionThatCanReadASignalIsNeverCacheable(t *testing.T) {
 	}
 }
 
-func TestReadsSignalSaysWhetherAnyMatchedPolicyReadsIt(t *testing.T) {
-	e := signalEngine(t, riskPolicy(), policy.Policy{Name: "other", Target: "agent://acme.example/finance/*", DenyTool: []string{"x"}})
-	if !e.ReadsSignal(signalAgent, "action.risk_class") {
-		t.Error("a policy reading action.risk_class matches this agent and ReadsSignal says no")
-	}
-	if !e.ReadsSignal(signalAgent, "ACTION.RISK_CLASS") {
-		t.Error("ReadsSignal must match the way the rule does (folded)")
-	}
-	if e.ReadsSignal(signalAgent, "request.complexity") {
-		t.Error("ReadsSignal says yes for a name no rule reads")
-	}
-	if e.ReadsSignal("agent://acme.example/finance/bot", "action.risk_class") {
-		t.Error("ReadsSignal says yes for an agent no hold_if_signal policy matches")
-	}
-}
-
 // --- validation: what a hostile or careless caller can hand in ---
 
 func TestSignalValidationRefusesTheMalformed(t *testing.T) {

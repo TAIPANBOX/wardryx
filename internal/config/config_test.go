@@ -94,35 +94,3 @@ func TestFromEnvApprovalSingleUseParsing(t *testing.T) {
 		})
 	}
 }
-
-// Signal enrichment is off unless WARDRYX_TYPRYX_URL is set. The timeout is the
-// one setting that can be wrong in a way worth telling apart: unset is the
-// default, a positive whole number is itself, and anything else is -1, which
-// serve refuses by name rather than guessing a number for the operator.
-func TestFromEnvReadsTheTyprxSettings(t *testing.T) {
-	t.Setenv("WARDRYX_TYPRYX_URL", "http://typryx:4320")
-	t.Setenv("WARDRYX_TYPRYX_KEY_FILE", "/run/secrets/typryx-key")
-	t.Setenv("WARDRYX_TYPRYX_TIMEOUT_MS", "80")
-	cfg := FromEnv()
-	if cfg.TypryxURL != "http://typryx:4320" || cfg.TypryxKeyFile != "/run/secrets/typryx-key" || cfg.TypryxTimeoutMS != 80 {
-		t.Fatalf("FromEnv = %+v", cfg)
-	}
-}
-
-func TestTyprxTimeoutIsUnsetPositiveOrInvalid(t *testing.T) {
-	cases := []struct {
-		value string
-		want  int
-	}{
-		{"", 0}, {"150", 150}, {"1", 1}, {"5000", 5000},
-		{"0", -1}, {"-5", -1}, {"abc", -1}, {"1.5", -1}, {"150ms", -1}, {" 150", -1}, {"99999999999999999999", -1},
-	}
-	for _, c := range cases {
-		t.Run("value="+c.value, func(t *testing.T) {
-			t.Setenv("WARDRYX_TYPRYX_TIMEOUT_MS", c.value)
-			if got := FromEnv().TypryxTimeoutMS; got != c.want {
-				t.Errorf("WARDRYX_TYPRYX_TIMEOUT_MS=%q read as %d, want %d", c.value, got, c.want)
-			}
-		})
-	}
-}

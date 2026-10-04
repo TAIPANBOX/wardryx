@@ -6,7 +6,7 @@
 
 [![CI](https://github.com/TAIPANBOX/wardryx/actions/workflows/ci.yml/badge.svg)](https://github.com/TAIPANBOX/wardryx/actions/workflows/ci.yml)
 ![Go](https://img.shields.io/badge/go-1.27-00ADD8.svg)
-![tests](https://img.shields.io/badge/tests-391-brightgreen.svg)
+![tests](https://img.shields.io/badge/tests-362-brightgreen.svg)
 ![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)
 ![Status](https://img.shields.io/badge/status-deterministic%20PDP-2dd4bf.svg)
 
@@ -294,17 +294,14 @@ Authorization: Bearer <key>
 `base_policies` is what `-policy`/`WARDRYX_POLICY` loaded at startup (never individually addressable
 through `/v1/policies`); `store_policies` is the same count `/v1/policies` would list; `effective_policies`
 is their sum, the combined set `/v1/decide` actually evaluates against. `effective_policies: 0`, and only
-that, means every request really is allowed. When signal enrichment is configured the response also carries a
-`signals` object (`source`, `timeout_ms`, `asked`, `signalled`, and `no_signal` counted by reason: `timeout`,
-`unreachable`, `canceled`, `http_4xx`, `http_5xx`, `http_other`, `unanswered`, `malformed`, `arguments_truncated`); with it off the
-key is absent. Any authenticated key can read it, admin or viewer, the same
+that, means every request really is allowed. Any authenticated key can read it, admin or viewer, the same
 scoping as `GET /v1/approvals`.
 
 ---
 
 ## Typed risk signals
 
-A policy can hold a call, for a person to approve, because a typed fact about it says so: a classifier is at least 80% sure the pending tool call is destructive. The fact is a **signal** (`name`, `value`, `probability`, `source`, `answer_id`), and the rule that reads it is `hold_if_signal`:
+A policy can hold a call, for a person to approve, because a typed fact about it says so: some classifier is at least 80% sure the pending tool call is destructive. The fact is a **signal** (`name`, `value`, `probability`, `source`, `answer_id`), and the rule that reads it is `hold_if_signal`:
 
 ```yaml
 name: support-risk
@@ -317,11 +314,9 @@ hold_if_signal:
 
 **A signal can add a hold and nothing else.** `hold_if_signal` runs after every deny rule and after the cost gate, so it can turn an allow into a hold and change no other verdict: it never turns a deny into anything, never replaces another rule's hold or its reason, and never allows. A policy that tries to make a signal deny (`deny_if_signal`, or a `decision`, `action` or `on_match` key inside `hold_if_signal`) is refused at load and at `PUT /v1/policies/{id}`, with a message saying a signal can only hold. All three of `name`, `values` and `min_probability` are required; a threshold of `0.8` holds at 0.8 and above. A granted `approval_token` lifts a signal hold exactly as it lifts a cost hold (single-use by default); a token that does not verify holds again and never denies. A decision under a `hold_if_signal` policy is never `cacheable`, whatever it decided (the hold, an approved allow, an allow the rule did not fire on, a deny), because a signal belongs to one call's arguments and a cache keyed on the agent and tool set cannot see them.
 
-**Two ways a signal arrives.** A caller can send `signals` on `/v1/decide` (at most 16, each with a `source` of its own choosing except the reserved `typryx`), which wardryx believes the way it believes `chain_proven`: a false signal costs a person a delay and cannot cost anything else. Or wardryx can ask [typryx](https://github.com/TAIPANBOX/typryx) itself. With `WARDRYX_TYPRYX_URL` set, a decide request that carries a `tool_call` (`name`, `arguments` as raw JSON up to 12 KiB, `target`, and `arguments_truncated` when the arguments were too large to send) is classified under typryx's `action.risk_class` template, using only those three fields, and the answer is appended as a signal with source `typryx`.
+**A signal is an input, never something wardryx fetches.** The caller of `/v1/decide` sends `signals` (at most 16) and, optionally, the `tool_call` they are about (`name`, `arguments` as raw JSON up to 12 KiB, `target`, and `arguments_truncated` when the arguments were too large to send, in which case none are sent). Wardryx believes a signal the way it believes `chain_proven`: a false signal costs a person a delay and cannot cost anything else, and the `source` is the caller's own claim, recorded and never branched on. Who produces signals is deployment configuration outside this service: for example a proxy placed in front of wardryx that classifies tool calls and adds a signal to the request it forwards. Nothing in `internal/pdp`, `internal/policy` or `internal/replay` makes a network call, and `scripts/decision-path-purity.sh` fails if anything they stand on in this module imports `net/http` or `os/exec`. A deployment with no signal producer runs exactly as it did before: `hold_if_signal` simply never fires.
 
-That ask happens in the API layer, outside the decision path: `internal/pdp`, `internal/policy` and `internal/replay` cannot import it (`scripts/decision-path-purity.sh`), so a decision is a pure function of the request it was handed. It is made only when it could matter: the call is allowed so far, no cost gate was reached, and a matching policy reads `action.risk_class`. Any failure (a timeout, an unreachable typryx, a 4xx or 5xx, `unanswered`, a body that is not a clean answer) is **no signal**, never a guess: the call is decided exactly as it would have been without typryx, the failure is counted under `signals` at [`GET /v1/status`](#get-v1status), and each reason class is logged once until typryx next answers. Failing open on the signal is the safe direction because a signal can only add a hold; failing closed would hold every call whenever typryx is down.
-
-**What is recorded.** The decision event and the approval context carry every signal the decision read (name, value, probability, source, answer id), so a person deciding the hold sees who said what, and `wardryx replay` feeds the recorded signals back instead of asking again: a hold caused by a signal reproduces with typryx unreachable. The tool call is recorded as its name, its target and a sha-256 of its arguments, never the arguments, since they can carry customer data. A call whose arguments the enforcement point marked `arguments_truncated` is not asked about: with no arguments there is nothing to classify. The enrichment is off unless `WARDRYX_TYPRYX_URL` is set; without it nothing is asked of anyone and no decision changes.
+**What is recorded.** The decision event and the approval context carry every signal the decision read (name, value, probability, source, answer id), so a person deciding the hold sees who said what, and `wardryx replay` feeds the recorded signals back: a hold caused by a signal reproduces with whatever produced it unreachable. The tool call is recorded as its name, its target, a sha-256 of its arguments exactly as received, and whether they were truncated, never the arguments, since they can carry customer data. A decision that carried neither is recorded as it always was.
 
 ---
 
@@ -536,9 +531,6 @@ Every `WARDRYX_*` variable is read once at process startup (`internal/config`), 
 | `WARDRYX_APPROVAL_SINGLE_USE` | (none) | `true` | `true`, or any value that does not parse as a bool, makes each granted token allow exactly one `/v1/decide` call; only an explicit `false` keeps a token reusable for its full TTL (see [Stateless human-in-the-loop](#stateless-human-in-the-loop)) |
 | `WARDRYX_APPROVAL_UNANSWERED_AFTER` | (none) | `15m` | How long a hold may sit undecided before one `approval_unanswered` event is raised for it; a Go duration; `0` turns the sweep off (see [The hold nobody decided](#the-hold-nobody-decided)) |
 | `WARDRYX_OTLP_ENDPOINT` | `-otlp-endpoint` | (empty) | OTLP/HTTP endpoint for decision spans (see [OTLP export](#otlp-export)); empty disables it |
-| `WARDRYX_TYPRYX_URL` | (none) | (empty) | Base URL of a typryx deployment to ask for `action.risk_class` on a decide request's `tool_call` (see [Typed risk signals](#typed-risk-signals)); empty turns the enrichment off. Env-only, so it is never on argv; a value that is not an absolute http(s) URL with no userinfo, query or fragment stops `serve` |
-| `WARDRYX_TYPRYX_KEY_FILE` | (none) | (empty) | Path of a file holding the typryx credential (`X-Typryx-Key`), read once at start and never logged; empty sends no key. A path and never the key, so the key is on neither argv nor the environment; an unreadable or empty file stops `serve` |
-| `WARDRYX_TYPRYX_TIMEOUT_MS` | (none) | `150` | Milliseconds one ask of typryx may take, a whole number from 1 to 5000; a slow typryx costs every decision at most this much. Anything else stops `serve`; there is no uncapped value |
 
 The `[:role]` segment of a `WARDRYX_KEYS` entry is one of `admin` (every endpoint, including `POST /v1/approvals/{id}/decide`) or `viewer` (every other authenticated endpoint), and defaults to `admin` when the segment is omitted.
 
@@ -561,7 +553,7 @@ CI runs two more gates that have no local `make` target: `govulncheck ./...` (kn
 scanning against the Go vulnerability database) and `gosec ./...` (static analysis for common Go security
 mistakes), both in the `security` job in `.github/workflows/ci.yml`.
 
-The decision engine's table tests (`internal/pdp/pdp_test.go`) cover every rule and its boundary: allow; deny on a denied tool, on an unattested agent, at and over `max_steps`, and on a domain outside `allow_domains`; the empty-`domains` no-op; hold over `require_human_above_usd`; allow with a valid approval token; deny with an expired or wrong-binding one; and `deny_above_usd` as a hard ceiling that a cleanly-verifying token still cannot cross and that fires before the hold. Separate suites pin the normalization traps (a `deny_tool` entry matched whatever the case or trailing whitespace, an `attestation_method` of `none`, `NONE`, `n/a` or a bare space treated as unattested), the `cacheable` rule field by field, `PolicyVersion` stability, and the offline `check` path. The typed-signal suites (`internal/pdp/signal_test.go`, `internal/policy/signal_test.go`, `internal/enrich`, `internal/replay/signals_test.go`, `internal/api/signals_test.go`) hold a signal to adding a hold and nothing else, over two hundred seeded random policies as well as by case, and drive a fake typryx through a timeout, a 500, `unanswered`, garbage and silence.
+The decision engine's table tests (`internal/pdp/pdp_test.go`) cover every rule and its boundary: allow; deny on a denied tool, on an unattested agent, at and over `max_steps`, and on a domain outside `allow_domains`; the empty-`domains` no-op; hold over `require_human_above_usd`; allow with a valid approval token; deny with an expired or wrong-binding one; and `deny_above_usd` as a hard ceiling that a cleanly-verifying token still cannot cross and that fires before the hold. Separate suites pin the normalization traps (a `deny_tool` entry matched whatever the case or trailing whitespace, an `attestation_method` of `none`, `NONE`, `n/a` or a bare space treated as unattested), the `cacheable` rule field by field, `PolicyVersion` stability, and the offline `check` path. The typed-signal suites (`internal/pdp/signal_test.go`, `internal/policy/signal_test.go`, `internal/replay/signals_test.go`, `internal/api/signals_test.go`) hold a signal to adding a hold and nothing else, over two hundred seeded random policies as well as by case, and hold the record and the replay to what a decision actually read.
 
 ---
 
