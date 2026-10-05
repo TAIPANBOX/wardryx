@@ -364,14 +364,14 @@ Beyond the decision engine and the approval flow above, Wardryx ships:
 2. **Storage** (`internal/store`): Postgres via `pgx/v5` with an embedded, idempotent `schema.sql`, or an in-memory store when no DSN is configured. Both implementations satisfy the same `Store` interface.
 3. **Events** (`source: wardryx`): optional NDJSON `agent-event` output (`WARDRYX_EVENTS_PATH`) via `agent-stack-go/event`: `policy_allow`, `policy_deny`, `approval_requested`, `approval_granted`, `approval_denied`, `approval_timeout` (an agent presenting an approval token whose window had already closed, so usually a human did decide and the agent came back late), `approval_unanswered` (a hold nobody decided, see [The hold nobody decided](#the-hold-nobody-decided)), and `policy_updated` (a runtime `/v1/policies` write). Events now carry the SPEC §6.5 `prev_hash` chain; verify a stream with `agent-conform -chain <file>`.
 4. **OTLP export** (`internal/otel`): optional one-span-per-decision export to an OTLP/HTTP collector (`WARDRYX_OTLP_ENDPOINT`), see [OTLP export](#otlp-export).
-5. **CLI** (`cmd/wardryx`): `serve`, `check` (an offline dry-run over a directory of Agent Passports), `approvals` (list from Postgres), `version`.
+5. **CLI** (`cmd/wardryx`): `serve`, `check` (an offline dry-run over a directory of Agent Passports), `approvals` (list from Postgres), `replay` (put recorded decisions back to the engine, see [Replay](#replay-what-a-policy-change-would-have-done)), `version`.
 
 ---
 
 ## Architecture
 
 ```
-cmd/wardryx/main.go     CLI: serve | check | approvals | version
+cmd/wardryx/main.go     CLI: serve | check | approvals | replay | version
 internal/policy         policy model, YAML/JSON loader, glob matcher, PolicyVersion
 internal/pdp            Engine.Decide: the pure decision algorithm
 internal/approval       approval_token minting/verification (HMAC-SHA256) + hold/decide orchestration
@@ -576,13 +576,15 @@ Wardryx is itself a security-relevant component, so a few of its own defaults ar
 ## Status
 
 - [x] Declarative policy model (YAML/JSON, `agent://` glob targeting, stable `PolicyVersion`)
-- [x] Deterministic decision engine: `deny_tool`, `deny_if_unattested`, `max_steps`, `allow_domains`, `require_human_above_usd`
+- [x] Deterministic decision engine: `deny_tool`, `deny_if_unattested`, `max_steps`, `allow_domains`, `require_human_above_usd`, `deny_above_usd` (a hard ceiling no approval can cross), the chain rules (`max_chain_depth`, `require_root_principal`, `deny_if_chain_unproven`) and `hold_if_signal`
+- [x] Typed risk signals: `/v1/decide` takes caller-supplied `signals` and a `tool_call`, and `hold_if_signal` can add a hold and never a deny (see [Typed risk signals](#typed-risk-signals))
+- [x] Approvals bound to the tool call: a hold made for a request carrying a `tool_call` records its name and target, and the granted token carries a digest of them, so an approval for one call is refused for any other (see [Stateless human-in-the-loop](#stateless-human-in-the-loop))
 - [x] Stateless human-in-the-loop: HMAC-signed approval tokens, configurable TTL, single-use redemption by default, switchable off with `WARDRYX_APPROVAL_SINGLE_USE=false`
 - [x] HTTP API: `/v1/decide`, `/v1/approvals/{id}/decide`, `/v1/approvals`, `/v1/policies` (admin policy-as-code, see [Policy-as-code](#policy-as-code)), `/healthz` (liveness), `/readyz` (readiness: reads the store, see [When the store is down](#when-the-store-is-down)), bearer-key auth with org/role scoping
 - [x] Storage: Postgres (`pgx/v5`, embedded schema) and in-memory, behind one `Store` interface; approvals and policy-as-code documents
 - [x] `agent-event` NDJSON output (`policy_allow` / `policy_deny` / `approval_*` / `policy_updated`)
 - [x] Unanswered-approval sweep: one `approval_unanswered` per hold nobody decided (`WARDRYX_APPROVAL_UNANSWERED_AFTER`, default 15m), which reports and never decides
-- [x] CLI: `serve`, `check` (offline dry-run), `approvals`, `version`
+- [x] CLI: `serve`, `check` (offline dry-run), `approvals`, `replay`, `version`
 - [x] OTLP exporter: one span per `/v1/decide` outcome to `WARDRYX_OTLP_ENDPOINT`/`-otlp-endpoint`, fire-and-forget, no-op when unset (`internal/otel`)
 - [x] Policy-as-code admin API (`/v1/policies`, this repo's side): file-loaded policies stay a permanent floor, store-managed policies layer on top, validate-then-apply, live-swapped with no restart
 - [x] Policies as code via terraform-provider-taipan: the `taipan_wardryx_policy` Terraform resource (that repo's side) drives the API above -- create/update/read/delete, live-verified against a running Wardryx instance including drift detection and destroy
