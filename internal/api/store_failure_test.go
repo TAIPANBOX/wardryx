@@ -33,7 +33,7 @@ import (
 
 // A DSN shaped exactly like the one wardryx is configured with in production.
 // If a handler passes a store error through untouched, this is what comes out.
-const leakyDSN = "postgres://wardryx:hunter2@db.internal:5432/wardryx?sslmode=disable"
+const leakyDSN = "postgres://wardryx:placeholder-not-a-password@db.internal:5432/wardryx?sslmode=disable"
 
 var errStoreIsDown = errors.New("dial tcp: connect: connection refused (" + leakyDSN + ")")
 
