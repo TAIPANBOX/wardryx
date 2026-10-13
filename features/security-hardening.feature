@@ -1,8 +1,8 @@
 # Provenance: @claude, 2026-09-06. These scenarios come from the security
 # reviewer's spec for this hardening wave (findings W1-W4), written in the
 # operator language the spec itself used (a bearer key, an org, a store that
-# is down, a request body). Not a quote from Yurii: no such quote exists for
-# this session, so every scenario is @claude rather than @yurii.
+# is down, a request body). Not a quote from the owner: no owner decision was
+# recorded for this session, so every scenario is @claude rather than @decided.
 #
 # Each scenario names the test that holds it. scripts/scenarios-bind-to-tests.sh
 # checks that binding in both directions.
