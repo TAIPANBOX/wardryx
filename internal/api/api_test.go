@@ -27,8 +27,9 @@ const (
 	testHMAC  = "test-approval-secret"
 )
 
-// newTestServer returns a Server with WARDRYX_APPROVAL_SINGLE_USE off (the
-// default): a granted approval_token stays reusable for its full TTL.
+// newTestServer returns a Server with WARDRYX_APPROVAL_SINGLE_USE set to an
+// explicit false, which is not the default (single-use is, since 1.0): a
+// granted approval_token stays reusable for its full TTL.
 func newTestServer(t *testing.T) *Server {
 	t.Helper()
 	return newTestServerOpts(t, false, nil)
@@ -236,11 +237,10 @@ func TestFullHoldGrantThenDecideAllowsWithToken(t *testing.T) {
 	}
 }
 
-// TestSingleUseOffTokenStaysReusableForFullTTL locks in today's default
-// behavior (WARDRYX_APPROVAL_SINGLE_USE unset/false, via newTestServer):
-// a granted approval_token allows *every* /v1/decide call presenting it
-// within its TTL, not just the first. This must keep passing unchanged
-// after WARDRYX_APPROVAL_SINGLE_USE is introduced.
+// TestSingleUseOffTokenStaysReusableForFullTTL locks in the behaviour of
+// WARDRYX_APPROVAL_SINGLE_USE=false (via newTestServer), the pre-1.0 default
+// and since 1.0 an explicit opt-out: a granted approval_token allows *every*
+// /v1/decide call presenting it within its TTL, not just the first.
 func TestSingleUseOffTokenStaysReusableForFullTTL(t *testing.T) {
 	srv := newTestServer(t)
 

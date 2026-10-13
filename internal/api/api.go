@@ -616,13 +616,15 @@ func (s *Server) handleDecide(w http.ResponseWriter, r *http.Request, principal 
 
 	// WARDRYX_APPROVAL_SINGLE_USE: an Allow with ApprovalTokenRequired set
 	// only ever happens when a presented approval_token just verified (see
-	// pdp.Engine.Decide's overThreshold branch -- that is the only path
-	// that sets ApprovalTokenRequired and can still reach Allow). Off by
-	// default, so this block never runs and the decision is returned
-	// unchanged, exactly as before single-use mode existed: a valid token
-	// stays reusable for its full TTL.
+	// pdp.Engine.Decide's overThreshold and heldBySignal branches -- the
+	// only paths that set ApprovalTokenRequired and can still reach Allow).
+	// On by default since 1.0 (invariant 5; internal/config's
+	// parseBoolClosed reads unset or unparsable as true), so this block runs
+	// unless an operator set the variable to an explicit false, which
+	// restores the pre-1.0 behaviour: the decision is returned unchanged and
+	// a valid token stays reusable for its full TTL.
 	//
-	// When enabled, TryRedeem is the atomic check-and-set that lets a
+	// When it runs, TryRedeem is the atomic check-and-set that lets a
 	// token allow at most once: the first /v1/decide to claim this token's
 	// RedemptionKey wins Allow, and any later presentation of that same
 	// token -- a genuine retry or a race against it -- loses the claim and
