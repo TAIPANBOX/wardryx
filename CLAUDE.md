@@ -1032,3 +1032,34 @@ decision outcome and every exported signature identical.
     `TestTheReadOnlyFieldsOfAPutBodyAreIgnored`,
     `TestAnUnknownKeyInsideAHoldRuleIsRefusedOnPut` in `internal/api`;
     scenarios in `features/strict-policy-write.feature`)*
+
+32. **An approval token reaches `/v1/decide` in the `approval_token` field of
+    the body, and a header the README names is one this service reads or is
+    said to be the enforcement point's.** Measured 2026-10-13: the README's
+    decision table told a reader to redeem a hold by resubmitting "with header
+    `x-fuse-approval-token`", in the column that describes this service's own
+    response, and `docs/decisions.svg` and `docs/architecture.svg` drew the
+    same thing. Wardryx reads one header, `Authorization`. The header is
+    TokenFuse's: the gateway reads it from the agent's request and forwards
+    its value in the body field (held on that side by tokenfuse's
+    `approval_token_header_is_forwarded_to_decide_call`). The code of both
+    repositories was right; a caller of `/v1/decide` that followed the README
+    sent the token where nothing reads it and was held again.
+
+    Two halves, held apart. The code half: a granted token sent in
+    `x-fuse-approval-token`, or in two other spellings a caller might guess,
+    with the body field empty, is a hold, and does not spend a single-use
+    token. The prose half: every `x-` header named in a README sentence, a
+    table cell, a code line or a `<text>` of `docs/*.svg` or `assets/*.svg`
+    is one a non-test Go file reads with `r.Header.Get`, or the same unit
+    names TokenFuse. Its limits: naming TokenFuse is taken as attribution,
+    the grammar is not read; a header with one part after `x-` is not seen;
+    the PNG renders are not read, so a PNG regenerated from a stale SVG passes.
+    *(test: `TestAnApprovalTokenSentAsAHeaderIsNotRead` in `internal/api`,
+    red on a planted header fallback in `handleDecide`;
+    `TestReadmeNamesNoHeaderWardryxDoesNotRead` in `cmd/wardryx`, red first on
+    the unfixed README and both diagrams, three findings; its teeth are
+    `TestReadmeHeaderCheckCatchesPlantedFaults`, five planted faults, the
+    pre-fix row and hold card among them, and three non-faults, itself red
+    when the attribution test is neutered. Scenarios in
+    `features/approval-token-wire.feature`.)*

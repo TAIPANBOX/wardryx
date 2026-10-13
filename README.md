@@ -6,7 +6,7 @@
 
 [![CI](https://github.com/TAIPANBOX/wardryx/actions/workflows/ci.yml/badge.svg)](https://github.com/TAIPANBOX/wardryx/actions/workflows/ci.yml)
 ![Go](https://img.shields.io/badge/go-1.27-00ADD8.svg)
-![tests](https://img.shields.io/badge/tests-435-brightgreen.svg)
+![tests](https://img.shields.io/badge/tests-438-brightgreen.svg)
 ![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)
 ![Status](https://img.shields.io/badge/status-deterministic%20PDP-2dd4bf.svg)
 
@@ -152,7 +152,7 @@ Two rollback limits. A policy file that uses `allow_tool` is refused at start by
 |---|---|---|---|
 | `allow` | no matched rule denied, `est_cost_usd` stays under any matched `require_human_above_usd` and `deny_above_usd` | no HTTP error; the enforcement point forwards the call | `decision:"allow"`; `cacheable:true` unless a matched policy sets `max_steps`, `allow_domains`, `allow_tool`, `require_human_above_usd`, `deny_above_usd`, `hold_if_signal`, or any of the three chain rules, or the request carries a `tool_call` and a matched policy sets `deny_tool` |
 | `deny` | `deny_tool` matched by the tool list or the tool call's name, a tool outside a matched `allow_tool`, a chain over `max_chain_depth`, a root outside `require_root_principal`, `deny_if_chain_unproven` on an unverified chain, `deny_if_unattested` with no live attestation, `max_steps` exhausted, a domain outside `allow_domains`, or `est_cost_usd` over a matched `deny_above_usd` hard ceiling | HTTP 403 Forbidden from the enforcement point back to the agent | `decision:"deny"`; `reason` names the exact rule; `approval_token_required:false` |
-| `hold` | `est_cost_usd` exceeds a matched `require_human_above_usd`, or a signal satisfies a matched `hold_if_signal`, with no valid `approval_token` presented | HTTP 403 Forbidden; stateless, nothing blocks waiting on a human | `approval_id` issued; resubmit the same call with header `x-fuse-approval-token` to redeem the grant |
+| `hold` | `est_cost_usd` exceeds a matched `require_human_above_usd`, or a signal satisfies a matched `hold_if_signal`, with no valid `approval_token` presented | HTTP 403 Forbidden; stateless, nothing blocks waiting on a human | `approval_id` issued; to redeem the grant, resubmit the same call with the token in the `approval_token` field of the `/v1/decide` body (behind TokenFuse an agent sends it in the `x-fuse-approval-token` header, and TokenFuse forwards it in that field) |
 
 ### The /v1/decide contract
 
@@ -213,6 +213,8 @@ Response (a hold, in this example, because `send_wire_transfer`'s cost is above 
 5. agent    -> POST /v1/decide (same action, approval_token set) -> wardryx
 6. wardryx  -> {"decision": "allow"}                             -> agent
 ```
+
+Wardryx reads the token from the `approval_token` field of the `/v1/decide` body and from nowhere else; no header carries it. An agent behind TokenFuse does not call `/v1/decide` itself: it resubmits its original request to the gateway with the `x-fuse-approval-token` header, and TokenFuse puts that value in the `approval_token` field of its own `/v1/decide` call.
 
 No connection is ever parked waiting for the human: the agent (or its orchestrator) polls `GET /v1/approvals` or is notified out of band, and the eventual grant is proven by the signed token, not by wardryx remembering an open request. This mirrors the stateless kill-switch pattern already used elsewhere in the TAIPANBOX stack (TokenFuse).
 
