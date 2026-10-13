@@ -740,15 +740,26 @@ decision outcome and every exported signature identical.
     ("15 minutes" reads as `15m`); and a switch that is on by default called
     "optional" or "opt-in" in a sentence naming it. Code blocks are read
     too, the environment table's rows are not.
+
+    The diagrams the README shows are read the same way, one `<text>` of
+    `docs/*.svg` or `assets/*.svg` at a time. Until 2026-10-13
+    `docs/modes.svg` still said approval tokens are reusable for the full TTL
+    by default and that `WARDRYX_APPROVAL_SINGLE_USE=true` makes each redeem
+    once: written true on 2026-07-10, false since #53 flipped the default on
+    2026-09-13, and left behind by #78, which fixed the README's own
+    sentences, because the check read only the README.
     *(test: `TestReadmeProseNeverContradictsTheCodeDefaults`, red first on
     the real pre-#78 README, where it names all four drifted sentences, and
     on a flipped `parseBoolClosed` and a changed `api.DefaultUnansweredAfter`
-    with the README unchanged; its teeth are
-    `TestReadmeProseCheckCatchesPlantedFaults`, six planted faults, three of
-    them verbatim pre-#78 sentences, and two non-faults, itself red when
-    `sameSetting` is neutered. Its limits: a default restated in words that
-    name no variable ("tokens are reusable by default") and paraphrase in
-    general are not read; those stay with review.)*
+    with the README unchanged, and red first on the unfixed `modes.svg`; its
+    teeth are `TestReadmeProseCheckCatchesPlantedFaults`, eight planted
+    faults, four of them verbatim pre-fix sentences (three from the README,
+    one from `modes.svg`), and three non-faults, itself red when
+    `sameSetting` is neutered and, on both diagram faults, when the diagrams
+    are not read. Its limits: a default restated in words that name no
+    variable ("tokens are reusable by default") and paraphrase in general are
+    not read; those stay with review. The PNG renders are not read either, so
+    a PNG regenerated from a stale SVG passes.)*
 
 25. **A typed risk signal can add a hold and nothing else.** `@decided
     2026-10-04`: a signal may turn a call into a hold and never into a deny, and

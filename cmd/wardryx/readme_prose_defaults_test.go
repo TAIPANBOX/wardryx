@@ -35,11 +35,17 @@ import (
 // The environment table's own rows are skipped: they are the other test's
 // subject. Everything else in the README is read, code blocks included,
 // since a command line that sets a variable to its default makes the same
-// false claim.
+// false claim. So is the text of every <text> element of docs/*.svg and
+// assets/*.svg, the diagrams the README shows: until 2026-10-13
+// docs/modes.svg still said tokens are "reusable for the full TTL by default"
+// and that WARDRYX_APPROVAL_SINGLE_USE=true makes each redeem once, a month
+// after the default flipped (#53) and eleven days after #78 fixed the
+// README's own sentences, because nothing read it.
 //
 // What this does not read: a default restated in words that name no variable
 // ("tokens are reusable by default") and paraphrase in general. Those are
-// left to review; the shapes above are the ones that drifted.
+// left to review; the shapes above are the ones that drifted. Nor the PNG
+// renders of the diagrams, which are made from the SVGs and are not text.
 
 var (
 	setToRE   = regexp.MustCompile("(WARDRYX_[A-Z0-9_]+)=(\"[^\"]*\"|'[^']*'|[^\\s`|),;]*)")
@@ -107,14 +113,15 @@ func proseLines(t *testing.T, path string) map[int]string {
 	return out
 }
 
-// checkReadmeProseDefaults returns every prose claim in the README at path
-// that contradicts the code's defaults, and how many claims of the three
-// shapes it found, so a run that read none can refuse.
-func checkReadmeProseDefaults(t *testing.T, path string) (problems []string, examined int) {
+// checkReadmeProseDefaults returns every prose claim in the README at readme,
+// or in a <text> of one of the diagrams at svgs, that contradicts the code's
+// defaults, and how many claims of the three shapes it found, so a run that
+// read none can refuse.
+func checkReadmeProseDefaults(t *testing.T, readme string, svgs []string) (problems []string, examined int) {
 	t.Helper()
 	read := namesTheCodeReads(t)
 	defaults := unsetAndDerive(t, read)
-	lines := proseLines(t, path)
+	lines := proseLines(t, readme)
 
 	numbers := make([]int, 0, len(lines))
 	for n := range lines {
@@ -123,10 +130,22 @@ func checkReadmeProseDefaults(t *testing.T, path string) (problems []string, exa
 	sort.Ints(numbers)
 
 	mentions := 0
+	var units []headerUnit
 	for _, n := range numbers {
-		line := lines[n]
-		at := func(msg string) { problems = append(problems, "README.md:"+strconv.Itoa(n)+": "+msg) }
-		mentions += len(mentionRE.FindAllString(line, -1))
+		mentions += len(mentionRE.FindAllString(lines[n], -1))
+		units = append(units, headerUnit{"README.md:" + strconv.Itoa(n), lines[n]})
+	}
+	if mentions == 0 {
+		t.Fatalf("%s names no WARDRYX_* variable outside the environment table: "+
+			"this test measured nothing, which is not the same as passing", readme)
+	}
+	for _, svg := range svgs {
+		units = append(units, svgUnits(t, svg)...)
+	}
+
+	for _, u := range units {
+		line := u.text
+		at := func(msg string) { problems = append(problems, u.where+": "+msg) }
 
 		for _, m := range setToRE.FindAllStringSubmatch(line, -1) {
 			def, known := defaults[m[1]]
@@ -175,15 +194,11 @@ func checkReadmeProseDefaults(t *testing.T, path string) (problems []string, exa
 			}
 		}
 	}
-	if mentions == 0 {
-		t.Fatalf("%s names no WARDRYX_* variable outside the environment table: "+
-			"this test measured nothing, which is not the same as passing", path)
-	}
 	return problems, examined
 }
 
 func TestReadmeProseNeverContradictsTheCodeDefaults(t *testing.T) {
-	problems, examined := checkReadmeProseDefaults(t, readmePath)
+	problems, examined := checkReadmeProseDefaults(t, readmePath, diagramPaths(t))
 	if examined == 0 {
 		t.Fatal("no prose claim of any of the three shapes was found in the README: " +
 			"this test measured nothing, which is not the same as passing")
@@ -193,10 +208,11 @@ func TestReadmeProseNeverContradictsTheCodeDefaults(t *testing.T) {
 	}
 }
 
-// Teeth: each case plants, into a copy of the real README, one sentence the
-// README actually carried before #78, or a close variant of a shape, and
-// requires a problem naming the variable. The unchanged copy and a planted
-// sentence that is true must produce none.
+// Teeth: each case plants, into a copy of the real README or of a real
+// diagram, one sentence the README or the diagram actually carried before it
+// was fixed, or a close variant of a shape, and requires a problem naming the
+// variable. The unchanged copies and a planted sentence that is true must
+// produce none.
 func TestReadmeProseCheckCatchesPlantedFaults(t *testing.T) {
 	orig, err := os.ReadFile(readmePath)
 	if err != nil {
@@ -206,40 +222,60 @@ func TestReadmeProseCheckCatchesPlantedFaults(t *testing.T) {
 	if strings.Count(string(orig), anchor) != 1 {
 		t.Fatalf("plant anchor %q is not exactly once in the README; the plants would measure nothing", anchor)
 	}
+	const svgName = "../../docs/modes.svg"
+	origSVG, err := os.ReadFile(svgName)
+	if err != nil {
+		t.Fatalf("reading %s: %v", svgName, err)
+	}
+	const svgAnchor = "</svg>"
+	if strings.Count(string(origSVG), svgAnchor) != 1 {
+		t.Fatalf("plant anchor %q is not exactly once in %s; the plants would measure nothing", svgAnchor, svgName)
+	}
 	cases := []struct {
-		name, plant, want string
+		name, plant, svgPlant, want string
 	}{
-		{"unchanged copy", "", ""},
-		{"a true sentence is not a fault",
-			"Set `WARDRYX_APPROVAL_SINGLE_USE=false` to reuse a token (`WARDRYX_APPROVAL_UNANSWERED_AFTER`, default 15m).\n\n",
-			""},
-		{"pre-#78: the old default as an opt-in",
-			"Approval tokens are reusable for the full TTL by default (10 minutes), or set `WARDRYX_APPROVAL_SINGLE_USE=true` so each granted token redeems exactly once.\n\n",
-			"WARDRYX_APPROVAL_SINGLE_USE=true sets the variable to its own default"},
-		{"pre-#78: the caveat tied to an explicit true",
-			"- `WARDRYX_APPROVAL_SINGLE_USE=true` with no `-db`/`WARDRYX_DB` only enforces single-use within that one process.\n\n",
-			"WARDRYX_APPROVAL_SINGLE_USE=true sets the variable to its own default"},
-		{"pre-#78: on by default, called optional",
-			"- [x] Stateless human-in-the-loop: HMAC-signed approval tokens, configurable TTL, optional single-use redemption (`WARDRYX_APPROVAL_SINGLE_USE`)\n\n",
-			`WARDRYX_APPROVAL_SINGLE_USE is on by default, and a sentence naming it calls it "optional"`},
-		{"a stated default the code does not use",
-			"The sweep (`WARDRYX_APPROVAL_UNANSWERED_AFTER`, default 10m) reports and never decides.\n\n",
-			`WARDRYX_APPROVAL_UNANSWERED_AFTER: prose says the default is "10m", the code uses "15m0s"`},
-		{"a stated default with its unit in words",
-			"Once a hold is older than `WARDRYX_APPROVAL_UNANSWERED_AFTER` (a Go duration, default 10 minutes), it is reported.\n\n",
-			`WARDRYX_APPROVAL_UNANSWERED_AFTER: prose says the default is "10m", the code uses "15m0s"`},
-		{"a stated bool default in backticks",
-			"`WARDRYX_APPROVAL_SINGLE_USE` defaults to `false`.\n\n",
-			`WARDRYX_APPROVAL_SINGLE_USE: prose says the default is "false", the code uses "true"`},
+		{name: "unchanged copies"},
+		{name: "pre-2026-10-13: the modes diagram's approval-token line",
+			svgPlant: `<text x="185" y="674" font-size="11.5">reusable for the full TTL by default (10 min); WARDRYX_APPROVAL_SINGLE_USE=true makes each granted token redeem exactly once</text>`,
+			want:     "modes.svg: WARDRYX_APPROVAL_SINGLE_USE=true sets the variable to its own default"},
+		{name: "a diagram text that calls an on-by-default switch optional",
+			svgPlant: `<text x="185" y="674">optional single-use redemption (WARDRYX_APPROVAL_SINGLE_USE)</text>`,
+			want:     `modes.svg: WARDRYX_APPROVAL_SINGLE_USE is on by default, and a sentence naming it calls it "optional"`},
+		{name: "a true diagram text is not a fault",
+			svgPlant: `<text x="185" y="674">single-use by default; WARDRYX_APPROVAL_SINGLE_USE=false makes a token reusable for its full TTL</text>`},
+		{name: "a true sentence is not a fault",
+			plant: "Set `WARDRYX_APPROVAL_SINGLE_USE=false` to reuse a token (`WARDRYX_APPROVAL_UNANSWERED_AFTER`, default 15m).\n\n"},
+		{name: "pre-#78: the old default as an opt-in",
+			plant: "Approval tokens are reusable for the full TTL by default (10 minutes), or set `WARDRYX_APPROVAL_SINGLE_USE=true` so each granted token redeems exactly once.\n\n",
+			want:  "WARDRYX_APPROVAL_SINGLE_USE=true sets the variable to its own default"},
+		{name: "pre-#78: the caveat tied to an explicit true",
+			plant: "- `WARDRYX_APPROVAL_SINGLE_USE=true` with no `-db`/`WARDRYX_DB` only enforces single-use within that one process.\n\n",
+			want:  "WARDRYX_APPROVAL_SINGLE_USE=true sets the variable to its own default"},
+		{name: "pre-#78: on by default, called optional",
+			plant: "- [x] Stateless human-in-the-loop: HMAC-signed approval tokens, configurable TTL, optional single-use redemption (`WARDRYX_APPROVAL_SINGLE_USE`)\n\n",
+			want:  `WARDRYX_APPROVAL_SINGLE_USE is on by default, and a sentence naming it calls it "optional"`},
+		{name: "a stated default the code does not use",
+			plant: "The sweep (`WARDRYX_APPROVAL_UNANSWERED_AFTER`, default 10m) reports and never decides.\n\n",
+			want:  `WARDRYX_APPROVAL_UNANSWERED_AFTER: prose says the default is "10m", the code uses "15m0s"`},
+		{name: "a stated default with its unit in words",
+			plant: "Once a hold is older than `WARDRYX_APPROVAL_UNANSWERED_AFTER` (a Go duration, default 10 minutes), it is reported.\n\n",
+			want:  `WARDRYX_APPROVAL_UNANSWERED_AFTER: prose says the default is "10m", the code uses "15m0s"`},
+		{name: "a stated bool default in backticks",
+			plant: "`WARDRYX_APPROVAL_SINGLE_USE` defaults to `false`.\n\n",
+			want:  `WARDRYX_APPROVAL_SINGLE_USE: prose says the default is "false", the code uses "true"`},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			src := strings.Replace(string(orig), anchor, c.plant+anchor, 1)
-			path := filepath.Join(t.TempDir(), "README.md")
-			if err := os.WriteFile(path, []byte(src), 0o600); err != nil {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "README.md")
+			if err := os.WriteFile(path, []byte(strings.Replace(string(orig), anchor, c.plant+anchor, 1)), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			got, _ := checkReadmeProseDefaults(t, path)
+			svg := filepath.Join(dir, "modes.svg")
+			if err := os.WriteFile(svg, []byte(strings.Replace(string(origSVG), svgAnchor, c.svgPlant+svgAnchor, 1)), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			got, _ := checkReadmeProseDefaults(t, path, []string{svg})
 			if c.want == "" {
 				if len(got) != 0 {
 					t.Fatalf("no fault planted, got problems: %q", got)
