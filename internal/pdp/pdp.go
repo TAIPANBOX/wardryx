@@ -130,10 +130,10 @@ type DecideRequest struct {
 	// established before calling (see Signal).
 	Signals []Signal
 	// ToolCall is the concrete call this request is about to make, when the
-	// enforcement point knows it. Decide reads only its Name, in rule 3
-	// (allow_tool). It never reads the arguments: the decision record leaves
-	// them out, and they are digested only to verify an approval token bound
-	// to the call.
+	// enforcement point knows it. Decide reads only its Name, in rules 2 and 3
+	// (deny_tool and allow_tool). It never reads the arguments: the decision
+	// record leaves them out, and they are digested only to verify an approval
+	// token bound to the call.
 	ToolCall *ToolCall
 }
 
@@ -179,9 +179,11 @@ type DecideResponse struct {
 	// AgentID sets MaxSteps, AllowDomains, AllowTool, RequireHumanAboveUSD,
 	// or DenyAboveUSD -- the fields Decide checks against per-request state,
 	// AllowTool with the name of the tool call -- or when no policy matched at
-	// all. False whenever a matched policy sets any of those five, even if the
-	// rule that actually
-	// produced this Decision was something else entirely (e.g. DenyTool): a
+	// all. A request that carries a tool call is not True under a matched
+	// DenyTool either, since rule 2 reads the call's name, which lies outside
+	// the agent and tool set. False whenever a matched policy sets any of those
+	// five, even if the rule that actually produced this Decision was something
+	// else entirely (e.g. DenyTool): a
 	// later call against the same agent and tool set could still resolve
 	// differently once Steps, Domains, or EstCostUSD change, so the
 	// decision as a whole is never safe to reuse, regardless of which rule
@@ -262,7 +264,8 @@ func (e *Engine) SetPolicies(policies *policy.Set) {
 // Decide evaluates req against the Engine's policy set, in this order:
 //  1. an invalid on_behalf_of delegation chain denies, independent of any
 //     policy;
-//  2. a requested tool in a matched policy's deny_tool denies;
+//  2. a requested tool in a matched policy's deny_tool denies, the name of
+//     tool_call included;
 //  3. a requested tool that a matched policy's allow_tool does not list
 //     denies. The requested tools are the tool list and the name of
 //     tool_call, and every matched allow_tool must list the tool, so two
@@ -347,9 +350,12 @@ func (e *Engine) Decide(req DecideRequest) DecideResponse {
 	// whichever rule ends up firing -- carries the same answer. See the
 	// field doc comment for why this depends on the matched policy set as
 	// a whole, not on which specific rule produced Decision.
-	resp.Cacheable = !requestSpecific(matched)
+	resp.Cacheable = !requestSpecific(matched, req.ToolCall != nil)
 
-	if tool, pol, ok := deniedTool(matched, req.ToolNames); ok {
+	// Rule 2 reads the same names as rule 3: the tool list and the tool call's
+	// name. The tool call is outside the (agent, tool set) key a cache uses, so
+	// requestSpecific keeps such a decision out of the cache.
+	if tool, pol, ok := deniedTool(matched, requestedTools(req)); ok {
 		resp.Decision = Deny
 		resp.Reason = fmt.Sprintf("tool %q is denied by policy %q (target %s)", tool, pol.Name, pol.Target)
 		return resp
@@ -476,7 +482,9 @@ func (e *Engine) Decide(req DecideRequest) DecideResponse {
 // AllowDomains (checked against Domains), RequireHumanAboveUSD /
 // DenyAboveUSD (both checked against EstCostUSD), or AllowTool, whose rule
 // also reads the name of tool_call: a value that changes call to call and is
-// not part of the tool set. DenyTool is deliberately not considered: it is
+// not part of the tool set. DenyTool is considered only for a request that
+// carries a tool call: rule 2 then reads the call's name as well as the tool
+// set, and hasToolCall says whether it does. Without a tool call, DenyTool is
 // checked against the tool set itself, which this function already holds
 // fixed.
 //
@@ -494,7 +502,7 @@ func (e *Engine) Decide(req DecideRequest) DecideResponse {
 // incident (TokenFuse PR #110) this caused when a downstream cache
 // keyed on (agent_id, tool-set hash) alone treated attestation_method
 // as if it were as stable as the tool set.
-func requestSpecific(matched []policy.Policy) bool {
+func requestSpecific(matched []policy.Policy, hasToolCall bool) bool {
 	for _, p := range matched {
 		// The three chain fields join this list for the reason the others are
 		// on it: `OnBehalfOf` and `ChainProven` are per-REQUEST values, not
@@ -511,6 +519,14 @@ func requestSpecific(matched []policy.Policy) bool {
 			len(p.AllowDomains) > 0 || len(p.AllowTool) > 0 || p.DenyIfChainUnproven ||
 			p.MaxChainDepth > 0 || p.RequireRootPrincipal != "" ||
 			p.HoldIfSignal != nil {
+			return true
+		}
+		// deny_tool reads the tool call's name as well as the tool list (rule 2).
+		// A cached allow for the tool list would be served to a later call whose
+		// tool call names a denied tool, so a request that carries a tool call is
+		// never cacheable under a deny-list. A request with no tool call is read
+		// exactly as before, and stays cacheable.
+		if hasToolCall && len(p.DenyTool) > 0 {
 			return true
 		}
 	}

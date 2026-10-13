@@ -941,7 +941,25 @@ decision outcome and every exported signature identical.
     leave an empty list, which reads as no restriction. A decision that reads a
     tool call's name is never cacheable. Replay puts the recorded tool call name
     back to the PDP, so a recorded denial reproduces.
-    *(test: `TestAToolOnTheAllowListIsAllowed`,
+    The deny-list reads the same names. `@decided 2026-10-13`: deny_tool refuses a
+    tool that a request names only in its tool call, as it refuses one that the
+    tool list names. Rule 2 of `Decide` reads the tool list and the tool call's
+    name, the same set rule 3 reads. The tool call sits outside the (agent, tool
+    set) key a decision cache uses, so a request that carries a tool call is never
+    cacheable under a matched deny_tool. A request with no tool call is read as it
+    was before, and stays cacheable. `Filter` judges one offered tool at a time
+    and carries no tool call, so it is unchanged. Replay reads the same name, so a
+    recorded allow whose tool call is now denied replays as a divergence.
+    Named limit: a request with no tool call is still cacheable under a deny_tool,
+    so a cache keyed on agent and tool set alone can serve that allow to a later
+    call whose tool call names a denied tool. A caller that caches must key on
+    whether a tool call is present, or leave deny-list decisions uncached.
+    *(test: `TestADeniedToolNamedOnlyByTheToolCallIsDenied`,
+    `TestADenyToolDecisionForACallIsNeverCacheable`,
+    `TestWithoutAToolCallADenyToolDecisionIsStillCacheable` (the golden for a
+    request with no tool call) and `TestARecordedAllowWhoseToolCallIsNowDeniedDiverges`
+    in `internal/replay`; scenarios in `features/deny-tool-call.feature`;
+    `TestAToolOnTheAllowListIsAllowed`,
     `TestARenamedToolIsDeniedByAnAllowList`, `TestAToolTheListLeavesOutIsDeniedByName`,
     `TestNoAllowListMeansNoRestriction`, `TestTwoAllowListsNarrowEachOther`,
     `TestToolCallNameIsCheckedAgainstTheAllowList`,
