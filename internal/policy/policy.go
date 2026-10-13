@@ -42,6 +42,15 @@ type Policy struct {
 	Target string `yaml:"target" json:"target"`
 	// DenyTool lists tool names this policy refuses outright.
 	DenyTool []string `yaml:"deny_tool,omitempty" json:"deny_tool,omitempty"`
+	// AllowTool is the closed list of tool names the agents this policy matches
+	// may use. A requested tool, or the tool a tool_call names, that the list
+	// does not contain is denied. Matching folds case and surrounding space the
+	// way DenyTool does, and nothing looser, so "apply-staff-coupon" is not
+	// "apply_staff_coupon". Empty or absent means no restriction. When several
+	// matched policies set it, each one that does must list the tool. A blank
+	// entry is refused at load, since it would be dropped and leave the list
+	// empty, which reads as no restriction. See internal/pdp's Decide, rule 3.
+	AllowTool []string `yaml:"allow_tool,omitempty" json:"allow_tool,omitempty"`
 	// AllowDomains lists network destinations the agent may reach. Enforced
 	// by internal/pdp's Decide against the request's declared Domains: any
 	// entry in Domains that is absent from AllowDomains denies the request.
@@ -517,6 +526,13 @@ func decodeYAML(data []byte) ([]Policy, error) {
 // Compile normalizes and validates policies, compiles each Target glob, and
 // returns the resulting Set. Compile(nil) returns a valid, empty Set.
 func Compile(policies []Policy) (*Set, error) {
+	// Refused before normalize, which drops blank entries: a list of only blanks
+	// would be left empty, and an empty allow_tool reads as no restriction.
+	for _, p := range policies {
+		if err := refuseBlankAllowTool(p); err != nil {
+			return nil, err
+		}
+	}
 	norm := normalize(policies)
 
 	out := make([]compiled, 0, len(norm))
@@ -531,6 +547,19 @@ func Compile(policies []Policy) (*Set, error) {
 		out = append(out, compiled{Policy: p, re: re})
 	}
 	return &Set{policies: out, version: computeVersion(norm)}, nil
+}
+
+// refuseBlankAllowTool refuses an allow_tool list holding a blank entry. A blank
+// is dropped on normalization, so a list of only blanks would read as no
+// restriction: the one way a line in a policy could widen what an agent may
+// use without saying so.
+func refuseBlankAllowTool(p Policy) error {
+	for _, tool := range p.AllowTool {
+		if strings.TrimSpace(tool) == "" {
+			return fmt.Errorf("policy %q: allow_tool must not contain a blank entry: a blank is dropped and the list would read as no restriction", p.Name)
+		}
+	}
+	return nil
 }
 
 func validate(p Policy) error {
@@ -575,7 +604,7 @@ func validate(p Policy) error {
 }
 
 // normalize returns a defensive copy of policies with Name defaulted, and
-// DenyTool/AllowDomains deduplicated, sorted, and stripped of blank entries,
+// DenyTool, AllowTool and AllowDomains deduplicated, sorted, and stripped of blank entries,
 // then sorts the policies themselves by (target, name). The result is
 // deterministic regardless of the input's source-file or field order, which
 // is what makes computeVersion stable across equivalent policy sets.
@@ -584,6 +613,7 @@ func normalize(policies []Policy) []Policy {
 	for i, p := range policies {
 		np := p
 		np.DenyTool = sortedUnique(p.DenyTool)
+		np.AllowTool = sortedUnique(p.AllowTool)
 		np.AllowDomains = sortedUnique(p.AllowDomains)
 		np.RequireHumanAboveUSD = cloneUSD(p.RequireHumanAboveUSD)
 		np.DenyAboveUSD = cloneUSD(p.DenyAboveUSD)

@@ -154,8 +154,9 @@ func TestFilterDropsLaterDuplicates(t *testing.T) {
 
 // TestFilterAgreesWithDecideOnEveryToolAlone is the property sweep: for a
 // seeded, randomized set of policies and a fixed tool pool, Decide called on
-// exactly one tool at a time denies by deny_tool if and only if Filter lists
-// that tool in Denied. Seeds are fixed (1..200) so a failure reproduces; the
+// exactly one tool at a time denies by deny_tool or allow_tool if and only if
+// Filter lists that tool in Denied, and when Filter names allow_tool, Decide's
+// reason names it too. Seeds are fixed (1..200) so a failure reproduces; the
 // seed is printed on failure.
 func TestFilterAgreesWithDecideOnEveryToolAlone(t *testing.T) {
 	const agentUnderTest = "agent://acme/bot"
@@ -186,10 +187,25 @@ func TestFilterAgreesWithDecideOnEveryToolAlone(t *testing.T) {
 			for tool := range denySet {
 				denyTool = append(denyTool, tool)
 			}
+			// About half the policies also name an allow-list, so the sweep covers
+			// allow_tool beside deny_tool.
+			var allowTool []string
+			if rng.Intn(2) == 0 {
+				numAllowed := 1 + rng.Intn(len(toolPool)) // 1..len(toolPool)
+				allowSet := map[string]bool{}
+				for len(allowSet) < numAllowed {
+					tool := toolPool[rng.Intn(len(toolPool))]
+					allowSet[caseVariants[rng.Intn(len(caseVariants))](tool)] = true
+				}
+				for tool := range allowSet {
+					allowTool = append(allowTool, tool)
+				}
+			}
 			policies = append(policies, policy.Policy{
-				Name:     fmt.Sprintf("p%d", i),
-				Target:   target,
-				DenyTool: denyTool,
+				Name:      fmt.Sprintf("p%d", i),
+				Target:    target,
+				DenyTool:  denyTool,
+				AllowTool: allowTool,
 			})
 		}
 
@@ -214,6 +230,9 @@ func TestFilterAgreesWithDecideOnEveryToolAlone(t *testing.T) {
 			})
 			filterDenied := len(filterResp.Denied) == 1 && filterResp.Denied[0].Name == tool
 
+			if filterDenied && filterResp.Denied[0].Rule == "allow_tool" && !strings.Contains(decideResp.Reason, "allow_tool") {
+				t.Fatalf("seed %d, tool %q: Filter names allow_tool, but Decide's reason is %q", seed, tool, decideResp.Reason)
+			}
 			if decideDenied != filterDenied {
 				t.Fatalf("seed %d, tool %q: Decide denied=%v (reason %q), Filter denied=%v; policies=%+v",
 					seed, tool, decideDenied, decideResp.Reason, filterDenied, policies)

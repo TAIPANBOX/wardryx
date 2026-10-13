@@ -91,6 +91,7 @@ run = text[body : end if end != -1 else len(text)]
 PREDICATES = {
     "chain.Validate": "an invalid on_behalf_of delegation chain",
     "deniedTool": "deny_tool",
+    "outsideAllowTool": "allow_tool",
     "chainDepthExceeded": "max_chain_depth",
     "rootPrincipalRefused": "require_root_principal",
     "chainUnproven": "deny_if_chain_unproven",

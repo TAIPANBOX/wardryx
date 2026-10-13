@@ -130,7 +130,10 @@ type DecideRequest struct {
 	// established before calling (see Signal).
 	Signals []Signal
 	// ToolCall is the concrete call this request is about to make, when the
-	// enforcement point knows it. Decide does not branch on it.
+	// enforcement point knows it. Decide reads only its Name, in rule 3
+	// (allow_tool). It never reads the arguments: the decision record leaves
+	// them out, and they are digested only to verify an approval token bound
+	// to the call.
 	ToolCall *ToolCall
 }
 
@@ -173,10 +176,11 @@ type DecideResponse struct {
 	// Cacheable reports whether this decision is a pure function of
 	// (agent_id, tool set), independent of any per-request value such as
 	// Steps, Domains, or EstCostUSD. True when no policy matched by
-	// AgentID sets MaxSteps, AllowDomains, RequireHumanAboveUSD, or
-	// DenyAboveUSD -- the only fields Decide checks against per-request
-	// state -- or when no policy matched at all. False whenever a matched
-	// policy sets any of those four, even if the rule that actually
+	// AgentID sets MaxSteps, AllowDomains, AllowTool, RequireHumanAboveUSD,
+	// or DenyAboveUSD -- the fields Decide checks against per-request state,
+	// AllowTool with the name of the tool call -- or when no policy matched at
+	// all. False whenever a matched policy sets any of those five, even if the
+	// rule that actually
 	// produced this Decision was something else entirely (e.g. DenyTool): a
 	// later call against the same agent and tool set could still resolve
 	// differently once Steps, Domains, or EstCostUSD change, so the
@@ -259,53 +263,56 @@ func (e *Engine) SetPolicies(policies *policy.Set) {
 //  1. an invalid on_behalf_of delegation chain denies, independent of any
 //     policy;
 //  2. a requested tool in a matched policy's deny_tool denies;
-//  3. a matched policy's max_chain_depth, reached or exceeded by the length
+//  3. a requested tool that a matched policy's allow_tool does not list
+//     denies. The requested tools are the tool list and the name of
+//     tool_call, and every matched allow_tool must list the tool, so two
+//     allow-lists intersect and a policy with none adds no restriction;
+//  4. a matched policy's max_chain_depth, reached or exceeded by the length
 //     of req.OnBehalfOf, denies;
-//  4. a matched policy's require_root_principal, with a chain whose root is
+//  5. a matched policy's require_root_principal, with a chain whose root is
 //     not one it names, denies;
-//  5. a matched policy's deny_if_chain_unproven, with req.ChainProven
+//  6. a matched policy's deny_if_chain_unproven, with req.ChainProven
 //     false, denies;
-//  6. a matched policy's deny_if_unattested with no live attestation
+//  7. a matched policy's deny_if_unattested with no live attestation
 //     denies;
-//  7. a matched policy's max_steps, reached or exceeded by req.Steps,
+//  8. a matched policy's max_steps, reached or exceeded by req.Steps,
 //     denies;
-//  8. a matched policy's allow_domains, missing an entry from req.Domains,
+//  9. a matched policy's allow_domains, missing an entry from req.Domains,
 //     denies;
-//  9. a matched policy's deny_above_usd, exceeded by EstCostUSD, denies
+//  10. a matched policy's deny_above_usd, exceeded by EstCostUSD, denies
 //     outright: this is a hard ceiling, not an approval gate, so no
 //     ApprovalToken -- however validly minted -- is even inspected, unlike
-//     rule 10 below;
-//  10. a matched policy's require_human_above_usd, exceeded by EstCostUSD,
+//     rule 11 below;
+//  11. a matched policy's require_human_above_usd, exceeded by EstCostUSD,
 //     resolves to Hold, unless a valid ApprovalToken was presented (then
 //     Allow) or an *invalid* one was presented (then Deny);
-//  11. a matched policy's hold_if_signal, satisfied by one of req.Signals,
+//  12. a matched policy's hold_if_signal, satisfied by one of req.Signals,
 //     resolves to Hold, unless a valid ApprovalToken was presented (then
 //     Allow); an invalid token holds, it never denies;
-//  12. otherwise, Allow.
+//  13. otherwise, Allow.
 //
-// Rule 11 is the only rule a signal can reach, and it is last on purpose: it
+// Rule 12 is the only rule a signal can reach, and it is last on purpose: it
 // runs only once every deny rule and the cost gate have declined, so a signal
 // can turn an allow into a hold and can change nothing else. It never turns a
 // deny into anything, never replaces another rule's hold or its reason, and
-// never allows. Its invalid-token branch holds where rule 10's denies, because
+// never allows. Its invalid-token branch holds where rule 11's denies, because
 // without the signal that same call would have been allowed, and a signal
 // must not be able to turn an allow into a refusal.
 //
 // A deny from any rule wins outright: it short-circuits every later rule
 // and Decide never has to reconcile a deny against a later hold or allow.
-// Rules 1-9 are all deny-or-continue and carry no state, so their relative
+// Rules 1-10 are all deny-or-continue and carry no state, so their relative
 // order only changes which single Reason string is reported when a request
 // happens to violate more than one of them at once -- it never changes
-// whether the final Decision is Deny. Rule 9 is deliberately placed before
-// rule 10: a policy that sets both deny_above_usd and
+// whether the final Decision is Deny. Rule 10 is deliberately placed before
+// rule 11: a policy that sets both deny_above_usd and
 // require_human_above_usd, with a cost that exceeds both, must Deny rather
 // than Hold -- the hard ceiling always wins over the approval gate, and
 // require_human_above_usd's threshold is never even reached, so no
-// ApprovalToken is checked at all. Rule 7 is ordered last among the
-// deny-capable rules because it is the only one that can resolve to
-// something other than Deny or fall-through (Hold, or Allow via a redeemed
-// token), so every unconditional deny check -- including the new hard
-// ceiling -- runs first.
+// ApprovalToken is checked at all. Rules 11 and 12 are the only ones that can
+// resolve to something other than Deny or fall-through (Hold, or Allow via a
+// redeemed token), so they come after every unconditional deny check,
+// including the hard ceiling of rule 10.
 func (e *Engine) Decide(req DecideRequest) DecideResponse {
 	// Loaded once, up front: every rule below evaluates against this exact
 	// snapshot, so a concurrent SetPolicies mid-decision can never make one
@@ -345,6 +352,15 @@ func (e *Engine) Decide(req DecideRequest) DecideResponse {
 	if tool, pol, ok := deniedTool(matched, req.ToolNames); ok {
 		resp.Decision = Deny
 		resp.Reason = fmt.Sprintf("tool %q is denied by policy %q (target %s)", tool, pol.Name, pol.Target)
+		return resp
+	}
+
+	// Rule 3: an allow-list is a floor like deny_tool, so it runs before the
+	// chain and cost rules, and no approval_token is ever inspected for a tool
+	// the list leaves out.
+	if tool, pol, ok := outsideAllowTool(matched, requestedTools(req)); ok {
+		resp.Decision = Deny
+		resp.Reason = fmt.Sprintf("tool %q is not in the allow_tool of policy %q (target %s)", tool, pol.Name, pol.Target)
 		return resp
 	}
 
@@ -457,10 +473,12 @@ func (e *Engine) Decide(req DecideRequest) DecideResponse {
 // requestSpecific reports whether any policy in matched checks a
 // per-request value that can differ from one call to the next even when
 // the agent and tool set stay the same: MaxSteps (checked against Steps),
-// AllowDomains (checked against Domains), or RequireHumanAboveUSD /
-// DenyAboveUSD (both checked against EstCostUSD). DenyTool is deliberately
-// not considered: it is checked against the tool set itself, which this
-// function already holds fixed.
+// AllowDomains (checked against Domains), RequireHumanAboveUSD /
+// DenyAboveUSD (both checked against EstCostUSD), or AllowTool, whose rule
+// also reads the name of tool_call: a value that changes call to call and is
+// not part of the tool set. DenyTool is deliberately not considered: it is
+// checked against the tool set itself, which this function already holds
+// fixed.
 //
 // DenyIfUnattested is also not considered here, but NOT because
 // attestation_method is a stable per-agent fact -- it isn't. The same
@@ -490,7 +508,7 @@ func requestSpecific(matched []policy.Policy) bool {
 		// that could have read one must never be reused for the next call under
 		// the same agent and tool set.
 		if p.MaxSteps > 0 || p.RequireHumanAboveUSD != nil || p.DenyAboveUSD != nil ||
-			len(p.AllowDomains) > 0 || p.DenyIfChainUnproven ||
+			len(p.AllowDomains) > 0 || len(p.AllowTool) > 0 || p.DenyIfChainUnproven ||
 			p.MaxChainDepth > 0 || p.RequireRootPrincipal != "" ||
 			p.HoldIfSignal != nil {
 			return true
@@ -511,6 +529,44 @@ func deniedTool(policies []policy.Policy, tools []string) (tool string, pol poli
 			if containsFold(p.DenyTool, t) {
 				return t, p, true
 			}
+		}
+	}
+	return "", policy.Policy{}, false
+}
+
+// requestedTools lists every tool name the request carries: the tool list, then
+// the name of tool_call when the enforcement point sent one. It is a fresh
+// slice, so nothing appended here can write into the caller's own list. A
+// request that carries neither names no tool, and rule 3 has nothing to check.
+func requestedTools(req DecideRequest) []string {
+	out := make([]string, 0, len(req.ToolNames)+1)
+	out = append(out, req.ToolNames...)
+	if req.ToolCall != nil {
+		out = append(out, req.ToolCall.Name)
+	}
+	return out
+}
+
+// allowToolRefused reports the first matched policy whose non-empty allow_tool
+// does not list tool, under containsFold, the same match deny_tool uses. A
+// policy with no allow_tool imposes nothing. Decide (rule 3) and Filter both
+// call it, so the two cannot disagree on what an allow-list refuses.
+func allowToolRefused(policies []policy.Policy, tool string) (policy.Policy, bool) {
+	for _, p := range policies {
+		if len(p.AllowTool) > 0 && !containsFold(p.AllowTool, tool) {
+			return p, true
+		}
+	}
+	return policy.Policy{}, false
+}
+
+// outsideAllowTool returns the first requested tool that allowToolRefused
+// refuses, and the policy that refused it. Every matched allow-list applies, so
+// a tool must be listed by each of them: the lists intersect.
+func outsideAllowTool(policies []policy.Policy, tools []string) (tool string, pol policy.Policy, ok bool) {
+	for _, t := range tools {
+		if p, refused := allowToolRefused(policies, t); refused {
+			return t, p, true
 		}
 	}
 	return "", policy.Policy{}, false

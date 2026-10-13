@@ -308,7 +308,7 @@ run_case "decide-order: the comment loses a rule and renumbers over it" fail \
 	"$(py 'import re
 s = open("internal/pdp/pdp.go").read()
 before = s
-s = re.sub(r"//  4\. a matched policy.s require_root_principal, with a chain whose root is\n//     not one it names, denies;\n", "", s, count=1)
+s = re.sub(r"//  5\. a matched policy.s require_root_principal, with a chain whose root is\n//     not one it names, denies;\n", "", s, count=1)
 assert s != before, "the require_root_principal item is not where this expects it"
 open("internal/pdp/pdp.go", "w").write(s)')" \
 	"and the comment"
