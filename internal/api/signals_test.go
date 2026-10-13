@@ -455,10 +455,13 @@ func TestTheCacheableHintIsFalseForEverySignalDependentDecisionOverTheWire(t *te
 		})
 	}
 	// The control: a policy with no signal rule is still cacheable, so the
-	// hint has not simply been switched off.
+	// hint has not simply been switched off. The request carries no tool call:
+	// a deny-list is per-request for a call, so the control drops the call.
 	plain := newSigHarness(t, false, policy.Policy{Name: "plain", Target: "agent://acme.example/support/*", DenyTool: []string{"other"}})
-	if got := decodeBody[decideResponseDTO](t, plain.decide(t, plainAsk())); !got.Cacheable {
-		t.Fatal("control: a policy with no signal rule stopped being cacheable")
+	plainNoCall := plainAsk()
+	plainNoCall.ToolCall = nil
+	if got := decodeBody[decideResponseDTO](t, plain.decide(t, plainNoCall)); !got.Cacheable {
+		t.Fatal("control: a deny-list with no tool call stopped being cacheable")
 	}
 }
 

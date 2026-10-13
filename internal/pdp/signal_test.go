@@ -287,8 +287,12 @@ func TestADecisionThatCanReadASignalIsNeverCacheable(t *testing.T) {
 		t.Error("a decision under a hold_if_signal policy is Cacheable: the next call's arguments may carry a signal")
 	}
 	without := signalEngine(t, policy.Policy{Name: "plain", Target: "agent://acme.example/support/*", DenyTool: []string{"x"}})
-	if got := without.Decide(toolCallRequest()); !got.Cacheable {
-		t.Error("control: a policy with no per-request rule stopped being Cacheable")
+	// No tool call: a deny-list alone is per-request only when the call's name is
+	// read, so the control drops the call to keep the policy's deny-list in play.
+	plainCall := toolCallRequest()
+	plainCall.ToolCall = nil
+	if got := without.Decide(plainCall); !got.Cacheable {
+		t.Error("control: a deny-list with no tool call stopped being Cacheable")
 	}
 }
 
@@ -402,9 +406,12 @@ func TestEverySignalDependentDecisionIsMarkedNotCacheable(t *testing.T) {
 	if got := signalEngine(t, deny).Decide(toolCallRequest(riskSignal("destructive", 0.95))); got.Decision != Deny || got.Cacheable {
 		t.Errorf("a deny under a signal policy: %s cacheable=%v", got.Decision, got.Cacheable)
 	}
-	// The control: signals nobody reads change nothing about cacheability.
+	// The control: signals nobody reads change nothing about cacheability. The
+	// request carries no tool call, since a deny-list is per-request for a call.
 	plain := signalEngine(t, policy.Policy{Name: "plain", Target: "agent://acme.example/support/*", DenyTool: []string{"x"}})
-	if got := plain.Decide(toolCallRequest(riskSignal("destructive", 0.95))); !got.Cacheable {
+	plainReq := toolCallRequest(riskSignal("destructive", 0.95))
+	plainReq.ToolCall = nil
+	if got := plain.Decide(plainReq); !got.Cacheable {
 		t.Error("control: a signal no policy reads made a decision uncacheable")
 	}
 }

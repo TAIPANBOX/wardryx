@@ -9,7 +9,7 @@ import (
 )
 
 // ------------------------------------------------------------------
-// POST /v1/filter-tools: pdp.Filter (rule 2, deny_tool, applied to each
+// POST /v1/filter-tools: pdp.Filter (rules 2 and 3, deny_tool and allow_tool, applied to each
 // offered tool alone) exposed over the same auth and body-cap discipline as
 // /v1/decide. See features/filter-tools.feature and CLAUDE.md's Filter
 // invariant.

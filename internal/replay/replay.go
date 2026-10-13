@@ -323,6 +323,12 @@ func question(ev event.Event) (pdp.DecideRequest, string, bool, error) {
 		return pdp.DecideRequest{}, "", false, err
 	}
 
+	// The tool call is the one member that the allow-list rule reads by name.
+	toolCall, err := recordedToolCall(ev.Data["tool_call"])
+	if err != nil {
+		return pdp.DecideRequest{}, "", false, err
+	}
+
 	return pdp.DecideRequest{
 		AgentID:           ev.AgentID,
 		RunID:             ev.RunID,
@@ -335,6 +341,7 @@ func question(ev event.Event) (pdp.DecideRequest, string, bool, error) {
 		AttestationMethod: text(attestation),
 		ChainProven:       chainProven == true,
 		Signals:           signals,
+		ToolCall:          toolCall,
 	}, v, tokenRequired == true, nil
 }
 
@@ -371,6 +378,31 @@ func recordedSignals(v any) ([]pdp.Signal, error) {
 		return nil, fmt.Errorf("the recorded signals are malformed: %v", err)
 	}
 	return out, nil
+}
+
+// recordedToolCall reads back the tool call one event recorded. Absent is none.
+// The arguments are never recorded (invariant 27), so a replayed call carries
+// none: Decide reads only the name, and the digest is used only to verify an
+// approval token, which replay never presents. A record whose tool call is not
+// the shape the emitter writes is not a question that can be put again.
+func recordedToolCall(v any) (*pdp.ToolCall, error) {
+	if v == nil {
+		return nil, nil
+	}
+	m, ok := v.(map[string]any)
+	if !ok {
+		return nil, fmt.Errorf("the recorded tool_call is not an object")
+	}
+	name, ok := m["name"].(string)
+	if !ok || strings.TrimSpace(name) == "" {
+		return nil, fmt.Errorf("the recorded tool_call has no name")
+	}
+	target, ok := m["target"].(string)
+	if !ok && m["target"] != nil {
+		return nil, fmt.Errorf("the recorded tool_call target is not text")
+	}
+	truncated, _ := m["arguments_truncated"].(bool)
+	return &pdp.ToolCall{Name: name, Target: target, ArgumentsTruncated: truncated}, nil
 }
 
 // JSON gives back float64 for every number, []any for every list, and null

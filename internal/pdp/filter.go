@@ -20,7 +20,8 @@ type DeniedTool struct {
 	Name string
 	// Policy is the name of the policy that denied it.
 	Policy string
-	// Rule is always "deny_tool" in 1.x: Filter applies no other rule.
+	// Rule is "deny_tool" or "allow_tool": the rule that refused the tool.
+	// Filter applies no other rule.
 	Rule string
 }
 
@@ -38,7 +39,8 @@ type FilterResponse struct {
 	PolicyVersion string
 }
 
-// Filter is Decide's rule 2 (deny_tool) applied to each offered tool alone,
+// Filter is Decide's rules 2 and 3 (deny_tool, then allow_tool) applied to each
+// offered tool alone,
 // through the same matcher Decide uses (policy.Set.Match, one load of the
 // Engine's current policy set): it is pure (no clock, randomness, network or
 // database), and nothing records it while no enforcement point acts on its
@@ -47,7 +49,9 @@ type FilterResponse struct {
 // For each name in req.ToolNames, in input order, first occurrence only
 // (a later duplicate is dropped): the policies Match returns for AgentID are
 // checked in the order Match returns them, and the first one whose DenyTool
-// contains the name under containsFold denies it. No other rule is applied:
+// contains the name under containsFold denies it. Failing that, the name is
+// denied by allow_tool when a matched policy with a non-empty AllowTool does not
+// list it, through the same allowToolRefused Decide calls. No other rule is applied:
 // no chain rule, no attestation, no max_steps, no allow_domains, no cost
 // rule, no approval token -- those are rules about the action as a whole,
 // not about one offered tool, and Filter answers a narrower question than
@@ -74,6 +78,12 @@ func (e *Engine) Filter(req FilterRequest) FilterResponse {
 				resp.Denied = append(resp.Denied, DeniedTool{Name: name, Policy: p.Name, Rule: "deny_tool"})
 				denied = true
 				break
+			}
+		}
+		if !denied {
+			if pol, refused := allowToolRefused(matched, name); refused {
+				resp.Denied = append(resp.Denied, DeniedTool{Name: name, Policy: pol.Name, Rule: "allow_tool"})
+				denied = true
 			}
 		}
 		if !denied {

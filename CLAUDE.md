@@ -571,11 +571,12 @@ decision outcome and every exported signature identical.
     ready-path half of `TestItStartsAndRefusesUnauthenticatedCalls` in
     `internal/manifest`. Scenarios in `features/store-outage.feature`.)*
 
-21. **`Filter` is Decide's rule 2 applied to each offered tool alone, through
+21. **`Filter` is Decide's rules 2 and 3 (deny_tool, allow_tool) applied to each
+    offered tool alone, through
     the same matcher, and it is unrecorded while no enforcement point acts on
     its answer.** `POST /v1/filter-tools` exists to answer a narrower
     question than `/v1/decide`: not "may this action happen" but "which of
-    these offered tools would `deny_tool` refuse". It reads the Engine's
+    these offered tools would `deny_tool` or `allow_tool` refuse". It reads the Engine's
     policy set exactly the way `Decide` reads it (one load, `Set.Match` on
     `AgentID`), and denies a tool through the same `containsFold` `Decide`
     uses, called rather than copied, so the two can never quietly diverge on
@@ -608,7 +609,7 @@ decision outcome and every exported signature identical.
     `TestFilterMatchesToolsTheWayDecideDoes`,
     `TestFilterIgnoresPoliciesForOtherAgents`, `TestFilterDropsLaterDuplicates`,
     `TestFilterAgreesWithDecideOnEveryToolAlone` (a 200-seed sweep: for every
-    tool offered alone, `Decide` denies by `deny_tool` if and only if `Filter`
+    tool offered alone, `Decide` denies by `deny_tool` or `allow_tool` if and only if `Filter`
     lists it in `Denied`) in `internal/pdp`; `TestFilterToolsRequiresAuth`,
     `TestFilterToolsAnswersThePartition`, `TestFilterToolsRefusesABodyOverTheCap`,
     `TestFilterToolsRefusesAMissingAgentID`, `TestFilterToolsSurvivesHostileInput`
@@ -923,3 +924,55 @@ decision outcome and every exported signature identical.
     verify, digest over the name only, target left out of the digest, the
     constant-time compare replaced, the legacy path accepting a digest-bound
     token without the digest)*
+
+29. **A policy can name the only tools its agents may use, and any other tool is
+    denied.** `@decided 2026-10-13`: a policy may carry `allow_tool`, the list of
+    the only tools that the agents it matches may use. A requested tool that the
+    list does not name is denied, and no approval lifts that denial, because the
+    rule sits before the cost gate, as deny_tool does. Matching uses the same
+    case and surrounding-space folding as deny_tool and nothing looser, so a
+    renamed tool is a different tool. Every matched list applies, so the lists
+    intersect, and a matched policy with no list adds no restriction. An empty
+    or absent list restricts nothing, so every policy written before the field
+    decides exactly as it did. Both places a tool name reaches the PDP are
+    checked: the tool list and the `tool_call` name on `/v1/decide`, and the tool
+    list on `/v1/filter-tools`, which reports the refusal under the `allow_tool`
+    rule. A blank entry is refused at load, since normalization would drop it and
+    leave an empty list, which reads as no restriction. A decision that reads a
+    tool call's name is never cacheable. Replay puts the recorded tool call name
+    back to the PDP, so a recorded denial reproduces.
+    The deny-list reads the same names. `@decided 2026-10-13`: deny_tool refuses a
+    tool that a request names only in its tool call, as it refuses one that the
+    tool list names. Rule 2 of `Decide` reads the tool list and the tool call's
+    name, the same set rule 3 reads. The tool call sits outside the (agent, tool
+    set) key a decision cache uses, so a request that carries a tool call is never
+    cacheable under a matched deny_tool. A request with no tool call is read as it
+    was before, and stays cacheable. `Filter` judges one offered tool at a time
+    and carries no tool call, so it is unchanged. Replay reads the same name, so a
+    recorded allow whose tool call is now denied replays as a divergence.
+    Named limit: a request with no tool call is still cacheable under a deny_tool,
+    so a cache keyed on agent and tool set alone can serve that allow to a later
+    call whose tool call names a denied tool. A caller that caches must key on
+    whether a tool call is present, or leave deny-list decisions uncached.
+    *(test: `TestADeniedToolNamedOnlyByTheToolCallIsDenied`,
+    `TestADenyToolDecisionForACallIsNeverCacheable`,
+    `TestWithoutAToolCallADenyToolDecisionIsStillCacheable` (the golden for a
+    request with no tool call) and `TestARecordedAllowWhoseToolCallIsNowDeniedDiverges`
+    in `internal/replay`; scenarios in `features/deny-tool-call.feature`;
+    `TestAToolOnTheAllowListIsAllowed`,
+    `TestARenamedToolIsDeniedByAnAllowList`, `TestAToolTheListLeavesOutIsDeniedByName`,
+    `TestNoAllowListMeansNoRestriction`, `TestTwoAllowListsNarrowEachOther`,
+    `TestToolCallNameIsCheckedAgainstTheAllowList`,
+    `TestAllowToolFoldsCaseLikeDenyTool`, `TestDenyToolWinsOverAllowTool`,
+    `TestAnApprovalDoesNotLiftAnAllowListDenial`,
+    `TestAnAllowToolDecisionIsNeverCacheable`,
+    `TestFilterReportsAToolOutsideTheAllowList`,
+    `TestFilterAgreesWithDecideOnEveryToolAlone` (its generator now draws
+    allow-lists) in `internal/pdp`; `TestFilterToolsReportsAToolOutsideTheAllowList`
+    in `internal/api`; `TestABlankAllowToolEntryIsRefusedAtLoad`,
+    `TestAnAllowListIsPartOfThePolicyVersionAndItsOrderIsNot`,
+    `TestAPolicyWithoutAllowToolKeepsItsPolicyVersion` (a golden value measured on
+    the tree before the field) in `internal/policy`;
+    `TestAnAllowToolDenialReplaysFromTheRecord` and
+    `TestAMalformedRecordedToolCallIsUnreadableNotGuessed` in `internal/replay`.
+    Scenarios in `features/allow-tool.feature`.)*
