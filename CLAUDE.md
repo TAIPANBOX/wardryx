@@ -976,3 +976,26 @@ decision outcome and every exported signature identical.
     `TestAnAllowToolDenialReplaysFromTheRecord` and
     `TestAMalformedRecordedToolCallIsUnreadableNotGuessed` in `internal/replay`.
     Scenarios in `features/allow-tool.feature`.)*
+
+30. **Every document in a policy file is loaded, or the file does not load.**
+    `@decided 2026-10-13`: a YAML policy file may hold several documents
+    separated by `---`. Each document is read as one policy or as a list of
+    policies, in order, and every one of them is in force. A document with
+    nothing in it holds no policy. A document that fails to decode, including
+    one with a field the Policy struct does not declare, fails the whole file,
+    and the error names it by its position, so a file never loads smaller than
+    it reads. Before this decision the loader read the first document and
+    stopped, and a rule in any later document was dropped with no error: a
+    dropped deny is a silent allow. A file with one document keeps its
+    `PolicyVersion` byte for byte, and a file with several has a version that
+    covers every policy it loaded. The directory loader and the `replay`
+    candidate both go through the same decode.
+    *(test: `TestEveryDocumentOfAFileLoads`,
+    `TestAnEmptyDocumentIsSkippedNotCountedAsAPolicy`,
+    `TestAMalformedDocumentFailsTheWholeFileNamingIt`,
+    `TestAMisspelledFieldInALaterDocumentIsRefused`,
+    `TestASingleDocumentFileKeepsItsPolicyVersion` (golden values measured on
+    the tree before the change), `TestTheVersionOfAMultiDocumentFileCoversEveryPolicy`,
+    `TestADirectoryLoadsEveryDocumentOfEveryFile` in `internal/policy`;
+    `TestARuleInTheSecondDocumentIsEnforced` in `internal/pdp`; scenarios in
+    `features/multi-document-policy-file.feature`)*
