@@ -976,3 +976,39 @@ decision outcome and every exported signature identical.
     `TestAnAllowToolDenialReplaysFromTheRecord` and
     `TestAMalformedRecordedToolCallIsUnreadableNotGuessed` in `internal/replay`.
     Scenarios in `features/allow-tool.feature`.)*
+
+30. **Every document and every value in a policy file is loaded, or the file does not load.**
+    `@decided 2026-10-13`: a YAML policy file may hold several documents
+    separated by `---`, and a JSON policy file several values. Each document or
+    value is read as one policy or as a list of policies, in order, and every
+    one of them is in force. A YAML document with nothing in it holds no policy;
+    a JSON file with no value at all is refused, as it always was. A document or
+    value that fails to decode, including one with a field the Policy struct does
+    not declare, fails the whole file, and the error names it by its position, so
+    a file never loads smaller than it reads. Data after a JSON value is refused,
+    not ignored. Before this decision the loader read the first document or value
+    and stopped, and a rule in any later one was dropped with no error: a dropped
+    deny is a silent allow. A file with one document or value keeps its
+    `PolicyVersion` byte for byte, and a file with several has a version that
+    covers every policy it loaded. The directory loader and the `replay`
+    candidate both go through the same decode.
+    A PUT /v1/policies/{id} body is one policy: data after it is refused with a
+    400, does not echo it, and stores nothing; whitespace after it is not data.
+    The other JSON request bodies (decide, filter-tools, approval decide) are
+    read as before.
+    *(test: `TestEveryDocumentOfAFileLoads`,
+    `TestAnEmptyDocumentIsSkippedNotCountedAsAPolicy`,
+    `TestAMalformedDocumentFailsTheWholeFileNamingIt`,
+    `TestAMisspelledFieldInALaterDocumentIsRefused`,
+    `TestASingleDocumentFileKeepsItsPolicyVersion` (golden values measured on
+    the tree before the change), `TestTheVersionOfAMultiDocumentFileCoversEveryPolicy`,
+    `TestADirectoryLoadsEveryDocumentOfEveryFile`,
+    `TestEveryValueOfAJSONFileLoads`, `TestDataAfterAJSONValueIsRefusedNotIgnored`,
+    `TestAJSONValueThatFailsStrictDecodingFailsTheFileNamingIt`,
+    `TestAnEmptyJSONFileIsRefusedAsBefore`,
+    `TestASingleValueJSONFileKeepsItsPolicyVersion` (golden measured before the
+    change) in `internal/policy`; `TestARuleInTheSecondDocumentIsEnforced` in
+    `internal/pdp`; `TestAPutBodyWithDataAfterThePolicyIsRefused` and
+    `TestAPutBodyWithTrailingWhitespaceIsStillAccepted` in `internal/api`;
+    scenarios in `features/multi-document-policy-file.feature` and
+    `features/policy-put-body.feature`)*

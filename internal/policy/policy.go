@@ -429,7 +429,9 @@ func resolve(path string) ([]string, error) {
 }
 
 // decode parses one policy file, dispatching on its extension. A file may
-// hold either a single policy document or a YAML/JSON array of policies.
+// hold either a single policy document or an array of policies. A YAML file
+// may hold several documents separated by "---", and a JSON file several
+// values, each read the same way; see decodeYAML and decodeJSON.
 func decode(path string, data []byte) ([]Policy, error) {
 	switch ext := strings.ToLower(filepath.Ext(path)); ext {
 	case ".yaml", ".yml":
@@ -479,21 +481,55 @@ func strictJSON(data []byte, into any) error {
 	return dec.Decode(into)
 }
 
-func strictYAML(data []byte, into any) error {
+// strictYAML decodes document index (zero-based) of data into into, refusing a
+// field the target does not declare. The documents before it are stepped over
+// as nodes, not decoded, so every error keeps the line number the operator sees
+// in the file, not the line number of a re-printed copy of it.
+func strictYAML(data []byte, index int, into any) error {
 	dec := yaml.NewDecoder(bytes.NewReader(data))
 	dec.KnownFields(true)
-	if err := dec.Decode(into); err != nil {
-		if errors.Is(err, io.EOF) {
-			return nil // an empty document is an empty policy set, not an error
+	for i := 0; i < index; i++ {
+		var skipped yaml.Node
+		if err := dec.Decode(&skipped); err != nil {
+			return err
 		}
-		return err
 	}
-	return nil
+	return dec.Decode(into)
 }
 
+// decodeJSON reads every value in a JSON policy file, in order. Each value holds
+// one policy or a list of policies, as a YAML document does. Data after a value
+// is read as the next value, never ignored: a second object, or bytes that are
+// not JSON, fails the file and is named by its position. A file with no value at
+// all is refused with the decoder's io.EOF, as it always was.
 func decodeJSON(data []byte) ([]Policy, error) {
+	dec := json.NewDecoder(bytes.NewReader(data))
+	var all []Policy
+	for n := 1; ; n++ {
+		var raw json.RawMessage
+		err := dec.Decode(&raw)
+		if errors.Is(err, io.EOF) {
+			if n == 1 {
+				return nil, err
+			}
+			return all, nil
+		}
+		if err != nil {
+			return nil, fmt.Errorf("value %d: %w", n, err)
+		}
+		docs, err := decodeJSONValue(raw)
+		if err != nil {
+			return nil, fmt.Errorf("value %d: %w", n, err)
+		}
+		all = append(all, docs...)
+	}
+}
+
+// decodeJSONValue reads one JSON value as a list of policies, or failing that as
+// one policy, with the strict field check.
+func decodeJSONValue(raw []byte) ([]Policy, error) {
 	var list []Policy
-	err := strictJSON(data, &list)
+	err := strictJSON(raw, &list)
 	if err == nil {
 		return list, nil
 	}
@@ -501,15 +537,60 @@ func decodeJSON(data []byte) ([]Policy, error) {
 		return nil, err
 	}
 	var one Policy
-	if err := strictJSON(data, &one); err != nil {
+	if err := strictJSON(raw, &one); err != nil {
 		return nil, err
 	}
 	return []Policy{one}, nil
 }
 
+// decodeYAML reads every document in a YAML policy file, in order. Each document
+// holds one policy or a list of policies, as it may in a JSON file. A document
+// with nothing in it (a separator with nothing after it, or two in a row) holds
+// no policy and is skipped.
+//
+// Any document that fails to decode fails the whole file, and the error names
+// it by position. A load that kept the documents before a broken one would
+// leave every rule after it out of force, with no message to say so.
 func decodeYAML(data []byte) ([]Policy, error) {
+	count, err := countYAMLDocuments(data)
+	if err != nil {
+		return nil, err
+	}
+	var all []Policy
+	for i := 0; i < count; i++ {
+		docs, err := decodeYAMLDocument(data, i)
+		if err != nil {
+			return nil, fmt.Errorf("document %d: %w", i+1, err)
+		}
+		all = append(all, docs...)
+	}
+	return all, nil
+}
+
+// countYAMLDocuments counts the documents in data. Each one is decoded into a
+// node first, so a syntax error in any of them is found and named before any
+// document is read as a policy.
+func countYAMLDocuments(data []byte) (int, error) {
+	dec := yaml.NewDecoder(bytes.NewReader(data))
+	n := 0
+	for {
+		var node yaml.Node
+		err := dec.Decode(&node)
+		if errors.Is(err, io.EOF) {
+			return n, nil
+		}
+		if err != nil {
+			return 0, fmt.Errorf("document %d: %w", n+1, err)
+		}
+		n++
+	}
+}
+
+// decodeYAMLDocument reads document index (zero-based) as a list of policies,
+// or failing that as one policy, the same two shapes decodeJSON accepts.
+func decodeYAMLDocument(data []byte, index int) ([]Policy, error) {
 	var list []Policy
-	err := strictYAML(data, &list)
+	err := strictYAML(data, index, &list)
 	if err == nil {
 		return list, nil
 	}
@@ -517,7 +598,7 @@ func decodeYAML(data []byte) ([]Policy, error) {
 		return nil, err
 	}
 	var one Policy
-	if err := strictYAML(data, &one); err != nil {
+	if err := strictYAML(data, index, &one); err != nil {
 		return nil, err
 	}
 	return []Policy{one}, nil
