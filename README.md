@@ -6,7 +6,7 @@
 
 [![CI](https://github.com/TAIPANBOX/wardryx/actions/workflows/ci.yml/badge.svg)](https://github.com/TAIPANBOX/wardryx/actions/workflows/ci.yml)
 ![Go](https://img.shields.io/badge/go-1.27-00ADD8.svg)
-![tests](https://img.shields.io/badge/tests-431-brightgreen.svg)
+![tests](https://img.shields.io/badge/tests-435-brightgreen.svg)
 ![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)
 ![Status](https://img.shields.io/badge/status-deterministic%20PDP-2dd4bf.svg)
 
@@ -245,7 +245,7 @@ One event per hold per process lifetime, so an approval nobody answers all after
 ```
 GET    /v1/policies       list every store-managed policy
 GET    /v1/policies/{id}  fetch one
-PUT    /v1/policies/{id}  create or replace one (body: one policy.Policy document, e.g. the YAML example above as JSON; data after the policy is refused with 400 and nothing is stored)
+PUT    /v1/policies/{id}  create or replace one (body: one policy.Policy document, e.g. the YAML example above as JSON; data after the policy is refused with 400, and a key the policy does not declare is refused with 400 naming it, and nothing is stored; `id` and `updated_at` as a GET returns them are accepted and ignored, so a GET body can be sent back unchanged)
 DELETE /v1/policies/{id}  remove one
 ```
 
