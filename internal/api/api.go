@@ -47,6 +47,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"sort"
@@ -1045,7 +1046,7 @@ func (s *Server) handlePutPolicy(w http.ResponseWriter, r *http.Request, princip
 		return
 	}
 	var p policy.Policy
-	if !decodeJSONBody(w, r, &p) {
+	if !decodePolicyBody(w, r, &p) {
 		return
 	}
 
@@ -1250,15 +1251,45 @@ const maxRequestBodyBytes = 1 << 20 // 1 MiB
 func decodeJSONBody(w http.ResponseWriter, r *http.Request, v any) bool {
 	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodyBytes)
 	if err := json.NewDecoder(r.Body).Decode(v); err != nil {
-		var tooLarge *http.MaxBytesError
-		if errors.As(err, &tooLarge) {
-			writeError(w, http.StatusRequestEntityTooLarge, "request body exceeds the 1 MiB limit")
-			return false
-		}
-		writeError(w, http.StatusBadRequest, fmt.Sprintf("invalid request body: %v", err))
-		return false
+		return writeBodyError(w, err)
 	}
 	return true
+}
+
+// decodePolicyBody decodes a PUT /v1/policies/{id} body, which is one policy.
+// json.Decoder stops at the first JSON value, so decodeJSONBody would read a
+// body with data after the policy as that one policy and drop the rest without
+// a word. Here that data is refused with a 400, which does not echo it, and
+// nothing is stored. Whitespace after the policy is not data.
+func decodePolicyBody(w http.ResponseWriter, r *http.Request, v any) bool {
+	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodyBytes)
+	dec := json.NewDecoder(r.Body)
+	if err := dec.Decode(v); err != nil {
+		return writeBodyError(w, err)
+	}
+	var extra json.RawMessage
+	err := dec.Decode(&extra)
+	if errors.Is(err, io.EOF) {
+		return true
+	}
+	var tooLarge *http.MaxBytesError
+	if errors.As(err, &tooLarge) {
+		writeError(w, http.StatusRequestEntityTooLarge, "request body exceeds the 1 MiB limit")
+		return false
+	}
+	writeError(w, http.StatusBadRequest, "invalid request body: a body holds one policy, and data after it is refused")
+	return false
+}
+
+// writeBodyError answers a request body that did not decode, and reports false.
+func writeBodyError(w http.ResponseWriter, err error) bool {
+	var tooLarge *http.MaxBytesError
+	if errors.As(err, &tooLarge) {
+		writeError(w, http.StatusRequestEntityTooLarge, "request body exceeds the 1 MiB limit")
+		return false
+	}
+	writeError(w, http.StatusBadRequest, fmt.Sprintf("invalid request body: %v", err))
+	return false
 }
 
 // emit writes one agent-event, source "wardryx", chained via the SPEC 6.5
