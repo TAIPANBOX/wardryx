@@ -430,8 +430,8 @@ func resolve(path string) ([]string, error) {
 
 // decode parses one policy file, dispatching on its extension. A file may
 // hold either a single policy document or an array of policies. A YAML file
-// may hold several documents separated by "---", each read the same way; see
-// decodeYAML.
+// may hold several documents separated by "---", and a JSON file several
+// values, each read the same way; see decodeYAML and decodeJSON.
 func decode(path string, data []byte) ([]Policy, error) {
 	switch ext := strings.ToLower(filepath.Ext(path)); ext {
 	case ".yaml", ".yml":
@@ -497,9 +497,39 @@ func strictYAML(data []byte, index int, into any) error {
 	return dec.Decode(into)
 }
 
+// decodeJSON reads every value in a JSON policy file, in order. Each value holds
+// one policy or a list of policies, as a YAML document does. Data after a value
+// is read as the next value, never ignored: a second object, or bytes that are
+// not JSON, fails the file and is named by its position. A file with no value at
+// all is refused with the decoder's io.EOF, as it always was.
 func decodeJSON(data []byte) ([]Policy, error) {
+	dec := json.NewDecoder(bytes.NewReader(data))
+	var all []Policy
+	for n := 1; ; n++ {
+		var raw json.RawMessage
+		err := dec.Decode(&raw)
+		if errors.Is(err, io.EOF) {
+			if n == 1 {
+				return nil, err
+			}
+			return all, nil
+		}
+		if err != nil {
+			return nil, fmt.Errorf("value %d: %w", n, err)
+		}
+		docs, err := decodeJSONValue(raw)
+		if err != nil {
+			return nil, fmt.Errorf("value %d: %w", n, err)
+		}
+		all = append(all, docs...)
+	}
+}
+
+// decodeJSONValue reads one JSON value as a list of policies, or failing that as
+// one policy, with the strict field check.
+func decodeJSONValue(raw []byte) ([]Policy, error) {
 	var list []Policy
-	err := strictJSON(data, &list)
+	err := strictJSON(raw, &list)
 	if err == nil {
 		return list, nil
 	}
@@ -507,7 +537,7 @@ func decodeJSON(data []byte) ([]Policy, error) {
 		return nil, err
 	}
 	var one Policy
-	if err := strictJSON(data, &one); err != nil {
+	if err := strictJSON(raw, &one); err != nil {
 		return nil, err
 	}
 	return []Policy{one}, nil
