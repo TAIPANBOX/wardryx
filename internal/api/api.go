@@ -1045,10 +1045,14 @@ func (s *Server) handlePutPolicy(w http.ResponseWriter, r *http.Request, princip
 		writeError(w, http.StatusBadRequest, "missing policy id")
 		return
 	}
-	var p policy.Policy
-	if !decodePolicyBody(w, r, &p) {
+	// The body is decoded into the shape GET emits, so the read-only id and
+	// updated_at a copy of a GET carries are accepted, and only the policy
+	// is taken from it: the URL names the policy, and the write stamps the time.
+	var body policyDTO
+	if !decodePolicyBody(w, r, &body) {
 		return
 	}
+	p := body.Policy
 
 	// Bounded: every store call below shares one deadline, so a store that
 	// has gone away answers 503 in storeTimeout rather than holding the
@@ -1261,9 +1265,16 @@ func decodeJSONBody(w http.ResponseWriter, r *http.Request, v any) bool {
 // body with data after the policy as that one policy and drop the rest without
 // a word. Here that data is refused with a 400, which does not echo it, and
 // nothing is stored. Whitespace after the policy is not data.
+//
+// A key the target does not declare is refused as well, with a 400 that names
+// it and echoes no value. Without that check a misspelled rule was stored
+// without the rule and the write answered 200. Invariant 31. The target is a
+// policyDTO, so the two read-only fields GET emits (id, updated_at) are
+// declared and accepted.
 func decodePolicyBody(w http.ResponseWriter, r *http.Request, v any) bool {
 	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodyBytes)
 	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
 	if err := dec.Decode(v); err != nil {
 		return writeBodyError(w, err)
 	}

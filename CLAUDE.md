@@ -1012,3 +1012,23 @@ decision outcome and every exported signature identical.
     `TestAPutBodyWithTrailingWhitespaceIsStillAccepted` in `internal/api`;
     scenarios in `features/multi-document-policy-file.feature` and
     `features/policy-put-body.feature`)*
+
+31. **A policy write refuses a field the policy does not declare, and accepts
+    the read-only fields a GET returns.** `@decided 2026-10-13`: a
+    `PUT /v1/policies/{id}` body is decoded with unknown fields refused. A key
+    the policy does not declare is a 400 that names it, echoes no value, and
+    stores nothing. Before this decision the decoder dropped such a key, so a
+    rule spelled wrong was stored without the rule and the write answered 200,
+    and the call the rule meant to deny was allowed. The two fields a GET of a
+    policy returns beyond the policy's own, `id` and `updated_at`, are accepted
+    on input and ignored: the URL names the policy and the server stamps the
+    write, so a body copied from a GET can be written back unchanged. A key
+    inside `hold_if_signal` that the rule does not have is refused on this path
+    as well, by the rule's own decoder. The other JSON request bodies (decide,
+    filter-tools, approval decide) are not covered by this invariant and are
+    read as before.
+    *(test: `TestAPutWithAMisspelledRuleIsRefusedAndNothingIsStored`,
+    `TestAGetBodyWrittenBackUnchangedIsAccepted`,
+    `TestTheReadOnlyFieldsOfAPutBodyAreIgnored`,
+    `TestAnUnknownKeyInsideAHoldRuleIsRefusedOnPut` in `internal/api`;
+    scenarios in `features/strict-policy-write.feature`)*
