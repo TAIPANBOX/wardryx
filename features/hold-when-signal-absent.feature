@@ -57,6 +57,13 @@ Feature: A tool call whose risk signal never arrived can be held for a person
     # -> internal/pdp:TestAnUnboundTokenDoesNotLiftAnAbsentSignalHold
     # -> internal/approval:TestATokenThatBindsNoCallIsRefusedWhereTheCallMustBeBound
 
+  Scenario: An approval of one padded call also fits the next padded call to the same tool
+    Given a padded call held because its signal is absent, and a person who grants it without seeing its arguments
+    When a second padded call to the same tool and target, in the same run, comes with the same token
+    Then the two calls have the same digest, so the token fits both
+    And under single-use, the default, only the first goes through, and with single-use off both do
+    # -> internal/api:TestAnApprovalOfOnePaddedCallCoversTheNextPaddedCallToTheSameTool
+
   Scenario: Nothing decided under the rule is offered for reuse
     Given a rule that holds when its signal is absent
     When its holds and its allows are asked whether they may be cached

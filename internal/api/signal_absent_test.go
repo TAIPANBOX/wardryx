@@ -158,3 +158,47 @@ func TestWhenAbsentOverThePolicyAPI(t *testing.T) {
 		t.Fatalf("after the PUT the padded call is %s (%s), want hold", got.Decision, got.Reason)
 	}
 }
+
+// A named limit, pinned so it cannot change unseen. A call whose arguments were
+// not sent has none in its digest, so every padded call to the same tool and
+// target in one run is, on the wire, the same call: the agent's arguments
+// differ and the broker sends neither. A person who approves one approves it
+// without seeing what it does, and the token fits the next padded call too.
+// Single-use, the default, lets exactly one of them through; with single-use
+// off the token lets every one through for its lifetime.
+func TestAnApprovalOfOnePaddedCallCoversTheNextPaddedCallToTheSameTool(t *testing.T) {
+	first := pdp.ToolCall{Name: "ask", Target: "typryx", ArgumentsTruncated: true}
+	second := first
+	if first.Digest() != second.Digest() {
+		t.Fatal("two padded calls to one tool and target have different digests: the limit this test pins is gone, update the docs")
+	}
+	whole := pdp.ToolCall{Name: "ask", Target: "typryx", Arguments: json.RawMessage(`{"q":"a"}`)}
+	if whole.Digest() == first.Digest() {
+		t.Fatal("control: a call with its arguments has the padded call's digest")
+	}
+
+	for _, c := range []struct {
+		singleUse  bool
+		wantSecond string
+	}{
+		{singleUse: false, wantSecond: pdp.Allow},
+		{singleUse: true, wantSecond: pdp.Hold},
+	} {
+		h := newSigHarness(t, c.singleUse, loadLabPolicy(t, labPolicy+"  when_absent: hold\n")...)
+		held := h.decideRaw(t, brokerBodyOverTheCap(""))
+		if held.Decision != pdp.Hold {
+			t.Fatalf("setup: %s (%s)", held.Decision, held.Reason)
+		}
+		token := h.grant(t, held.ApprovalID)
+		if got := h.decideRaw(t, brokerBodyOverTheCap(token)); got.Decision != pdp.Allow {
+			t.Fatalf("single-use %v: the approved padded call is %s (%s), want allow", c.singleUse, got.Decision, got.Reason)
+		}
+		got := h.decideRaw(t, brokerBodyOverTheCap(token))
+		if got.Decision != c.wantSecond {
+			t.Fatalf("single-use %v: the next padded call with the same token is %s (%s), want %s", c.singleUse, got.Decision, got.Reason, c.wantSecond)
+		}
+		if c.singleUse && got.Reason != pdp.ReasonApprovalSpent {
+			t.Fatalf("single-use: the next padded call is held for %q, want the spent-token reason", got.Reason)
+		}
+	}
+}

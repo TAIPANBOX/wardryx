@@ -1123,7 +1123,16 @@ decision outcome and every exported signature identical.
     answer waits for a person, so a producer outage holds every governed tool
     call until it is back. The caller is believed about whether a call exists
     (invariant 26): a request that leaves `tool_call` out is decided as a model
-    call.
+    call. A padded call carries no arguments, so its digest binds only name,
+    target and the flag (invariant 28's limit for truncated arguments): every
+    padded call to the same tool and target in one run has the same digest, the
+    person who approves one approves it without seeing what it does, and the
+    token fits the next padded call too. Under the single-use default
+    (invariant 5) it lets exactly one of them through; with
+    `WARDRYX_APPROVAL_SINGLE_USE=false` it lets every one through for the
+    token's lifetime. A deployment that sets `when_absent: hold` must leave
+    single-use on. `TestAnApprovalOfOnePaddedCallCoversTheNextPaddedCallToTheSameTool`
+    pins this limit in both modes, so a change to it is seen.
     *(test: `TestAToolCallWithNoSignalHoldsWhenTheRuleHoldsOnAbsence`,
     `TestAModelCallWithNoToolCallIsNeverHeldForAMissingSignal`,
     `TestAnAbsentSignalOnlyEverHolds`,
@@ -1141,8 +1150,9 @@ decision outcome and every exported signature identical.
     `internal/approval`;
     `TestATruncatedToolCallWithNoSignalHoldsWhenTheRuleHoldsOnAbsence` (the
     broker's body over the cap, byte for byte),
-    `TestAReplayReproducesAnAbsentSignalHold`, `TestWhenAbsentOverThePolicyAPI`
-    in `internal/api`;
+    `TestAReplayReproducesAnAbsentSignalHold`, `TestWhenAbsentOverThePolicyAPI`,
+    `TestAnApprovalOfOnePaddedCallCoversTheNextPaddedCallToTheSameTool` in
+    `internal/api`;
     `TestARecordedAbsentSignalHoldReproducesFromTheRecordedToolCall` in
     `internal/replay`; scenarios in `features/hold-when-signal-absent.feature`;
     mutants named in the PR that added it, each caught: `when_absent` ignored,
