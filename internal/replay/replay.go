@@ -323,7 +323,8 @@ func question(ev event.Event) (pdp.DecideRequest, string, bool, error) {
 		return pdp.DecideRequest{}, "", false, err
 	}
 
-	// The tool call is the one member that the allow-list rule reads by name.
+	// The tool call: the deny and allow lists read its name, and a hold on an
+	// absent signal reads whether it is there.
 	toolCall, err := recordedToolCall(ev.Data["tool_call"])
 	if err != nil {
 		return pdp.DecideRequest{}, "", false, err
@@ -382,8 +383,10 @@ func recordedSignals(v any) ([]pdp.Signal, error) {
 
 // recordedToolCall reads back the tool call one event recorded. Absent is none.
 // The arguments are never recorded (invariant 27), so a replayed call carries
-// none: Decide reads only the name, and the digest is used only to verify an
-// approval token, which replay never presents. A record whose tool call is not
+// none: Decide reads the name, whether a call is there at all (a hold on an
+// absent signal, invariant 33) and, for that hold's reason, the truncated flag;
+// the digest is used only to verify an approval token, which replay never
+// presents. A record whose tool call is not
 // the shape the emitter writes is not a question that can be put again.
 func recordedToolCall(v any) (*pdp.ToolCall, error) {
 	if v == nil {

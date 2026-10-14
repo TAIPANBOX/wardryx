@@ -57,10 +57,11 @@ type Signal struct {
 }
 
 // ToolCall is the concrete tool call a request is about to make, when the
-// enforcement point knows it. Decide does not branch on it: it exists so the
-// layer outside the decision path can ask a classifier about it and turn the
-// answer into a Signal. Arguments are raw JSON and are never recorded, since
-// they can carry customer data.
+// enforcement point knows it. It exists so the layer outside the decision path
+// can ask a classifier about it and turn the answer into a Signal. Decide reads
+// its name (deny_tool, allow_tool) and whether it is there at all (a
+// hold_if_signal rule with when_absent: hold), never its arguments. Arguments
+// are raw JSON and are never recorded, since they can carry customer data.
 type ToolCall struct {
 	Name      string
 	Arguments json.RawMessage
@@ -150,33 +151,96 @@ func validText(s string, max int, required bool) error {
 	return nil
 }
 
-// heldBySignal returns the first matched policy whose hold_if_signal rule one
-// of the request's signals satisfies, with that signal. Policies are walked in
-// the compiled order and signals in the order the request carries them, so the
-// reported rule is deterministic for a given request.
-//
-// A rule matches when the signal's name and value are listed (case and
-// surrounding space folded, the direction in which a mismatch can only cause
-// MORE holds) and its probability is at least the rule's minimum. A NaN
-// probability satisfies nothing, and a rule with no minimum satisfies nothing:
-// both are unvalidated shapes, and doing nothing is the only safe answer to
-// them.
-func heldBySignal(policies []policy.Policy, signals []Signal) (policy.Policy, Signal, bool) {
-	for _, p := range policies {
-		r := p.HoldIfSignal
-		if r == nil || r.MinProbability == nil {
-			continue
-		}
-		for _, s := range signals {
-			if !foldEqual(r.Name, s.Name) || !containsFold(r.Values, s.Value) {
-				continue
-			}
-			if s.Probability >= *r.MinProbability {
-				return p, s, true
-			}
+// signalHold is what rule 12 found: the policy whose hold_if_signal rule holds
+// the request, and why.
+type signalHold struct {
+	// pol is the first matched policy, in compiled order, whose rule holds.
+	pol policy.Policy
+	// sig is the signal that satisfied pol's rule. Zero when absent is set.
+	sig Signal
+	// absent says pol's rule holds because the request carries a tool call and
+	// no signal of the rule's name (when_absent: hold).
+	absent bool
+	// callMustBeBound says some matched rule, pol's or a later one, holds on an
+	// absent signal, so only an approval token bound to the call lifts the
+	// hold. A token that binds no call was granted with no call in view, and the
+	// hold exists because nobody could say what this call does.
+	callMustBeBound bool
+}
+
+// reason is the hold's sentence, before what became of it.
+func (h signalHold) reason(call *ToolCall) string {
+	rule := h.pol.HoldIfSignal
+	if !h.absent {
+		return fmt.Sprintf("policy %q hold_if_signal: signal %q is %q at probability %s (the rule holds from %s)",
+			h.pol.Name, h.sig.Name, h.sig.Value, formatProbability(h.sig.Probability), formatProbability(*rule.MinProbability))
+	}
+	// ruleHolds never sets absent without a call; reading a nil one would
+	// panic in the decision path, so the sentence is built defensively.
+	name, truncated := "", ""
+	if call != nil {
+		name = call.Name
+		if call.ArgumentsTruncated {
+			truncated = ", whose arguments were not sent (arguments_truncated)"
 		}
 	}
-	return policy.Policy{}, Signal{}, false
+	return fmt.Sprintf("policy %q hold_if_signal: no %q signal came with tool call %q%s, and the rule holds when the signal is absent (when_absent: %s)",
+		h.pol.Name, rule.Name, name, truncated, policy.WhenAbsentHold)
+}
+
+// heldBySignal returns the first matched policy whose hold_if_signal rule holds
+// the request. Policies are walked in the compiled order and signals in the
+// order the request carries them, so the reported rule is deterministic for a
+// given request.
+//
+// A rule holds when one of the request's signals has its name, a listed value,
+// and a probability at least the rule's minimum. Names and values are compared
+// with case and surrounding space folded, the direction in which a mismatch can
+// only cause MORE holds. A NaN probability satisfies nothing, and a rule with no
+// minimum satisfies nothing: both are unvalidated shapes, and doing nothing is
+// the only safe answer to them.
+//
+// A rule with when_absent: hold also holds a request that carries a tool call
+// and no signal of its name at all. A signal of that name with any other value,
+// or under the threshold, is present: it is an answer, and it holds nothing. A
+// request with no tool call is never held for a missing signal.
+func heldBySignal(policies []policy.Policy, signals []Signal, call *ToolCall) (signalHold, bool) {
+	var first signalHold
+	found, mustBind := false, false
+	for _, p := range policies {
+		h, ok := ruleHolds(p, signals, call)
+		if !ok {
+			continue
+		}
+		mustBind = mustBind || h.absent
+		if !found {
+			first, found = h, true
+		}
+	}
+	first.callMustBeBound = mustBind
+	return first, found
+}
+
+// ruleHolds reports whether p's hold_if_signal rule holds this request.
+func ruleHolds(p policy.Policy, signals []Signal, call *ToolCall) (signalHold, bool) {
+	r := p.HoldIfSignal
+	if r == nil || r.MinProbability == nil {
+		return signalHold{}, false
+	}
+	named := false
+	for _, s := range signals {
+		if !foldEqual(r.Name, s.Name) {
+			continue
+		}
+		named = true
+		if containsFold(r.Values, s.Value) && s.Probability >= *r.MinProbability {
+			return signalHold{pol: p, sig: s}, true
+		}
+	}
+	if !named && call != nil && r.WhenAbsent == policy.WhenAbsentHold {
+		return signalHold{pol: p, absent: true}, true
+	}
+	return signalHold{}, false
 }
 
 func foldEqual(a, b string) bool {

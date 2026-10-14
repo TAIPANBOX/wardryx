@@ -550,8 +550,9 @@ func decisionInput(req pdp.DecideRequest, resp pdp.DecideResponse) map[string]an
 	// and target by name, and a hash of the arguments exactly as received, so
 	// an auditor can tie a recorded signal to the call it was about and replay
 	// can say the call was truncated. The arguments can carry customer data and
-	// are never written down. Decide does not read this; the signals above are
-	// what replay feeds back.
+	// are never written down. Replay feeds back the name, target and truncated
+	// flag: Decide reads the name (deny_tool, allow_tool) and whether a call was
+	// there at all (hold_if_signal with when_absent: hold).
 	if tc := req.ToolCall; tc != nil {
 		in["tool_call"] = map[string]any{
 			"name":                tc.Name,

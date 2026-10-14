@@ -130,10 +130,13 @@ type DecideRequest struct {
 	// established before calling (see Signal).
 	Signals []Signal
 	// ToolCall is the concrete call this request is about to make, when the
-	// enforcement point knows it. Decide reads only its Name, in rules 2 and 3
-	// (deny_tool and allow_tool). It never reads the arguments: the decision
-	// record leaves them out, and they are digested only to verify an approval
-	// token bound to the call.
+	// enforcement point knows it. Decide reads its Name in rules 2 and 3
+	// (deny_tool and allow_tool), and in rule 12 whether it is present at all: a
+	// hold_if_signal rule with when_absent: hold holds a tool call that came
+	// with no signal of its name, and never a request without one; that hold's
+	// reason names the call and says whether its arguments were truncated. It
+	// never reads the arguments: the decision record leaves them out, and they
+	// are digested only to verify an approval token bound to the call.
 	ToolCall *ToolCall
 }
 
@@ -290,17 +293,19 @@ func (e *Engine) SetPolicies(policies *policy.Set) {
 //     resolves to Hold, unless a valid ApprovalToken was presented (then
 //     Allow) or an *invalid* one was presented (then Deny);
 //  12. a matched policy's hold_if_signal, satisfied by one of req.Signals,
-//     resolves to Hold, unless a valid ApprovalToken was presented (then
-//     Allow); an invalid token holds, it never denies;
+//     or, under when_absent: hold, by a tool call that carries no signal of
+//     its name, resolves to Hold, unless a valid ApprovalToken was presented
+//     (then Allow; for a hold on an absent signal only a token bound to the
+//     call is valid); an invalid token holds, it never denies;
 //  13. otherwise, Allow.
 //
-// Rule 12 is the only rule a signal can reach, and it is last on purpose: it
-// runs only once every deny rule and the cost gate have declined, so a signal
-// can turn an allow into a hold and can change nothing else. It never turns a
-// deny into anything, never replaces another rule's hold or its reason, and
-// never allows. Its invalid-token branch holds where rule 11's denies, because
-// without the signal that same call would have been allowed, and a signal
-// must not be able to turn an allow into a refusal.
+// Rule 12 is the only rule a signal, or the absence of one, can reach, and it
+// is last on purpose: it runs only once every deny rule and the cost gate have
+// declined, so a signal can turn an allow into a hold and can change nothing
+// else. It never turns a deny into anything, never replaces another rule's hold
+// or its reason, and never allows. Its invalid-token branch holds where rule
+// 11's denies, because without the signal that same call would have been
+// allowed, and a signal must not be able to turn an allow into a refusal.
 //
 // A deny from any rule wins outright: it short-circuits every later rule
 // and Decide never has to reconcile a deny against a later hold or allow.
@@ -449,15 +454,20 @@ func (e *Engine) Decide(req DecideRequest) DecideResponse {
 		return resp
 	}
 
-	if pol, sig, ok := heldBySignal(matched, req.Signals); ok {
+	if held, ok := heldBySignal(matched, req.Signals, req.ToolCall); ok {
 		// Reached only when no deny rule and no cost gate fired, so the cost
 		// gate's own behaviour, token branches included, is exactly what it
 		// was before signals existed.
 		resp.ApprovalTokenRequired = true
-		why := fmt.Sprintf("policy %q hold_if_signal: signal %q is %q at probability %s (the rule holds from %s)",
-			pol.Name, sig.Name, sig.Value, formatProbability(sig.Probability), formatProbability(*pol.HoldIfSignal.MinProbability))
+		why := held.reason(req.ToolCall)
+		// A hold on an absent signal is lifted only by a token bound to this
+		// call; any other signal hold by any token that verifies for it.
+		verify := approval.VerifyApprovalTokenForCall
+		if held.callMustBeBound {
+			verify = approval.VerifyApprovalTokenBoundToCall
+		}
 		if req.ApprovalToken != "" &&
-			approval.VerifyApprovalTokenForCall(e.approvalSecret, req.ApprovalToken, req.AgentID, req.RunID, req.ToolNames, req.EstCostUSD, req.ToolCall.Digest()) == nil {
+			verify(e.approvalSecret, req.ApprovalToken, req.AgentID, req.RunID, req.ToolNames, req.EstCostUSD, req.ToolCall.Digest()) == nil {
 			resp.Decision = Allow
 			resp.Reason = why + "; allowed via a valid approval_token"
 			return resp

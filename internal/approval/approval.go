@@ -84,6 +84,11 @@ var (
 	// build knows. It is refused rather than read as the nearest version it
 	// resembles: a newer token may bind something this build cannot check.
 	ErrTokenVersion = errors.New("approval: token version is not supported")
+	// ErrTokenUnbound means the token verified, but it binds no tool call and
+	// was presented where only an approval of the call itself may lift the
+	// hold (VerifyApprovalTokenBoundToCall): a hold_if_signal rule that holds
+	// because its signal never arrived (CLAUDE.md invariant 33).
+	ErrTokenUnbound = errors.New("approval: token is bound to no tool call; this hold is lifted only by an approval of the call itself")
 	// ErrToolCallContext means a held approval's context says it was about a
 	// tool call but does not carry a usable digest of it. Granting it would
 	// mint a token that binds nothing, so the grant is refused.
@@ -372,6 +377,34 @@ func VerifyApprovalTokenForCall(secret []byte, token, agentID, runID string, too
 	}
 	if estCostUSD > c.MaxCostUSD {
 		return fmt.Errorf("%w: approved ceiling %s exceeded by requested %s", ErrTokenCostExceeded, formatUSD(c.MaxCostUSD), formatUSD(estCostUSD))
+	}
+	return nil
+}
+
+// VerifyApprovalTokenBoundToCall is VerifyApprovalTokenForCall for a hold that
+// only an approval of the call itself may lift. It refuses everything
+// VerifyApprovalTokenForCall refuses, and also a token that binds no call
+// (ErrTokenUnbound), the one VerifyApprovalTokenForCall accepts on a request
+// that carries a call because it was granted with no call in view.
+//
+// internal/pdp uses it for a hold_if_signal rule that holds because its signal
+// never arrived (when_absent: hold): that hold exists because nobody could say
+// what the call does, so a token a person granted for some other request of the
+// same agent, run and tool set, with no call shown, must not lift it. The hold
+// itself always names its call, so the token granted for it is always bound.
+//
+// The digest comparison stays inside VerifyApprovalTokenForCall, in constant
+// time; this function only asks, after it, whether there was a digest at all.
+func VerifyApprovalTokenBoundToCall(secret []byte, token, agentID, runID string, tools []string, estCostUSD float64, toolCallDigest string) error {
+	if err := VerifyApprovalTokenForCall(secret, token, agentID, runID, tools, estCostUSD, toolCallDigest); err != nil {
+		return err
+	}
+	// The signature verified over this payload, so it decodes as it did there.
+	payload, _, _ := strings.Cut(token, ".")
+	body, _ := base64.RawURLEncoding.DecodeString(payload)
+	var c claims
+	if json.Unmarshal(body, &c) != nil || c.ToolCallDigest == "" {
+		return ErrTokenUnbound
 	}
 	return nil
 }

@@ -167,13 +167,14 @@ type Policy struct {
 }
 
 // SignalRule is the body of hold_if_signal: hold when a signal named Name
-// carries one of Values with probability at least MinProbability.
+// carries one of Values with probability at least MinProbability, and, with
+// WhenAbsent set to hold, when a tool call arrives with no signal named Name.
 //
 // Name, Values and MinProbability are all required, and MinProbability is a
 // pointer so that an absent threshold can be refused rather than read as zero,
-// which would hold on a coin flip. Any other key is refused with a sentence
-// saying that a signal can only hold, so no spelling of "...and deny" (a
-// decision, action or on_match key) can ride along unread.
+// which would hold on a coin flip. WhenAbsent is optional. Any other key is
+// refused with a sentence saying that a signal can only hold, so no spelling
+// of "...and deny" (a decision, action or on_match key) can ride along unread.
 type SignalRule struct {
 	// Name is the signal this rule reads, e.g. "action.risk_class".
 	Name string `yaml:"name" json:"name"`
@@ -181,14 +182,43 @@ type SignalRule struct {
 	Values []string `yaml:"values" json:"values"`
 	// MinProbability is the lowest probability that holds, in [0, 1].
 	MinProbability *float64 `yaml:"min_probability" json:"min_probability"`
+	// WhenAbsent says what the rule does with a request that carries a
+	// tool_call and no signal named Name, of any value: WhenAbsentAllow (the
+	// default, and what an empty value means) lets it through as the rule
+	// always did; WhenAbsentHold holds it, and only an approval token bound to
+	// that call lifts the hold. A request with no tool_call is never held by
+	// it: a model call has chosen no call for anybody to classify.
+	//
+	// The signal goes missing when the enforcement point left the arguments out
+	// for their size (arguments_truncated), when the producer's own budget is
+	// spent, when it timed out, or when it is down. With the default, each of
+	// those is a call no signal rule can hold, and the first can be chosen by
+	// the caller, by padding the call. There is no deny: a missing signal is a
+	// missing probability, and a probability can only hold (invariant 25), so
+	// deny is refused at load with the sentence that says so.
+	//
+	// Compile stores the default as "", so a rule that writes allow and one
+	// that leaves the key out are the same rule with the same PolicyVersion.
+	WhenAbsent string `yaml:"when_absent,omitempty" json:"when_absent,omitempty"`
 }
+
+// The values hold_if_signal's when_absent takes.
+const (
+	WhenAbsentAllow = "allow"
+	WhenAbsentHold  = "hold"
+)
 
 // signalRuleKeys are the only keys hold_if_signal has.
-var signalRuleKeys = map[string]bool{"name": true, "values": true, "min_probability": true}
+var signalRuleKeys = map[string]bool{"name": true, "values": true, "min_probability": true, "when_absent": true}
 
 func refuseSignalRuleKey(key string) error {
-	return fmt.Errorf("hold_if_signal has no key %q: a signal can only hold, never deny, so the rule takes exactly name, values and min_probability", key)
+	return fmt.Errorf("hold_if_signal has no key %q: a signal can only hold, never deny, so the rule takes name, values, min_probability and, optionally, when_absent", key)
 }
+
+// errWhenAbsentNotText refuses a when_absent written with no value, as null, or
+// as anything but text. Without it, "when_absent:" with nothing after it would
+// decode to the default and read, in the file, as if the operator had chosen.
+var errWhenAbsentNotText = errors.New("hold_if_signal.when_absent takes allow or hold, written as text; leave the key out for the default, allow")
 
 // UnmarshalJSON refuses any key a hold-only rule does not have, in the strict
 // and the non-strict decoder alike.
@@ -200,6 +230,12 @@ func (r *SignalRule) UnmarshalJSON(data []byte) error {
 	for k := range raw {
 		if !signalRuleKeys[k] {
 			return refuseSignalRuleKey(k)
+		}
+	}
+	if v, ok := raw["when_absent"]; ok {
+		var text *string
+		if json.Unmarshal(v, &text) != nil || text == nil || strings.TrimSpace(*text) == "" {
+			return errWhenAbsentNotText
 		}
 	}
 	type plain SignalRule
@@ -217,8 +253,13 @@ func (r *SignalRule) UnmarshalYAML(n *yaml.Node) error {
 		return fmt.Errorf("hold_if_signal must be a mapping with name, values and min_probability")
 	}
 	for i := 0; i+1 < len(n.Content); i += 2 {
-		if k := n.Content[i].Value; !signalRuleKeys[k] {
+		k := n.Content[i].Value
+		if !signalRuleKeys[k] {
 			return refuseSignalRuleKey(k)
+		}
+		if v := n.Content[i+1]; k == "when_absent" &&
+			(v.Kind != yaml.ScalarNode || v.Tag != "!!str" || strings.TrimSpace(v.Value) == "") {
+			return errWhenAbsentNotText
 		}
 	}
 	type plain SignalRule
@@ -249,6 +290,13 @@ func (r *SignalRule) validate(policyName string) error {
 	if p := *r.MinProbability; math.IsNaN(p) || p < 0 || p > 1 {
 		return fmt.Errorf("policy %q: hold_if_signal.min_probability must be a number between 0 and 1", policyName)
 	}
+	switch w := r.WhenAbsent; {
+	case w == "" || w == WhenAbsentAllow || w == WhenAbsentHold:
+	case strings.EqualFold(strings.TrimSpace(w), "deny"):
+		return fmt.Errorf("policy %q: hold_if_signal.when_absent %q is refused: a signal can only hold, never deny, and a missing signal is no different; use hold", policyName, w)
+	default:
+		return fmt.Errorf("policy %q: hold_if_signal.when_absent %q is not one of allow or hold", policyName, w)
+	}
 	return nil
 }
 
@@ -259,6 +307,11 @@ func (r *SignalRule) clone() *SignalRule {
 	c := *r
 	c.Values = sortedUnique(r.Values)
 	c.MinProbability = cloneUSD(r.MinProbability)
+	// The default is stored as the default: writing allow and leaving the key
+	// out are one rule, with one PolicyVersion.
+	if c.WhenAbsent == WhenAbsentAllow {
+		c.WhenAbsent = ""
+	}
 	return &c
 }
 
@@ -464,7 +517,7 @@ func isUnknownFieldError(err error) bool {
 	// (see SignalRule): that is the same finding as an unknown field, and must
 	// not fall through to the single-document attempt either.
 	return strings.Contains(msg, "not found in type") || strings.Contains(msg, "unknown field") ||
-		strings.Contains(msg, "hold_if_signal has no key")
+		strings.Contains(msg, "hold_if_signal has no key") || strings.Contains(msg, errWhenAbsentNotText.Error())
 }
 
 // strictJSON and strictYAML refuse a field the Policy struct does not declare.
