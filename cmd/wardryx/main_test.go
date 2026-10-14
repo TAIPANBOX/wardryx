@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -323,5 +325,25 @@ func TestOrDash(t *testing.T) {
 	}
 	if got := orDash("alice"); got != "alice" {
 		t.Errorf("orDash(alice) = %q, want alice", got)
+	}
+}
+
+// The offline check has no call in hand, so it sends no model: a policy with
+// allow_models must not report every agent as refused for a model nobody named.
+// The rule is judged on /v1/decide, against a real model call.
+func TestCheckDoesNotJudgeAModelItWasNotShown(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "policy.yaml")
+	doc := "name: fleet\ntarget: \"agent://acme.example/*\"\nallow_models: [\"claude-sonnet-*\"]\n"
+	if err := os.WriteFile(path, []byte(doc), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	results, _, _, err := checkAgents("testdata/passports", path)
+	if err != nil {
+		t.Fatalf("checkAgents: %v", err)
+	}
+	for _, r := range results {
+		if r.Decision != pdp.Allow {
+			t.Errorf("%s: %s (%s), want allow: the check named no model", r.AgentID, r.Decision, r.Reason)
+		}
 	}
 }

@@ -417,15 +417,18 @@ func (s *Server) requireAdmin(next authedHandler) http.HandlerFunc {
 // --- POST /v1/decide ---
 
 type decideRequestDTO struct {
-	AgentID           string   `json:"agent_id"`
-	RunID             string   `json:"run_id"`
-	OnBehalfOf        []string `json:"on_behalf_of,omitempty"`
-	ToolNames         []string `json:"tool_names,omitempty"`
-	Domains           []string `json:"domains,omitempty"`
-	Steps             int      `json:"steps,omitempty"`
-	Model             string   `json:"model,omitempty"`
-	EstCostUSD        float64  `json:"est_cost_usd,omitempty"`
-	AttestationMethod string   `json:"attestation_method,omitempty"`
+	AgentID    string   `json:"agent_id"`
+	RunID      string   `json:"run_id"`
+	OnBehalfOf []string `json:"on_behalf_of,omitempty"`
+	ToolNames  []string `json:"tool_names,omitempty"`
+	Domains    []string `json:"domains,omitempty"`
+	Steps      int      `json:"steps,omitempty"`
+	// Model is a pointer so that a model sent empty, a model call naming
+	// none, is told from no model sent at all, a decision that is not about a
+	// model call (pdp.DecideRequest.ModelAbsent).
+	Model             *string `json:"model,omitempty"`
+	EstCostUSD        float64 `json:"est_cost_usd,omitempty"`
+	AttestationMethod string  `json:"attestation_method,omitempty"`
 	// ChainProven: the enforcement point VERIFIED this request's delegation
 	// proof (agent-passport SPEC 5.2) before calling. Absent means it did
 	// not, never "it did and forgot to say": a default of true would make
@@ -540,6 +543,12 @@ func decisionInput(req pdp.DecideRequest, resp pdp.DecideResponse) map[string]an
 		// disagreeing about the past.
 		"approval_token_required": resp.ApprovalTokenRequired,
 	}
+	// A request that sent no model at all says so, and only then, so every
+	// earlier record and every model call is recorded as it was. Replay reads
+	// it back: allow_models judges a model call only.
+	if req.ModelAbsent {
+		in["model_absent"] = true
+	}
 	// Every signal the decision read, and only when there were any: a decision
 	// that used none is recorded exactly as it was before signals existed. The
 	// tool call is recorded as name, target and a hash only.
@@ -582,6 +591,14 @@ type decideResponseDTO struct {
 	Cacheable bool `json:"cacheable"`
 }
 
+// valueOf is the string a pointer holds, or "" for none.
+func valueOf(p *string) string {
+	if p == nil {
+		return ""
+	}
+	return *p
+}
+
 func (s *Server) handleDecide(w http.ResponseWriter, r *http.Request, principal Principal) {
 	var dto decideRequestDTO
 	if !decodeJSONBody(w, r, &dto) {
@@ -605,7 +622,8 @@ func (s *Server) handleDecide(w http.ResponseWriter, r *http.Request, principal 
 		ToolNames:         dto.ToolNames,
 		Domains:           dto.Domains,
 		Steps:             dto.Steps,
-		Model:             dto.Model,
+		Model:             valueOf(dto.Model),
+		ModelAbsent:       dto.Model == nil,
 		EstCostUSD:        dto.EstCostUSD,
 		AttestationMethod: dto.AttestationMethod,
 		ChainProven:       dto.ChainProven,

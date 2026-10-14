@@ -90,7 +90,7 @@ func TestEveryRecordedPolicyVersionCanBeFetchedBack(t *testing.T) {
 	decide := func(runID string, tools []string) {
 		doRequest(t, srv.Handler(), http.MethodPost, "/v1/decide", adminKey, decideRequestDTO{
 			AgentID: "agent://acme.example/finance/bot1", RunID: runID, ToolNames: tools,
-			Domains: []string{"good.example.com"}, Steps: 1, Model: "m", EstCostUSD: 1, AttestationMethod: "tpm",
+			Domains: []string{"good.example.com"}, Steps: 1, Model: modelName("m"), EstCostUSD: 1, AttestationMethod: "tpm",
 		})
 	}
 
