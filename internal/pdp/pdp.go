@@ -32,6 +32,8 @@ import (
 	"strconv"
 	"strings"
 	"sync/atomic"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/TAIPANBOX/agent-stack-go/chain"
 	"github.com/TAIPANBOX/wardryx/internal/approval"
@@ -96,8 +98,9 @@ type DecideRequest struct {
 	// Steps reaches or exceeds MaxSteps, so exactly MaxSteps actions are
 	// ever let through before the rule starts firing.
 	Steps int
-	// Model is the model the agent is running, carried through for
-	// logging/events; Decide does not branch on it.
+	// Model is the model this call names. Checked against every matched
+	// policy's AllowModels (rule 8); a request that names none is not
+	// restricted by it. Recorded with every decision either way.
 	Model string
 	// EstCostUSD is the action's estimated cost. Checked against every
 	// matched policy's RequireHumanAboveUSD.
@@ -131,7 +134,7 @@ type DecideRequest struct {
 	Signals []Signal
 	// ToolCall is the concrete call this request is about to make, when the
 	// enforcement point knows it. Decide reads its Name in rules 2 and 3
-	// (deny_tool and allow_tool), and in rule 12 whether it is present at all: a
+	// (deny_tool and allow_tool), and in rule 13 whether it is present at all: a
 	// hold_if_signal rule with when_absent: hold holds a tool call that came
 	// with no signal of its name, and never a request without one; that hold's
 	// reason names the call and says whether its arguments were truncated. It
@@ -281,46 +284,51 @@ func (e *Engine) SetPolicies(policies *policy.Set) {
 //     false, denies;
 //  7. a matched policy's deny_if_unattested with no live attestation
 //     denies;
-//  8. a matched policy's max_steps, reached or exceeded by req.Steps,
+//  8. a req.Model that a matched policy's allow_models does not name
+//     denies. Every matched allow_models must name it, so two lists
+//     intersect; a policy with none, and a request that names no model,
+//     add no restriction;
+//  9. a matched policy's max_steps, reached or exceeded by req.Steps,
 //     denies;
-//  9. a matched policy's allow_domains, missing an entry from req.Domains,
+//  10. a matched policy's allow_domains, missing an entry from req.Domains,
 //     denies;
-//  10. a matched policy's deny_above_usd, exceeded by EstCostUSD, denies
+//  11. a matched policy's deny_above_usd, exceeded by EstCostUSD, denies
 //     outright: this is a hard ceiling, not an approval gate, so no
 //     ApprovalToken -- however validly minted -- is even inspected, unlike
-//     rule 11 below;
-//  11. a matched policy's require_human_above_usd, exceeded by EstCostUSD,
+//     rule 12 below;
+//  12. a matched policy's require_human_above_usd, exceeded by EstCostUSD,
 //     resolves to Hold, unless a valid ApprovalToken was presented (then
 //     Allow) or an *invalid* one was presented (then Deny);
-//  12. a matched policy's hold_if_signal, satisfied by one of req.Signals,
+//  13. a matched policy's hold_if_signal, satisfied by one of req.Signals,
 //     or, under when_absent: hold, by a tool call that carries no signal of
 //     its name, resolves to Hold, unless a valid ApprovalToken was presented
 //     (then Allow; for a hold on an absent signal only a token bound to the
 //     call is valid); an invalid token holds, it never denies;
-//  13. otherwise, Allow.
+//  14. otherwise, Allow.
 //
-// Rule 12 is the only rule a signal, or the absence of one, can reach, and it
+// Rule 13 is the only rule a signal, or the absence of one, can reach, and it
 // is last on purpose: it runs only once every deny rule and the cost gate have
 // declined, so a signal can turn an allow into a hold and can change nothing
 // else. It never turns a deny into anything, never replaces another rule's hold
 // or its reason, and never allows. Its invalid-token branch holds where rule
-// 11's denies, because without the signal that same call would have been
+// 12's denies, because without the signal that same call would have been
 // allowed, and a signal must not be able to turn an allow into a refusal.
 //
 // A deny from any rule wins outright: it short-circuits every later rule
 // and Decide never has to reconcile a deny against a later hold or allow.
-// Rules 1-10 are all deny-or-continue and carry no state, so their relative
+// Rules 1-11 are all deny-or-continue and carry no state, so their relative
 // order only changes which single Reason string is reported when a request
 // happens to violate more than one of them at once -- it never changes
-// whether the final Decision is Deny. Rule 10 is deliberately placed before
-// rule 11: a policy that sets both deny_above_usd and
+// whether the final Decision is Deny. Rule 11 is deliberately placed before
+// rule 12: a policy that sets both deny_above_usd and
 // require_human_above_usd, with a cost that exceeds both, must Deny rather
 // than Hold -- the hard ceiling always wins over the approval gate, and
 // require_human_above_usd's threshold is never even reached, so no
-// ApprovalToken is checked at all. Rules 11 and 12 are the only ones that can
+// ApprovalToken is checked at all. Rules 12 and 13 are the only ones that can
 // resolve to something other than Deny or fall-through (Hold, or Allow via a
 // redeemed token), so they come after every unconditional deny check,
-// including the hard ceiling of rule 10.
+// including the hard ceiling of rule 11 and the model rule, which no approval
+// can lift.
 func (e *Engine) Decide(req DecideRequest) DecideResponse {
 	// Loaded once, up front: every rule below evaluates against this exact
 	// snapshot, so a concurrent SetPolicies mid-decision can never make one
@@ -410,6 +418,15 @@ func (e *Engine) Decide(req DecideRequest) DecideResponse {
 	if pol, ok := unattestedDenied(matched, req.AttestationMethod); ok {
 		resp.Decision = Deny
 		resp.Reason = fmt.Sprintf("policy %q requires a live attestation; agent attestation is %q", pol.Name, attestationLabel(req.AttestationMethod))
+		return resp
+	}
+
+	// Rule 8: the model is a floor like the tool lists, and per request: the
+	// same agent and tool set may name another model on the next call, which
+	// is why requestSpecific keeps every decision under a list out of a cache.
+	if pol, ok := modelRefused(matched, req.Model); ok {
+		resp.Decision = Deny
+		resp.Reason = fmt.Sprintf("model %q is not in the allow_models of policy %q (target %s)", req.Model, pol.Name, pol.Target)
 		return resp
 	}
 
@@ -524,11 +541,13 @@ func requestSpecific(matched []policy.Policy, hasToolCall bool) bool {
 		// HoldIfSignal joins them for the same reason: a signal belongs to one
 		// call (its arguments), not to the agent and tool set, so a decision
 		// that could have read one must never be reused for the next call under
-		// the same agent and tool set.
+		// the same agent and tool set. AllowModels too: the model is per call,
+		// and a cache keyed on agent and tool set would answer a call naming a
+		// refused model with the allow it stored for a listed one.
 		if p.MaxSteps > 0 || p.RequireHumanAboveUSD != nil || p.DenyAboveUSD != nil ||
 			len(p.AllowDomains) > 0 || len(p.AllowTool) > 0 || p.DenyIfChainUnproven ||
 			p.MaxChainDepth > 0 || p.RequireRootPrincipal != "" ||
-			p.HoldIfSignal != nil {
+			p.HoldIfSignal != nil || len(p.AllowModels) > 0 {
 			return true
 		}
 		// deny_tool reads the tool call's name as well as the tool list (rule 2).
@@ -596,6 +615,38 @@ func outsideAllowTool(policies []policy.Policy, tools []string) (tool string, po
 		}
 	}
 	return "", policy.Policy{}, false
+}
+
+// modelRefused returns the first matched policy whose non-empty allow_models
+// does not name model. A request that names no model is not restricted, the way
+// deniedDomain does not restrict a request that declares no domain: the egress
+// plane and the MCP broker decide calls that are not model calls and send none.
+// A model holding a control character or invalid UTF-8 is named by no list.
+// Each entry is matched with policy.MatchesGlob, the same glob Target uses, and
+// exactly: no case or space folding, which would widen an allow-list.
+func modelRefused(policies []policy.Policy, model string) (policy.Policy, bool) {
+	if strings.TrimSpace(model) == "" {
+		return policy.Policy{}, false
+	}
+	plain := utf8.ValidString(model) && strings.IndexFunc(model, unicode.IsControl) < 0
+	for _, p := range policies {
+		if len(p.AllowModels) == 0 {
+			continue
+		}
+		if !plain || !modelNamed(p.AllowModels, model) {
+			return p, true
+		}
+	}
+	return policy.Policy{}, false
+}
+
+func modelNamed(patterns []string, model string) bool {
+	for _, pat := range patterns {
+		if policy.MatchesGlob(pat, model) {
+			return true
+		}
+	}
+	return false
 }
 
 // unattestedSentinels are the attestation_method spellings that

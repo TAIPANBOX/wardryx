@@ -151,7 +151,7 @@ func validText(s string, max int, required bool) error {
 	return nil
 }
 
-// signalHold is what rule 12 found: the policy whose hold_if_signal rule holds
+// signalHold is what rule 13 found: the policy whose hold_if_signal rule holds
 // the request, and why.
 type signalHold struct {
 	// pol is the first matched policy, in compiled order, whose rule holds.

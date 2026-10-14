@@ -60,6 +60,7 @@ func TestFilterAppliesNoRuleThatIsNotAboutATool(t *testing.T) {
 			RequireHumanAboveUSD: usd(0.01),
 			DenyIfUnattested:     true,
 			AllowDomains:         []string{"example.com"},
+			AllowModels:          []string{"claude-sonnet-*"},
 		},
 	})
 
@@ -73,7 +74,7 @@ func TestFilterAppliesNoRuleThatIsNotAboutATool(t *testing.T) {
 		t.Fatalf("Allowed = %v, want [search]: no deny_tool rule was set, so no other rule may remove a tool", resp.Allowed)
 	}
 	if len(resp.Denied) != 0 {
-		t.Fatalf("Denied = %+v, want empty: max_steps/deny_above_usd/require_human_above_usd/deny_if_unattested/allow_domains are about the action, not one tool", resp.Denied)
+		t.Fatalf("Denied = %+v, want empty: max_steps/deny_above_usd/require_human_above_usd/deny_if_unattested/allow_domains/allow_models are about the action, not one tool", resp.Denied)
 	}
 }
 

@@ -585,8 +585,8 @@ decision outcome and every exported signature identical.
     It is pure in the same sense `Decide` is pure (invariant 1): no clock,
     randomness, network or database in `internal/pdp`'s own code. And it
     applies no rule that is not about one tool: no chain rule, no
-    attestation, no `max_steps`, no `allow_domains`, no cost rule, no
-    approval token. Those are rules about the action as a whole, and `Filter`
+    attestation, no `max_steps`, no `allow_domains`, no `allow_models`, no
+    cost rule, no approval token. Those are rules about the action as a whole, and `Filter`
     was asked a question about tools offered, not an action taken.
 
     **Unrecorded is a decision, not an oversight, and it is temporary.** No
@@ -1085,7 +1085,7 @@ decision outcome and every exported signature identical.
     12 KiB argument cap reached `/v1/decide` marked `arguments_truncated` and
     carrying no signal, because the classifying proxy does not ask about a call
     it cannot read, and every `hold_if_signal` rule let it through: the rule
-    had nothing to read and rule 12 fell through to allow. The same "no signal,
+    had nothing to read and the signal rule fell through to allow. The same "no signal,
     so allow" follows when the producer's own budget is spent, when it times
     out, and when it is down, and the first of these is the caller's choice.
 
@@ -1097,7 +1097,8 @@ decision outcome and every exported signature identical.
     the rule does not list, or under the threshold, is present: it is an
     answer, and it holds nothing. A request with no `tool_call` (a model call,
     where no call has been chosen to classify) is never held for a missing
-    signal. The hold is rule 12's, after every deny rule and the cost gate, so
+    signal. The hold is the signal rule's (rule 13 since allow_models), after
+    every deny rule and the cost gate, so
     invariant 25 stands as it was: it turns an allow into a hold and nothing
     else. `when_absent: deny` is refused at load and at PUT with the sentence
     that a signal can only hold; any value but `allow` or `hold` is refused,
@@ -1163,3 +1164,65 @@ decision outcome and every exported signature identical.
     the tool call, `deny` accepted at load, `allow` not stored as the default,
     the bound verifier accepting an unbound token, a blank value read as the
     default)*
+
+34. **A policy can name the models its agents may use, and a call naming any
+    other model is denied.** `@decided 2026-10-14` (paraphrased): an operator
+    may bound which models an agent uses, per policy and so per agent or unit.
+    Until this change no plane bounded it: wardryx received `model` and did not
+    branch on it, TokenFuse has no model rule, and the Passport's `models` is a
+    declaration, not a control. `@claude 2026-10-14`, the shape, chosen in this
+    change: `allow_models` is a list of model ids and globs in `target`'s
+    syntax; a request whose `model` matches no entry of a matched non-empty list
+    is denied by rule 8 of `Decide`, after `deny_if_unattested` and before
+    `max_steps`, so no approval token lifts it. Every matched list applies, so
+    two lists narrow each other. Matching is exact (`policy.MatchesGlob`, no
+    case or space folding, which would widen an allow-list), and a model holding
+    a control character or invalid UTF-8 matches nothing. An empty or absent
+    list restricts nothing and keeps the policy's `PolicyVersion` byte for byte;
+    the list is sorted and deduplicated, so its order is not part of the
+    version; a blank entry is refused at load and at PUT. A request that names
+    no model is not restricted, the way `allow_domains` does not restrict a
+    request that declares no domain: scopyx and TokenFuse's MCP broker decide
+    calls that are not model calls and send no model, and refusing those would
+    refuse every egress and tool decision of a governed agent. TokenFuse sends
+    `unknown` for a model call whose body names none, and that is matched like
+    any other name. A decision under a matched policy that sets the list is never
+    `cacheable`, whatever it decided: the model is per call, and the gateway's
+    decision cache is keyed by agent, tool set, attestation and chain, so a
+    cached allow for a listed model would answer a call naming a refused one.
+    The model is already recorded with every decision (invariant 15), and replay
+    puts it back, so a model denial reproduces. `Filter` does not apply the rule
+    (invariant 21): a model is not a tool.
+
+    Named limits. The enforcement point is believed about the model (invariant
+    26): a caller that sends no model is not restricted, and the rule bounds the
+    model a call names, not the one a provider serves; TokenFuse settles by the
+    requested id and never reads the response's model. A rollback to a build
+    before this one refuses a policy file that uses the key, which is loud, and
+    reads a policy stored in Postgres with a decoder that drops it, so remove
+    `allow_models` from stored policies first.
+    *(test: `TestAModelTheListDoesNotNameIsDenied`,
+    `TestNoAllowModelsMeansNoRestriction`,
+    `TestARequestThatNamesNoModelIsNotRestrictedByAllowModels`,
+    `TestTwoModelListsNarrowEachOther`, `TestAnApprovalDoesNotLiftAModelDenial`,
+    `TestAnAllowModelsDecisionIsNeverCacheable`,
+    `TestAllowModelsDeniesExactlyTheUnlistedModelsOverRandomPolicies` (200
+    seeds, every decision compared with the same policies without the lists,
+    the match recomputed by the test's own glob reader),
+    `TestFilterAppliesNoRuleThatIsNotAboutATool` in `internal/pdp`;
+    `TestAllowModelsLoadsFromYAMLAndJSONAndThroughTheLaxDecoder`,
+    `TestABlankAllowModelsEntryIsRefusedAtLoad`,
+    `TestAPolicyWithoutAllowModelsKeepsItsPolicyVersion`,
+    `TestAnAllowModelsListIsPartOfThePolicyVersionAndItsOrderIsNot` in
+    `internal/policy`;
+    `TestAnAgentThatSwitchesToAModelItsPolicyDoesNotAllowIsRefused` (the
+    gateway's body), `TestAModelDenialReplaysFromTheRecord`,
+    `TestAPutWithAllowModelsIsStoredAndEnforced` in `internal/api`;
+    `TestARecordedModelDenialReproducesFromTheRecordedModel` in
+    `internal/replay`; the order is held by `scripts/decide-order-is-documented.sh`;
+    scenarios in `features/allow-models.feature`; mutants named in the PR that
+    added it, each caught: the match inverted, the empty-list short-circuit
+    dropped, a decision under the list marked cacheable, case folded, the rule
+    after the cost gate, a request with no model denied, only the first matched
+    list read, a control character allowed, an entry matched as a prefix, replay
+    dropping the model, a blank entry accepted, the list not normalised)*

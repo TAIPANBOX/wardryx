@@ -51,6 +51,18 @@ type Policy struct {
 	// entry is refused at load, since it would be dropped and leave the list
 	// empty, which reads as no restriction. See internal/pdp's Decide, rule 3.
 	AllowTool []string `yaml:"allow_tool,omitempty" json:"allow_tool,omitempty"`
+	// AllowModels names the models the agents this policy matches may use: a
+	// request whose model matches none of its entries is denied. Each entry is
+	// a model id or a glob in Target's syntax ("*" any run, "?" one character),
+	// matched exactly, with no case or space folding, since folding would widen
+	// an allow-list. A model holding a control character or invalid UTF-8
+	// matches nothing. Empty or absent means no restriction; when several
+	// matched policies set it, each one that does must name the model. A
+	// request that names no model (an egress or tool decision) is not restricted
+	// by it, the way allow_domains does not restrict a request that declares no
+	// domain. A blank entry is refused at load. See internal/pdp's Decide,
+	// rule 4.
+	AllowModels []string `yaml:"allow_models,omitempty" json:"allow_models,omitempty"`
 	// AllowDomains lists network destinations the agent may reach. Enforced
 	// by internal/pdp's Decide against the request's declared Domains: any
 	// entry in Domains that is absent from AllowDomains denies the request.
@@ -666,6 +678,9 @@ func Compile(policies []Policy) (*Set, error) {
 		if err := refuseBlankAllowTool(p); err != nil {
 			return nil, err
 		}
+		if err := refuseBlankAllowModels(p); err != nil {
+			return nil, err
+		}
 	}
 	norm := normalize(policies)
 
@@ -691,6 +706,17 @@ func refuseBlankAllowTool(p Policy) error {
 	for _, tool := range p.AllowTool {
 		if strings.TrimSpace(tool) == "" {
 			return fmt.Errorf("policy %q: allow_tool must not contain a blank entry: a blank is dropped and the list would read as no restriction", p.Name)
+		}
+	}
+	return nil
+}
+
+// refuseBlankAllowModels is refuseBlankAllowTool for allow_models: a list of only
+// blanks would be dropped to nothing, which reads as no restriction.
+func refuseBlankAllowModels(p Policy) error {
+	for _, m := range p.AllowModels {
+		if strings.TrimSpace(m) == "" {
+			return fmt.Errorf("policy %q: allow_models must not contain a blank entry: a blank is dropped and the list would read as no restriction", p.Name)
 		}
 	}
 	return nil
@@ -738,7 +764,7 @@ func validate(p Policy) error {
 }
 
 // normalize returns a defensive copy of policies with Name defaulted, and
-// DenyTool, AllowTool and AllowDomains deduplicated, sorted, and stripped of blank entries,
+// DenyTool, AllowTool, AllowModels and AllowDomains deduplicated, sorted, and stripped of blank entries,
 // then sorts the policies themselves by (target, name). The result is
 // deterministic regardless of the input's source-file or field order, which
 // is what makes computeVersion stable across equivalent policy sets.
@@ -748,6 +774,7 @@ func normalize(policies []Policy) []Policy {
 		np := p
 		np.DenyTool = sortedUnique(p.DenyTool)
 		np.AllowTool = sortedUnique(p.AllowTool)
+		np.AllowModels = sortedUnique(p.AllowModels)
 		np.AllowDomains = sortedUnique(p.AllowDomains)
 		np.RequireHumanAboveUSD = cloneUSD(p.RequireHumanAboveUSD)
 		np.DenyAboveUSD = cloneUSD(p.DenyAboveUSD)
