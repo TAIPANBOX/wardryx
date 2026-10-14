@@ -603,7 +603,7 @@ Wardryx is itself a security-relevant component, so a few of its own defaults ar
 
 - [x] Declarative policy model (YAML/JSON, `agent://` glob targeting, stable `PolicyVersion`)
 - [x] Deterministic decision engine: `deny_tool`, `allow_tool`, `deny_if_unattested`, `max_steps`, `allow_domains`, `require_human_above_usd`, `deny_above_usd` (a hard ceiling no approval can cross), the chain rules (`max_chain_depth`, `require_root_principal`, `deny_if_chain_unproven`) and `hold_if_signal`
-- [x] Typed risk signals: `/v1/decide` takes caller-supplied `signals` and a `tool_call`, and `hold_if_signal` can add a hold and never a deny (see [Typed risk signals](#typed-risk-signals))
+- [x] Typed risk signals: `/v1/decide` takes caller-supplied `signals` and a `tool_call`, and `hold_if_signal` can add a hold and never a deny; with `when_absent: hold` it also holds a tool call that arrived with no signal, lifted only by an approval of that call (see [Typed risk signals](#typed-risk-signals))
 - [x] Approvals bound to the tool call: a hold made for a request carrying a `tool_call` records its name and target, and the granted token carries a digest of them, so an approval for one call is refused for any other (see [Stateless human-in-the-loop](#stateless-human-in-the-loop))
 - [x] Stateless human-in-the-loop: HMAC-signed approval tokens, configurable TTL, single-use redemption by default, switchable off with `WARDRYX_APPROVAL_SINGLE_USE=false`
 - [x] HTTP API: `/v1/decide`, `/v1/approvals/{id}/decide`, `/v1/approvals`, `/v1/policies` (admin policy-as-code, see [Policy-as-code](#policy-as-code)), `/healthz` (liveness), `/readyz` (readiness: reads the store, see [When the store is down](#when-the-store-is-down)), bearer-key auth with org/role scoping
