@@ -99,9 +99,17 @@ type DecideRequest struct {
 	// ever let through before the rule starts firing.
 	Steps int
 	// Model is the model this call names. Checked against every matched
-	// policy's AllowModels (rule 8); a request that names none is not
-	// restricted by it. Recorded with every decision either way.
+	// policy's AllowModels (rule 8) when the request is a model call: it
+	// carries no ToolCall and ModelAbsent is false. Recorded with every
+	// decision either way.
 	Model string
+	// ModelAbsent says the caller sent no model at all, which is how a
+	// decision that is not about a model call arrives (scopyx's egress checks
+	// send agent, run and domains only). allow_models does not judge such a
+	// request. A caller that sends the model empty is making a model call that
+	// names none, and a list refuses it. The zero value, false, is the stricter
+	// reading, so a Go caller that never sets it is judged.
+	ModelAbsent bool
 	// EstCostUSD is the action's estimated cost. Checked against every
 	// matched policy's RequireHumanAboveUSD.
 	EstCostUSD float64
@@ -284,10 +292,11 @@ func (e *Engine) SetPolicies(policies *policy.Set) {
 //     false, denies;
 //  7. a matched policy's deny_if_unattested with no live attestation
 //     denies;
-//  8. a req.Model that a matched policy's allow_models does not name
-//     denies. Every matched allow_models must name it, so two lists
-//     intersect; a policy with none, and a request that names no model,
-//     add no restriction;
+//  8. a model call whose req.Model a matched policy's allow_models does not
+//     name denies, a blank model included. Every matched allow_models must
+//     name it, so two lists intersect; a policy with none adds no
+//     restriction, and a request with a tool call or no model sent is not a
+//     model call and is not judged;
 //  9. a matched policy's max_steps, reached or exceeded by req.Steps,
 //     denies;
 //  10. a matched policy's allow_domains, missing an entry from req.Domains,
@@ -424,7 +433,7 @@ func (e *Engine) Decide(req DecideRequest) DecideResponse {
 	// Rule 8: the model is a floor like the tool lists, and per request: the
 	// same agent and tool set may name another model on the next call, which
 	// is why requestSpecific keeps every decision under a list out of a cache.
-	if pol, ok := modelRefused(matched, req.Model); ok {
+	if pol, ok := modelRefused(matched, req.Model, req.ToolCall == nil && !req.ModelAbsent); ok {
 		resp.Decision = Deny
 		resp.Reason = fmt.Sprintf("model %q is not in the allow_models of policy %q (target %s)", req.Model, pol.Name, pol.Target)
 		return resp
@@ -618,17 +627,18 @@ func outsideAllowTool(policies []policy.Policy, tools []string) (tool string, po
 }
 
 // modelRefused returns the first matched policy whose non-empty allow_models
-// does not name model. A request that names no model is not restricted, the way
-// deniedDomain does not restrict a request that declares no domain: the egress
-// plane and the MCP broker decide calls that are not model calls and send none.
-// A model holding a control character or invalid UTF-8 is named by no list.
-// Each entry is matched with policy.MatchesGlob, the same glob Target uses, and
-// exactly: no case or space folding, which would widen an allow-list.
-func modelRefused(policies []policy.Policy, model string) (policy.Policy, bool) {
-	if strings.TrimSpace(model) == "" {
+// does not name model. Only a model call is judged (modelCall): a request that
+// carries a tool call is a tool decision, and one that sent no model at all is
+// not about a model call (the egress plane), the way deniedDomain does not judge
+// a request that declares no domain. A model call whose model is blank, or holds
+// a control character or invalid UTF-8, is named by no list. Each entry is
+// matched with policy.MatchesGlob, the same glob Target uses, and exactly: no
+// case or space folding, which would widen an allow-list.
+func modelRefused(policies []policy.Policy, model string, modelCall bool) (policy.Policy, bool) {
+	if !modelCall {
 		return policy.Policy{}, false
 	}
-	plain := utf8.ValidString(model) && strings.IndexFunc(model, unicode.IsControl) < 0
+	plain := strings.TrimSpace(model) != "" && utf8.ValidString(model) && strings.IndexFunc(model, unicode.IsControl) < 0
 	for _, p := range policies {
 		if len(p.AllowModels) == 0 {
 			continue

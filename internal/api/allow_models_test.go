@@ -130,3 +130,42 @@ func TestAPutWithAllowModelsIsStoredAndEnforced(t *testing.T) {
 		t.Fatalf("after the PUT a refused model is %s (%s), want the model deny", got.Decision, got.Reason)
 	}
 }
+
+// modelName is a model as a decide body carries it: present, possibly empty.
+func modelName(m string) *string { return &m }
+
+// The three callers, each with the body it sends. TokenFuse's model path sends
+// the body's model as it is, so a body with "model": "" arrives as an empty
+// model, a model call naming none: refused. scopyx's egress check sends agent,
+// run and domains and no model key: not a model call, not judged. TokenFuse's
+// MCP broker sends an empty model beside the tool_call: a tool decision, not
+// judged.
+func TestOnlyAModelCallIsJudgedOverTheWire(t *testing.T) {
+	h := newSigHarness(t, false, fleetPolicies(t, fleetPolicy)...)
+	if got := h.decideRaw(t, gatewayModelCall("")); got.Decision != pdp.Deny || !strings.Contains(got.Reason, `model "" is not in the allow_models`) {
+		t.Fatalf("the gateway's body with an empty model: %s (%s), want the model deny", got.Decision, got.Reason)
+	}
+	scopyx := `{"agent_id":"` + fleetAgentID + `","run_id":"run-7","domains":["api.example.com"]}`
+	if got := h.decideRaw(t, scopyx); got.Decision != pdp.Allow {
+		t.Fatalf("scopyx's egress body, no model key: %s (%s), want allow", got.Decision, got.Reason)
+	}
+	broker := `{"agent_id":"` + fleetAgentID + `","run_id":"mcp:` + fleetAgentID + `","on_behalf_of":[],"tool_names":["search"],"domains":[],"steps":0,"model":"","est_cost_usd":0.0,"attestation_method":null,"approval_token":null,"chain_proven":false,"tool_call":{"name":"search","arguments":{"q":"x"},"target":"search-mcp"}}`
+	if got := h.decideRaw(t, broker); got.Decision != pdp.Allow {
+		t.Fatalf("the broker's tool-call body: %s (%s), want allow", got.Decision, got.Reason)
+	}
+	// The record says which decision sent no model, so replay judges the same
+	// requests the live decision did.
+	events := h.read(t)
+	absent := 0
+	for _, ev := range events {
+		if ev.Data["model_absent"] == true {
+			absent++
+		}
+	}
+	if absent != 1 {
+		t.Fatalf("%d decisions recorded model_absent, want 1 (scopyx's)", absent)
+	}
+	if report := replay.Run(events, h.arch, nil); report.Reproduced != 3 || report.Diverged != 0 {
+		t.Fatalf("the three decisions did not reproduce:\n%s", replay.Format(report, "events", ""))
+	}
+}

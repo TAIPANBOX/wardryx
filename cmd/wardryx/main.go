@@ -453,7 +453,7 @@ type checkResult struct {
 // EstCostUSD, Steps, and Domains are left at their zero values: only
 // deny_if_unattested (and, trivially, whether any policy targets the agent
 // at all) is meaningfully exercised by a dry-run over passports alone.
-// deny_tool/require_human_above_usd/deny_above_usd/max_steps/allow_domains
+// deny_tool/allow_models/require_human_above_usd/deny_above_usd/max_steps/allow_domains
 // rules only ever fire against a real, in-flight DecideRequest from
 // /v1/decide.
 func checkAgents(passportDir, policyPath string) ([]checkResult, passports.Report, string, error) {
@@ -477,6 +477,9 @@ func checkAgents(passportDir, policyPath string) ([]checkResult, passports.Repor
 			AgentID:           p.ID,
 			RunID:             "offline-check",
 			AttestationMethod: method,
+			// No call is in hand, so no model was sent: allow_models is
+			// judged on /v1/decide against a real model call, not here.
+			ModelAbsent: true,
 		})
 		results = append(results, checkResult{
 			AgentID:  p.ID,

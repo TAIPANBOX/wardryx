@@ -27,6 +27,7 @@ var fieldHome = map[string]string{
 	"Domains":           "data:domains",
 	"Steps":             "data:steps",
 	"Model":             "data:model",
+	"ModelAbsent":       "data:model_absent",
 	"EstCostUSD":        "data:est_cost_usd",
 	"AttestationMethod": "data:attestation_method",
 	"ChainProven":       "data:chain_proven",
@@ -47,6 +48,7 @@ func fullRequest() pdp.DecideRequest {
 		Domains:           []string{"payouts.evil.example"},
 		Steps:             3,
 		Model:             "claude-sonnet-5",
+		ModelAbsent:       true, // set, like every other field, so it must reach the record
 		EstCostUSD:        12.40,
 		AttestationMethod: "tpm",
 		ChainProven:       true,
@@ -183,7 +185,7 @@ func TestEveryDecisionOutcomeRecordsTheQuestion(t *testing.T) {
 			dto: decideRequestDTO{
 				AgentID: "agent://acme.example/finance/bot1", RunID: "r-allow",
 				ToolNames: []string{"generate_report"}, Domains: []string{"good.example.com"},
-				Steps: 2, Model: "claude-sonnet-5", EstCostUSD: 1.25, AttestationMethod: "tpm",
+				Steps: 2, Model: modelName("claude-sonnet-5"), EstCostUSD: 1.25, AttestationMethod: "tpm",
 			},
 			wantEvent: "policy_allow",
 		},
@@ -192,7 +194,7 @@ func TestEveryDecisionOutcomeRecordsTheQuestion(t *testing.T) {
 			dto: decideRequestDTO{
 				AgentID: "agent://acme.example/finance/bot1", RunID: "r-deny",
 				ToolNames: []string{"generate_report"}, Domains: []string{"payouts.evil.example"},
-				Steps: 2, Model: "claude-sonnet-5", EstCostUSD: 1.25, AttestationMethod: "tpm",
+				Steps: 2, Model: modelName("claude-sonnet-5"), EstCostUSD: 1.25, AttestationMethod: "tpm",
 			},
 			wantEvent: "policy_deny",
 		},
@@ -201,7 +203,7 @@ func TestEveryDecisionOutcomeRecordsTheQuestion(t *testing.T) {
 			dto: decideRequestDTO{
 				AgentID: "agent://acme.example/finance/bot1", RunID: "r-hold",
 				ToolNames: []string{"generate_report"}, Domains: []string{"good.example.com"},
-				Steps: 2, Model: "claude-sonnet-5", EstCostUSD: 900, AttestationMethod: "tpm",
+				Steps: 2, Model: modelName("claude-sonnet-5"), EstCostUSD: 900, AttestationMethod: "tpm",
 			},
 			wantEvent: "approval_requested",
 		},
@@ -316,7 +318,7 @@ func TestARecordedDenialReplaysToTheSameVerdict(t *testing.T) {
 	events := decideAndReadEvents(t, decideRequestDTO{
 		AgentID: "agent://acme.example/finance/bot1", RunID: "r-replay",
 		ToolNames: []string{"http_get"}, Domains: []string{"payouts.evil.example"},
-		Steps: 3, Model: "claude-sonnet-5", EstCostUSD: 12.40, AttestationMethod: "tpm",
+		Steps: 3, Model: modelName("claude-sonnet-5"), EstCostUSD: 12.40, AttestationMethod: "tpm",
 	})
 	if len(events) != 1 || events[0].Type != "policy_deny" {
 		t.Fatalf("want exactly one policy_deny, got %d events", len(events))

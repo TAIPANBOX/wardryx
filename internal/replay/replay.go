@@ -338,6 +338,7 @@ func question(ev event.Event) (pdp.DecideRequest, string, bool, error) {
 		Domains:           textList(domains),
 		Steps:             int(number(steps)),
 		Model:             text(model),
+		ModelAbsent:       ev.Data["model_absent"] == true,
 		EstCostUSD:        number(cost),
 		AttestationMethod: text(attestation),
 		ChainProven:       chainProven == true,

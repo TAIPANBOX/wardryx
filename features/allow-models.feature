@@ -31,11 +31,20 @@ Feature: A policy can name the models its agents may use
     # -> internal/pdp:TestNoAllowModelsMeansNoRestriction
     # -> internal/policy:TestAPolicyWithoutAllowModelsKeepsItsPolicyVersion
 
-  Scenario: A decision that names no model is not a model decision
+  Scenario: A model call that names no model is refused
     Given a policy with a list
-    When an egress check or a tool call that names no model is decided for the same agent
-    Then it is not refused for its model
-    # -> internal/pdp:TestARequestThatNamesNoModelIsNotRestrictedByAllowModels
+    When a model call sends an empty or blank model
+    Then it is denied, since an upstream could otherwise pick any model for it
+    # -> internal/pdp:TestAModelCallThatNamesNoModelIsRefused
+    # -> internal/api:TestOnlyAModelCallIsJudgedOverTheWire
+
+  Scenario: Only a model call is judged
+    Given a policy with a list
+    When an egress check that sends no model, a tool call, or the offline check is decided for the same agent
+    Then none of them is refused for its model, and the record says which sent no model so a replay judges the same way
+    # -> internal/pdp:TestOnlyAModelCallIsJudgedByAllowModels
+    # -> internal/api:TestOnlyAModelCallIsJudgedOverTheWire
+    # -> cmd/wardryx:TestCheckDoesNotJudgeAModelItWasNotShown
 
   Scenario: Two lists narrow each other
     Given two policies that both match an agent, each with its own list

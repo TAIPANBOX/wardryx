@@ -1173,20 +1173,28 @@ decision outcome and every exported signature identical.
     declaration, not a control. `@claude 2026-10-14`, the shape, chosen in this
     change: `allow_models` is a list of model ids and globs in `target`'s
     syntax; a request whose `model` matches no entry of a matched non-empty list
-    is denied by rule 8 of `Decide`, after `deny_if_unattested` and before
+    on a model call is denied by rule 8 of `Decide`, after `deny_if_unattested` and before
     `max_steps`, so no approval token lifts it. Every matched list applies, so
     two lists narrow each other. Matching is exact (`policy.MatchesGlob`, no
     case or space folding, which would widen an allow-list), and a model holding
     a control character or invalid UTF-8 matches nothing. An empty or absent
     list restricts nothing and keeps the policy's `PolicyVersion` byte for byte;
     the list is sorted and deduplicated, so its order is not part of the
-    version; a blank entry is refused at load and at PUT. A request that names
-    no model is not restricted, the way `allow_domains` does not restrict a
-    request that declares no domain: scopyx and TokenFuse's MCP broker decide
-    calls that are not model calls and send no model, and refusing those would
-    refuse every egress and tool decision of a governed agent. TokenFuse sends
-    `unknown` for a model call whose body names none, and that is matched like
-    any other name. A decision under a matched policy that sets the list is never
+    version; a blank entry is refused at load and at PUT. Only a model call is
+    judged: a request with no `tool_call` that sends a `model` key
+    (`DecideRequest.ModelAbsent` false; the API sets it from whether the key
+    was sent, and the record carries `model_absent` only when it is true, so
+    replay judges what the live decision judged). A model call whose model is
+    empty or blank is refused: TokenFuse sends the body's `model` as it is, so
+    `"model": ""` arrives empty, and an upstream that fills in a default would
+    otherwise serve any model. A request with a `tool_call` is a tool decision
+    (TokenFuse's MCP broker sends the call and an empty model) and a request
+    with no `model` key is not about a model call (scopyx's egress checks send
+    agent, run and domains only): neither is judged, the way `allow_domains`
+    does not judge a request that declares no domain, and refusing them would
+    refuse every tool and egress decision of a governed agent. The offline
+    `wardryx check` sends no model. TokenFuse sends `unknown` for a model call
+    whose body names none, and that is matched like any other name. A decision under a matched policy that sets the list is never
     `cacheable`, whatever it decided: the model is per call, and the gateway's
     decision cache is keyed by agent, tool set, attestation and chain, so a
     cached allow for a listed model would answer a call naming a refused one.
@@ -1195,7 +1203,8 @@ decision outcome and every exported signature identical.
     (invariant 21): a model is not a tool.
 
     Named limits. The enforcement point is believed about the model (invariant
-    26): a caller that sends no model is not restricted, and the rule bounds the
+    26): a caller that leaves the `model` key out, or sends a `tool_call`, is
+    not judged, and the rule bounds the
     model a call names, not the one a provider serves; TokenFuse settles by the
     requested id and never reads the response's model. A rollback to a build
     before this one refuses a policy file that uses the key, which is loud, and
@@ -1203,7 +1212,8 @@ decision outcome and every exported signature identical.
     `allow_models` from stored policies first.
     *(test: `TestAModelTheListDoesNotNameIsDenied`,
     `TestNoAllowModelsMeansNoRestriction`,
-    `TestARequestThatNamesNoModelIsNotRestrictedByAllowModels`,
+    `TestAModelCallThatNamesNoModelIsRefused`,
+    `TestOnlyAModelCallIsJudgedByAllowModels`,
     `TestTwoModelListsNarrowEachOther`, `TestAnApprovalDoesNotLiftAModelDenial`,
     `TestAnAllowModelsDecisionIsNeverCacheable`,
     `TestAllowModelsDeniesExactlyTheUnlistedModelsOverRandomPolicies` (200
@@ -1217,12 +1227,19 @@ decision outcome and every exported signature identical.
     `internal/policy`;
     `TestAnAgentThatSwitchesToAModelItsPolicyDoesNotAllowIsRefused` (the
     gateway's body), `TestAModelDenialReplaysFromTheRecord`,
-    `TestAPutWithAllowModelsIsStoredAndEnforced` in `internal/api`;
+    `TestAPutWithAllowModelsIsStoredAndEnforced`,
+    `TestOnlyAModelCallIsJudgedOverTheWire` (the gateway's, scopyx's and the
+    broker's bodies), `TestDecisionInputCoversEveryDecideRequestField` in
+    `internal/api`; `TestCheckDoesNotJudgeAModelItWasNotShown` in
+    `cmd/wardryx`;
     `TestARecordedModelDenialReproducesFromTheRecordedModel` in
     `internal/replay`; the order is held by `scripts/decide-order-is-documented.sh`;
     scenarios in `features/allow-models.feature`; mutants named in the PR that
     added it, each caught: the match inverted, the empty-list short-circuit
     dropped, a decision under the list marked cacheable, case folded, the rule
-    after the cost gate, a request with no model denied, only the first matched
-    list read, a control character allowed, an entry matched as a prefix, replay
-    dropping the model, a blank entry accepted, the list not normalised)*
+    after the cost gate, only the first matched list read, a control character
+    allowed, an entry matched as a prefix, replay dropping the model, a blank
+    entry accepted, the list not normalised, the early return for a blank model
+    restored, a request that sent no model judged, a tool call judged, a model
+    sent empty read as none sent, replay dropping `model_absent`, the record
+    leaving it out, the offline check judged as a model call)*

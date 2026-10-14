@@ -104,21 +104,48 @@ func TestNoAllowModelsMeansNoRestriction(t *testing.T) {
 	}
 }
 
-// A request that names no model is not restricted, the way a request that
-// declares no domain is not restricted by allow_domains: the egress plane and
-// the MCP broker ask about calls that are not model calls and send none.
-// TokenFuse sends "unknown" for a model call whose body names no model, and
-// that IS restricted (TestAModelTheListDoesNotNameIsDenied).
-func TestARequestThatNamesNoModelIsNotRestrictedByAllowModels(t *testing.T) {
+// A model call that names no model is refused under a list. TokenFuse sends
+// the body's model field as it is, so a body with "model": "" reaches the
+// decision as an empty model, and an upstream that fills in a default would
+// otherwise serve whatever model it likes. A body with no model at all arrives
+// as "unknown", which a list refuses like any unlisted name.
+func TestAModelCallThatNamesNoModelIsRefused(t *testing.T) {
 	e := allowEngine(t, modelPolicy(t, "fleet", "claude-sonnet-*"))
-	for _, m := range []string{"", "   "} {
-		if got := e.Decide(modelCall(m)); got.Decision != Allow {
-			t.Errorf("model %q: %s (%s), want allow: a request that names no model is not a model call", m, got.Decision, got.Reason)
+	for _, m := range []string{"", "   ", "\t"} {
+		got := e.Decide(modelCall(m))
+		want := `model ` + quoteModel(m) + ` is not in the allow_models of policy "fleet" (target agent://acme.example/fleet/*)`
+		if got.Decision != Deny || got.Reason != want {
+			t.Errorf("a model call with model %q: %s (%s), want deny %q", m, got.Decision, got.Reason, want)
 		}
 	}
-	egress := DecideRequest{AgentID: fleetAgent, RunID: "run-1", Domains: []string{"api.example.com"}}
-	if got := e.Decide(egress); got.Decision != Allow {
-		t.Errorf("an egress decision with no model: %s (%s), want allow", got.Decision, got.Reason)
+}
+
+// Only a model call is judged. A request that carries a tool_call is a tool
+// decision (TokenFuse's MCP broker sends the call and an empty model), and a
+// request that sends no model at all is not about a model call (scopyx's
+// egress checks send agent, run and domains only): allow_models does not judge
+// either, whatever its model field says, the way allow_domains does not judge
+// a request that declares no domain.
+func TestOnlyAModelCallIsJudgedByAllowModels(t *testing.T) {
+	e := allowEngine(t, modelPolicy(t, "fleet", "claude-sonnet-*"))
+	cases := map[string]DecideRequest{
+		"an egress check, no model sent": {AgentID: fleetAgent, RunID: "run-1", Domains: []string{"api.example.com"}, ModelAbsent: true},
+		"a tool call with an empty model": {AgentID: fleetAgent, RunID: "run-1", ToolNames: []string{"search"},
+			ToolCall: &ToolCall{Name: "search", Target: "mcp://search"}},
+		"a tool call naming a refused model": {AgentID: fleetAgent, RunID: "run-1", ToolNames: []string{"search"}, Model: "claude-opus-5",
+			ToolCall: &ToolCall{Name: "search", Target: "mcp://search"}},
+	}
+	for name, req := range cases {
+		if got := e.Decide(req); got.Decision != Allow {
+			t.Errorf("%s: %s (%s), want allow: allow_models judges model calls only", name, got.Decision, got.Reason)
+		}
+	}
+	// The control: the same egress request that does send a model is a model
+	// call, and its empty model is refused.
+	sent := cases["an egress check, no model sent"]
+	sent.ModelAbsent = false
+	if got := e.Decide(sent); got.Decision != Deny {
+		t.Fatalf("control: a request that sends an empty model is %s (%s), want deny", got.Decision, got.Reason)
 	}
 }
 
@@ -171,7 +198,7 @@ func TestAnAllowModelsDecisionIsNeverCacheable(t *testing.T) {
 		"an allowed model":           modelCall("claude-sonnet-5"),
 		"a refused model":            modelCall("claude-opus-5"),
 		"a request with no model":    modelCall(""),
-		"an egress call, no model":   {AgentID: fleetAgent, RunID: "r", Domains: []string{"x.example"}},
+		"an egress call, no model":   {AgentID: fleetAgent, RunID: "r", Domains: []string{"x.example"}, ModelAbsent: true},
 		"a tool call, no model":      {AgentID: fleetAgent, RunID: "r", ToolNames: []string{"search"}, ToolCall: &ToolCall{Name: "search"}},
 		"an allowed model, no tools": {AgentID: fleetAgent, RunID: "r", Model: "claude-sonnet-5"},
 	} {
@@ -193,7 +220,7 @@ func TestAnAllowModelsDecisionIsNeverCacheable(t *testing.T) {
 func TestAllowModelsDeniesExactlyTheUnlistedModelsOverRandomPolicies(t *testing.T) {
 	patterns := []string{"claude-sonnet-*", "claude-*", "gpt-6-mini", "gpt-?-mini", "*-mini", "gemini-*-pro", "unknown", "*"}
 	models := []string{"claude-sonnet-5-5", "claude-opus-5", "gpt-6-mini", "gpt-7-mini", "gpt-6-mini-x", "gemini-3-pro", "gemini-pro",
-		"unknown", "", "Claude-Sonnet-5", "claude-sonnet-5\x01", "llama-4", "gpt-66-mini", "o4-mini"}
+		"unknown", "", "  ", "Claude-Sonnet-5", "claude-sonnet-5\x01", "llama-4", "gpt-66-mini", "o4-mini"}
 	refused, allowedUnderList := 0, 0
 	for seed := int64(1); seed <= 200; seed++ {
 		r := rand.New(rand.NewSource(seed))
@@ -229,6 +256,15 @@ func TestAllowModelsDeniesExactlyTheUnlistedModelsOverRandomPolicies(t *testing.
 		if r.Intn(3) == 0 {
 			req.ToolNames = []string{"shell"}
 		}
+		// One request in five is not a model call: an egress check that sends
+		// no model, or a tool call. allow_models judges neither.
+		switch r.Intn(10) {
+		case 0:
+			req.ModelAbsent = true
+		case 1:
+			req.ToolCall = &ToolCall{Name: "search", Target: "mcp://search"}
+		}
+		judged := !req.ModelAbsent && req.ToolCall == nil
 		req.EstCostUSD = float64(r.Intn(15))
 		req.Steps = r.Intn(5)
 
@@ -239,7 +275,7 @@ func TestAllowModelsDeniesExactlyTheUnlistedModelsOverRandomPolicies(t *testing.
 				continue
 			}
 			nonEmpty++
-			if strings.TrimSpace(req.Model) != "" && !anyGlob(list, req.Model) {
+			if judged && !anyGlob(list, req.Model) {
 				listed = false
 			}
 		}
@@ -285,10 +321,10 @@ func sweptSet(t *testing.T, seed int64, pols []policy.Policy) *Engine {
 }
 
 // anyGlob is the test's own reading of the glob syntax Target uses: "*" any
-// run of characters, "?" exactly one, everything else itself. A model with a
-// control character or invalid UTF-8 matches nothing.
+// run of characters, "?" exactly one, everything else itself. A blank model, or
+// one with a control character or invalid UTF-8, matches nothing.
 func anyGlob(patterns []string, model string) bool {
-	if !utf8.ValidString(model) || strings.IndexFunc(model, func(r rune) bool { return r < 0x20 || r == 0x7f || (r >= 0x80 && r < 0xa0) }) >= 0 {
+	if strings.TrimSpace(model) == "" || !utf8.ValidString(model) || strings.IndexFunc(model, func(r rune) bool { return r < 0x20 || r == 0x7f || (r >= 0x80 && r < 0xa0) }) >= 0 {
 		return false
 	}
 	for _, p := range patterns {
