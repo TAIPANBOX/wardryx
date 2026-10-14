@@ -207,10 +207,16 @@ func TestASignalHoldIsLiftedByAValidApprovalTokenAndNeverTurnsIntoADeny(t *testi
 }
 
 // The property under every test above, swept: over random policy sets and
-// requests, adding signals may turn an allow into a hold and may change
-// nothing else. 200 seeds, so a counterexample is a number somebody can rerun.
+// requests, a hold_if_signal rule may turn an allow into a hold and may change
+// nothing else, whatever signals arrive and whether or not its signal arrived
+// at all. Each decision is compared with the same policy without the rule. When
+// the rule does not hold on absence, adding signals to a request may also only
+// turn an allow into a hold. A request with no tool call is never held because
+// a signal is missing. 200 seeds, so a counterexample is a number somebody can
+// rerun.
 func TestSignalsNeverChangeADenyOrRemoveAHoldOverRandomPolicies(t *testing.T) {
 	values := []string{"destructive", "external_send", "financial", "read_only", "reversible_change"}
+	absentHolds, absentHeld := 0, 0
 	for seed := int64(1); seed <= 200; seed++ {
 		r := rand.New(rand.NewSource(seed))
 		pol := policy.Policy{Name: "p", Target: "agent://acme.example/support/*"}
@@ -229,18 +235,14 @@ func TestSignalsNeverChangeADenyOrRemoveAHoldOverRandomPolicies(t *testing.T) {
 		if r.Intn(3) == 0 {
 			pol.DenyIfUnattested = true
 		}
+		whenAbsent := ""
 		if r.Intn(4) != 0 {
-			pol.HoldIfSignal = &policy.SignalRule{
-				Name:           "action.risk_class",
-				Values:         values[:1+r.Intn(3)],
-				MinProbability: f64(float64(r.Intn(11)) / 10),
-			}
+			whenAbsent = []string{"", "allow", "hold"}[r.Intn(3)]
+			pol.HoldIfSignal = sweptRule(t, seed, values[:1+r.Intn(3)], float64(r.Intn(11))/10, whenAbsent)
 		}
-		set, err := policy.Compile([]policy.Policy{pol})
-		if err != nil {
-			t.Fatalf("seed %d: %v", seed, err)
-		}
-		e := New(set, []byte("signal-test-secret"))
+		ruleless := pol
+		ruleless.HoldIfSignal = nil
+		e, ref := sweptEngine(t, seed, pol), sweptEngine(t, seed, ruleless)
 
 		req := toolCallRequest()
 		req.EstCostUSD = float64(r.Intn(30))
@@ -253,13 +255,58 @@ func TestSignalsNeverChangeADenyOrRemoveAHoldOverRandomPolicies(t *testing.T) {
 		if r.Intn(2) == 0 {
 			req.AttestationMethod = "tpm"
 		}
+		switch r.Intn(4) {
+		case 0:
+			req.ToolCall = nil // the model path
+		case 1:
+			req.ToolCall = &ToolCall{Name: "s3.delete_object", Target: "s3://prod-backups", ArgumentsTruncated: true}
+		}
 		base := e.Decide(req)
 
+		withReq := req
 		for n := 1 + r.Intn(3); n > 0; n-- {
-			req.Signals = append(req.Signals, riskSignal(values[r.Intn(len(values))], float64(r.Intn(101))/100))
+			s := riskSignal(values[r.Intn(len(values))], float64(r.Intn(101))/100)
+			if r.Intn(3) == 0 {
+				s.Name = "request.complexity" // a signal no rule here reads
+			}
+			withReq.Signals = append(withReq.Signals, s)
 		}
-		with := e.Decide(req)
+		with := e.Decide(withReq)
 
+		for _, c := range []struct {
+			label    string
+			req      DecideRequest
+			got, ref DecideResponse
+		}{
+			{"no signals", req, base, ref.Decide(req)},
+			{"with signals", withReq, with, ref.Decide(withReq)},
+		} {
+			switch c.ref.Decision {
+			case Deny:
+				if c.got.Decision != Deny || c.got.Reason != c.ref.Reason {
+					t.Fatalf("seed %d, %s: the signal rule changed a deny: %s (%s) -> %s (%s)", seed, c.label, c.ref.Decision, c.ref.Reason, c.got.Decision, c.got.Reason)
+				}
+			case Hold:
+				if c.got.Decision != Hold || c.got.Reason != c.ref.Reason {
+					t.Fatalf("seed %d, %s: the signal rule changed a hold: %s (%s) -> %s (%s)", seed, c.label, c.ref.Decision, c.ref.Reason, c.got.Decision, c.got.Reason)
+				}
+			case Allow:
+				if c.got.Decision != Allow && c.got.Decision != Hold {
+					t.Fatalf("seed %d, %s: the signal rule turned an allow into %s (%s)", seed, c.label, c.got.Decision, c.got.Reason)
+				}
+			}
+		}
+		if req.ToolCall == nil && base.Decision != ref.Decide(req).Decision {
+			t.Fatalf("seed %d: a request with no tool call and no signal was %s (%s) where the policy without the rule says %s: absence held a model call",
+				seed, base.Decision, base.Reason, ref.Decide(req).Decision)
+		}
+		if whenAbsent == "hold" {
+			absentHolds++
+			if base.Decision == Hold && strings.Contains(base.Reason, "when_absent") {
+				absentHeld++
+			}
+			continue
+		}
 		switch {
 		case base.Decision == Deny:
 			if with.Decision != Deny || with.Reason != base.Reason {
@@ -275,6 +322,40 @@ func TestSignalsNeverChangeADenyOrRemoveAHoldOverRandomPolicies(t *testing.T) {
 			}
 		}
 	}
+	// The sweep must have exercised what it claims to: rules that hold on
+	// absence, and calls they actually held.
+	t.Logf("%d of 200 rules held on absence; %d of their requests were held for a missing signal", absentHolds, absentHeld)
+	if absentHolds < 20 || absentHeld < 5 {
+		t.Fatalf("the sweep drew %d rules holding on absence and %d holds from them: it measured too little", absentHolds, absentHeld)
+	}
+}
+
+// sweptRule decodes a hold_if_signal rule from the text an operator writes, with
+// when_absent when one is given.
+func sweptRule(t *testing.T, seed int64, values []string, min float64, whenAbsent string) *policy.SignalRule {
+	t.Helper()
+	doc := map[string]any{"name": "action.risk_class", "values": values, "min_probability": min}
+	if whenAbsent != "" {
+		doc["when_absent"] = whenAbsent
+	}
+	raw, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var r policy.SignalRule
+	if err := json.Unmarshal(raw, &r); err != nil {
+		t.Fatalf("seed %d: the rule %s did not decode: %v", seed, raw, err)
+	}
+	return &r
+}
+
+func sweptEngine(t *testing.T, seed int64, p policy.Policy) *Engine {
+	t.Helper()
+	set, err := policy.Compile([]policy.Policy{p})
+	if err != nil {
+		t.Fatalf("seed %d: %v", seed, err)
+	}
+	return New(set, []byte("signal-test-secret"))
 }
 
 // Signals vary per call (the arguments differ) so a decision that read one is

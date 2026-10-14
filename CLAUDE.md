@@ -776,11 +776,14 @@ decision outcome and every exported signature identical.
     a signal must not be able to turn an allow into a refusal. A policy that
     tries to make a signal deny is refused at load and at PUT with a sentence
     saying a signal can only hold: `deny_if_signal` in any value, and any key
-    inside `hold_if_signal` beyond `name`, `values` and `min_probability`
-    (`decision`, `action`, `on_match`, anything else), in the strict decoder
-    of a policy file and in the lax one the policy API uses alike. `name`,
-    `values` and `min_probability` are required, the last because a rule with
-    no threshold would hold on any probability. A decision under a policy that
+    inside `hold_if_signal` beyond `name`, `values`, `min_probability` and
+    the optional `when_absent` (`decision`, `action`, `on_match`, anything
+    else), in the strict decoder of a policy file and in the lax one the
+    policy API uses alike. `name`, `values` and `min_probability` are
+    required, the last because a rule with no threshold would hold on any
+    probability. A signal that never arrived reaches the same rule and the
+    same limit: under `when_absent: hold` it can hold a tool call, never deny
+    one (invariant 33). A decision under a policy that
     carries the rule is never `cacheable`: a signal belongs to one call's
     arguments, not to the agent and tool set an enforcement point's cache keys
     on, and that holds for the signal-driven hold, an approved allow, an allow
@@ -843,8 +846,9 @@ decision outcome and every exported signature identical.
     arguments exactly as received, `arguments_truncated`, and, since
     invariant 28, `digest`, the value an approval of the call is bound to),
     never the arguments themselves: they can carry customer data. The hash
-    ties a signal to the call it was about. `Decide` does not read `tool_call`; the signals
-    are what replay feeds back. `wardryx replay` puts the recorded signals to
+    ties a signal to the call it was about. Replay feeds back the signals and
+    the tool call's `name`, `target` and `arguments_truncated`: `Decide` reads
+    the name (invariant 29) and whether a call was there at all (invariant 33). `wardryx replay` puts the recorded signals to
     the PDP with the rest of the question, so a hold caused by a signal
     reproduces with whatever produced it unreachable; a record whose signals
     are not the shape the emitter writes is `unreadable`, by name, never
@@ -1074,3 +1078,88 @@ decision outcome and every exported signature identical.
     pre-fix row and hold card among them, and three non-faults, itself red
     when the attribution test is neutered. Scenarios in
     `features/approval-token-wire.feature`.)*
+
+33. **A tool call whose risk signal never arrived can be held, and only an
+    approval of that call lifts the hold.** `@claude 2026-10-14`: on the
+    2026-10-14 range runs a tool call padded past the enforcement point's
+    12 KiB argument cap reached `/v1/decide` marked `arguments_truncated` and
+    carrying no signal, because the classifying proxy does not ask about a call
+    it cannot read, and every `hold_if_signal` rule let it through: the rule
+    had nothing to read and rule 12 fell through to allow. The same "no signal,
+    so allow" follows when the producer's own budget is spent, when it times
+    out, and when it is down, and the first of these is the caller's choice.
+
+    `hold_if_signal` takes an optional `when_absent`. `allow`, the default, is
+    what the rule always did, and a policy that leaves the key out or writes
+    `allow` keeps its `PolicyVersion` byte for byte (Compile stores `allow` as
+    the default). `hold` holds a request that carries a `tool_call` and no
+    signal of the rule's name, of any value. A signal of that name with a value
+    the rule does not list, or under the threshold, is present: it is an
+    answer, and it holds nothing. A request with no `tool_call` (a model call,
+    where no call has been chosen to classify) is never held for a missing
+    signal. The hold is rule 12's, after every deny rule and the cost gate, so
+    invariant 25 stands as it was: it turns an allow into a hold and nothing
+    else. `when_absent: deny` is refused at load and at PUT with the sentence
+    that a signal can only hold; any value but `allow` or `hold` is refused,
+    and so is the key written with no value, as null or as anything but text,
+    so that a blank never reads as a choice.
+
+    Only an approval token bound to the call lifts a hold that an absent signal
+    caused (`approval.VerifyApprovalTokenBoundToCall`): the hold exists because
+    nobody could say what the call does. A token that binds no call, which
+    invariant 28 still accepts on a hold a present signal caused, holds again
+    here, and so does every token that is not bound to this call when any
+    matched rule held on absence, whichever rule the reason names. The hold
+    always records its call, so the token granted for it is always bound. The
+    reason names the rule's policy and signal, the tool call, and, when it was,
+    that its arguments were not sent. The record carries the tool call
+    (invariant 27) and replay feeds its name, target and truncated flag back,
+    so the hold reproduces with the producer unreachable. A decision under such
+    a rule is never cacheable (invariant 25).
+
+    Named limits. The default is `allow`, so a deployment is covered only where
+    its policy sets `hold`; this repository ships no policy, and a launcher
+    that writes one decides. With `hold`, every tool call the producer does not
+    answer waits for a person, so a producer outage holds every governed tool
+    call until it is back. The caller is believed about whether a call exists
+    (invariant 26): a request that leaves `tool_call` out is decided as a model
+    call. A padded call carries no arguments, so its digest binds only name,
+    target and the flag (invariant 28's limit for truncated arguments): every
+    padded call to the same tool and target in one run has the same digest, the
+    person who approves one approves it without seeing what it does, and the
+    token fits the next padded call too. Under the single-use default
+    (invariant 5) it lets exactly one of them through; with
+    `WARDRYX_APPROVAL_SINGLE_USE=false` it lets every one through for the
+    token's lifetime. A deployment that sets `when_absent: hold` must leave
+    single-use on. `TestAnApprovalOfOnePaddedCallCoversTheNextPaddedCallToTheSameTool`
+    pins this limit in both modes, so a change to it is seen.
+    *(test: `TestAToolCallWithNoSignalHoldsWhenTheRuleHoldsOnAbsence`,
+    `TestAModelCallWithNoToolCallIsNeverHeldForAMissingSignal`,
+    `TestAnAbsentSignalOnlyEverHolds`,
+    `TestASignalWithAnUnlistedValueIsPresentNotAbsent`,
+    `TestAnAbsentSignalHoldIsLiftedByATokenBoundToTheCall`,
+    `TestAnUnboundTokenDoesNotLiftAnAbsentSignalHold`,
+    `TestAnAbsentSignalHoldIsNeverCacheable`,
+    `TestSignalsNeverChangeADenyOrRemoveAHoldOverRandomPolicies` (200 seeds,
+    `when_absent` drawn at random, every decision compared with the same policy
+    without the rule) in `internal/pdp`;
+    `TestWhenAbsentTakesOnlyAllowOrHold`,
+    `TestAPolicyWithoutWhenAbsentKeepsItsPolicyVersion`,
+    `TestCompileChecksWhenAbsentOnARuleBuiltInGo` in `internal/policy`;
+    `TestATokenThatBindsNoCallIsRefusedWhereTheCallMustBeBound` in
+    `internal/approval`;
+    `TestATruncatedToolCallWithNoSignalHoldsWhenTheRuleHoldsOnAbsence` (the
+    broker's body over the cap, byte for byte),
+    `TestAReplayReproducesAnAbsentSignalHold`, `TestWhenAbsentOverThePolicyAPI`,
+    `TestAnApprovalOfOnePaddedCallCoversTheNextPaddedCallToTheSameTool` in
+    `internal/api`;
+    `TestARecordedAbsentSignalHoldReproducesFromTheRecordedToolCall` in
+    `internal/replay`; scenarios in `features/hold-when-signal-absent.feature`;
+    mutants named in the PR that added it, each caught: `when_absent` ignored,
+    a hold with no tool call, absence turned into a deny, an unlisted value read
+    as absent, a token that does not lift the hold, the absence check before the
+    deny rules, an unbound token lifting it, only the first holding rule
+    deciding the binding, the rule left out of the cache check, replay dropping
+    the tool call, `deny` accepted at load, `allow` not stored as the default,
+    the bound verifier accepting an unbound token, a blank value read as the
+    default)*
