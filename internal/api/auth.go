@@ -1,6 +1,8 @@
 package api
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"strings"
 )
@@ -20,6 +22,19 @@ const (
 type Principal struct {
 	Org  string
 	Role string
+	// KeyFP identifies which key authenticated the request: keyFingerprint of
+	// the presented bearer key, set by authenticate. It is never the key
+	// itself, so it is safe to record in an audit event.
+	KeyFP string
+}
+
+// keyFingerprint is the first 16 hex characters of SHA-256 over the bytes of
+// a bearer key. An operator recovers it with
+// printf %s "$KEY" | shasum -a 256 | cut -c1-16, so the audit record can be
+// matched to a key without the record ever holding one.
+func keyFingerprint(key string) string {
+	sum := sha256.Sum256([]byte(key))
+	return hex.EncodeToString(sum[:])[:16]
 }
 
 // ParseKeys parses "key:org[:role],key:org[:role],...". Entries missing a

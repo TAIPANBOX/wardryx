@@ -390,7 +390,11 @@ func (s *Server) authenticate(r *http.Request) (Principal, bool) {
 		return Principal{}, false
 	}
 	p, ok := s.keys[token]
-	return p, ok
+	if !ok {
+		return Principal{}, false
+	}
+	p.KeyFP = keyFingerprint(token)
+	return p, true
 }
 
 func (s *Server) requireAuth(next authedHandler) http.HandlerFunc {
@@ -1125,7 +1129,7 @@ func (s *Server) handlePutPolicy(w http.ResponseWriter, r *http.Request, princip
 	s.outage.recovered()
 	s.engine.SetPolicies(newSet)
 	s.emit(evPolicyUpdated, event.SeverityHigh, systemAgentID, "", nil,
-		map[string]any{"action": "put", "policy_id": id, "policy_version": newSet.Version(), "decided_by": principal.Org})
+		map[string]any{"action": "put", "policy_id": id, "policy_version": newSet.Version(), "decided_by": principal.Org, "key_fp": principal.KeyFP})
 
 	// Rendered from what was just written rather than read back from the
 	// store: the record is id, the body and now, all three in hand, and a
@@ -1190,7 +1194,7 @@ func (s *Server) handleDeletePolicy(w http.ResponseWriter, r *http.Request, prin
 	s.outage.recovered()
 	s.engine.SetPolicies(newSet)
 	s.emit(evPolicyUpdated, event.SeverityHigh, systemAgentID, "", nil,
-		map[string]any{"action": "delete", "policy_id": id, "policy_version": newSet.Version(), "decided_by": principal.Org})
+		map[string]any{"action": "delete", "policy_id": id, "policy_version": newSet.Version(), "decided_by": principal.Org, "key_fp": principal.KeyFP})
 
 	w.WriteHeader(http.StatusNoContent)
 }
