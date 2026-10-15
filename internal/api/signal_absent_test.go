@@ -31,7 +31,7 @@ func brokerBodyOverTheCap(token string) string {
 	if token != "" {
 		tok = `"` + token + `"`
 	}
-	return `{"agent_id":"` + brokerAgent + `","run_id":"mcp:` + brokerAgent + `","on_behalf_of":[],"tool_names":["ask"],"domains":[],"steps":0,"model":"","est_cost_usd":0.0,"attestation_method":null,"approval_token":` + tok + `,"chain_proven":false,"tool_call":{"name":"ask","arguments_truncated":true,"target":"typryx"}}`
+	return `{"agent_id":"` + brokerAgent + `","run_id":"mcp:` + brokerAgent + `","on_behalf_of":[],"tool_names":["ask"],"domains":[],"steps":0,"model":"","est_cost_usd":0.0,"attestation_method":null,"approval_token":` + tok + `,"chain_proven":false,"tool_call":{"name":"ask","arguments_truncated":true,"target":"ask-upstream"}}`
 }
 
 // labPolicy is the policy an operator writes for the lab agents, read from a
@@ -98,7 +98,7 @@ func TestATruncatedToolCallWithNoSignalHoldsWhenTheRuleHoldsOnAbsence(t *testing
 			shown, _ = a.Context["tool_call"].(map[string]any)
 		}
 	}
-	if shown["name"] != "ask" || shown["target"] != "typryx" || shown["arguments_truncated"] != true {
+	if shown["name"] != "ask" || shown["target"] != "ask-upstream" || shown["arguments_truncated"] != true {
 		t.Fatalf("the approval shows %#v, want the tool, the target and that its arguments were not sent", shown)
 	}
 
@@ -167,12 +167,12 @@ func TestWhenAbsentOverThePolicyAPI(t *testing.T) {
 // Single-use, the default, lets exactly one of them through; with single-use
 // off the token lets every one through for its lifetime.
 func TestAnApprovalOfOnePaddedCallCoversTheNextPaddedCallToTheSameTool(t *testing.T) {
-	first := pdp.ToolCall{Name: "ask", Target: "typryx", ArgumentsTruncated: true}
+	first := pdp.ToolCall{Name: "ask", Target: "ask-upstream", ArgumentsTruncated: true}
 	second := first
 	if first.Digest() != second.Digest() {
 		t.Fatal("two padded calls to one tool and target have different digests: the limit this test pins is gone, update the docs")
 	}
-	whole := pdp.ToolCall{Name: "ask", Target: "typryx", Arguments: json.RawMessage(`{"q":"a"}`)}
+	whole := pdp.ToolCall{Name: "ask", Target: "ask-upstream", Arguments: json.RawMessage(`{"q":"a"}`)}
 	if whole.Digest() == first.Digest() {
 		t.Fatal("control: a call with its arguments has the padded call's digest")
 	}

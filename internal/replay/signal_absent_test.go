@@ -36,7 +36,7 @@ func absentHoldEvent(version string, toolCall any) event.Event {
 }
 
 func recordedTruncatedCall() map[string]any {
-	return map[string]any{"name": "ask", "target": "typryx", "arguments_sha256": "00", "arguments_truncated": true, "digest": "00"}
+	return map[string]any{"name": "ask", "target": "ask-upstream", "arguments_sha256": "00", "arguments_truncated": true, "digest": "00"}
 }
 
 func TestARecordedAbsentSignalHoldReproducesFromTheRecordedToolCall(t *testing.T) {

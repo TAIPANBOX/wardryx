@@ -45,7 +45,7 @@ func brokerCall(sigs ...Signal) DecideRequest {
 		RunID:     "mcp:" + signalAgent,
 		ToolNames: []string{"ask"},
 		Signals:   sigs,
-		ToolCall:  &ToolCall{Name: "ask", Target: "typryx", ArgumentsTruncated: true},
+		ToolCall:  &ToolCall{Name: "ask", Target: "ask-upstream", ArgumentsTruncated: true},
 	}
 }
 
