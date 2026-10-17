@@ -55,9 +55,16 @@ type Approval struct {
 	RequestedAt time.Time
 	// DecidedAt is the zero time until an admin decides the approval.
 	DecidedAt time.Time
-	// DecidedBy is the admin-supplied identifier of who decided it; empty
-	// until decided.
+	// DecidedBy is who decided it: the principal that authenticated the
+	// decision, which internal/api writes as "key:" and the fingerprint of the
+	// bearer key, never the text the request carried. Empty until decided.
+	// Rows decided before 2026-10-17 hold whatever text the request sent.
 	DecidedBy string
+	// DecidedByLabel is the display text the request sent beside the
+	// decision (the API's decided_by field): what a console calls the person.
+	// It is the caller's claim and is never read as who decided. Empty when
+	// none was sent, and on rows decided before the field existed.
+	DecidedByLabel string
 	// Decision is "" while pending, then "grant" or "deny" once decided.
 	Decision string
 	// Context carries the rest of the held request (tool_names, model,
@@ -116,11 +123,11 @@ type Store interface {
 	// by org) filter the result themselves using Approval.Context.
 	ListApprovals(ctx context.Context) ([]Approval, error)
 
-	// DecideApproval records decision ("grant" or "deny") and decidedBy
-	// against the approval with the given id, and returns the updated
+	// DecideApproval records decision ("grant" or "deny"), decidedBy and
+	// label against the approval with the given id, and returns the updated
 	// approval. It returns ErrNotFound if no such approval exists, or
 	// ErrAlreadyDecided if it was already decided.
-	DecideApproval(ctx context.Context, id, decision, decidedBy string, decidedAt time.Time) (Approval, error)
+	DecideApproval(ctx context.Context, id, decision, decidedBy, label string, decidedAt time.Time) (Approval, error)
 
 	// TryRedeem atomically claims key if (and only if) it has not already
 	// been claimed, and reports whether this call was the one that did so:

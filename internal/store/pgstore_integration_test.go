@@ -120,7 +120,7 @@ func TestPgDecideApprovalGrantThenAlreadyDecided(t *testing.T) {
 	}
 
 	decidedAt := time.Now().UTC().Truncate(time.Microsecond)
-	got, err := p.DecideApproval(ctx, "ap_pg_decide", "grant", "alice@acme.example", decidedAt)
+	got, err := p.DecideApproval(ctx, "ap_pg_decide", "grant", "alice@acme.example", "", decidedAt)
 	if err != nil {
 		t.Fatalf("DecideApproval: %v", err)
 	}
@@ -128,14 +128,56 @@ func TestPgDecideApprovalGrantThenAlreadyDecided(t *testing.T) {
 		t.Errorf("DecideApproval result = %+v, want decided grant by alice", got)
 	}
 
-	if _, err := p.DecideApproval(ctx, "ap_pg_decide", "deny", "bob@acme.example", time.Now()); !errors.Is(err, ErrAlreadyDecided) {
+	if _, err := p.DecideApproval(ctx, "ap_pg_decide", "deny", "bob@acme.example", "", time.Now()); !errors.Is(err, ErrAlreadyDecided) {
 		t.Errorf("second DecideApproval = %v, want ErrAlreadyDecided", err)
+	}
+}
+
+// The Postgres twin of TestMemoryDecideApprovalKeepsTheLabelApartFromTheApprover:
+// the label column is written, read by GetApproval and ListApprovals, and an
+// empty label is stored as NULL and read back as empty.
+func TestPgDecideApprovalKeepsTheLabelApartFromTheApprover(t *testing.T) {
+	p := testDB(t)
+	ctx := context.Background()
+	for _, id := range []string{"ap_pg_l1", "ap_pg_l2"} {
+		if err := p.CreateApproval(ctx, Approval{ApprovalID: id, AgentID: "agent://x/bot", RunID: "r1", RequestedAt: time.Now().UTC()}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := p.DecideApproval(ctx, "ap_pg_l1", "grant", "key:0123456789abcdef", "alice", time.Now().UTC())
+	if err != nil || got.DecidedBy != "key:0123456789abcdef" || got.DecidedByLabel != "alice" {
+		t.Fatalf("DecideApproval = %+v, %v", got, err)
+	}
+	if _, err := p.DecideApproval(ctx, "ap_pg_l2", "deny", "key:fedcba9876543210", "", time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	list, err := p.ListApprovals(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seen := 0
+	for _, a := range list {
+		switch a.ApprovalID {
+		case "ap_pg_l1":
+			seen++
+			if a.DecidedByLabel != "alice" {
+				t.Errorf("listed ap_pg_l1 = %+v, want label alice", a)
+			}
+		case "ap_pg_l2":
+			seen++
+			if a.DecidedByLabel != "" || a.DecidedBy != "key:fedcba9876543210" {
+				t.Errorf("listed ap_pg_l2 = %+v, want no label", a)
+			}
+		}
+	}
+	if seen != 2 {
+		t.Fatalf("listed %d of the two approvals", seen)
 	}
 }
 
 func TestPgDecideApprovalNotFound(t *testing.T) {
 	p := testDB(t)
-	if _, err := p.DecideApproval(context.Background(), "does-not-exist", "grant", "alice", time.Now()); !errors.Is(err, ErrNotFound) {
+	if _, err := p.DecideApproval(context.Background(), "does-not-exist", "grant", "alice", "", time.Now()); !errors.Is(err, ErrNotFound) {
 		t.Errorf("DecideApproval(missing) = %v, want ErrNotFound", err)
 	}
 }

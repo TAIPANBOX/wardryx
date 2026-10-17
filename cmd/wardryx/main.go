@@ -223,6 +223,11 @@ func runServe(args []string) error {
 	for _, warn := range keyWarnings {
 		fmt.Fprintln(os.Stderr, warn)
 	}
+	// Which keys speak for no agent, and whether admins are confined to their
+	// org, said at start rather than left for a 403 to reveal.
+	for _, line := range api.KeyPosture(keys) {
+		fmt.Fprintln(os.Stderr, line)
+	}
 	// W1: a built-in admin key on every interface. Refusing here, before a
 	// store, an events writer, or an OTLP exporter is ever opened, would be
 	// cleaner, but those are already open by this point and their defers
@@ -603,7 +608,7 @@ func runApprovals(args []string) error {
 			status = a.Decision
 		}
 		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
-			a.ApprovalID, a.AgentID, a.RunID, approvalCall(a), status, orDash(a.DecidedBy), a.RequestedAt.UTC().Format("2006-01-02 15:04:05Z"))
+			a.ApprovalID, a.AgentID, a.RunID, approvalCall(a), status, approvalDecidedBy(a), a.RequestedAt.UTC().Format("2006-01-02 15:04:05Z"))
 	}
 	return tw.Flush()
 }
@@ -626,6 +631,16 @@ func approvalCall(a store.Approval) string {
 	default:
 		return name + " " + target
 	}
+}
+
+// approvalDecidedBy is who decided an approval, the key, and the label the
+// decision was sent with, quoted so that what a terminal prints is the text
+// and never an instruction to it. A dash while pending.
+func approvalDecidedBy(a store.Approval) string {
+	if a.DecidedByLabel == "" {
+		return orDash(a.DecidedBy)
+	}
+	return fmt.Sprintf("%s (%q)", orDash(a.DecidedBy), a.DecidedByLabel)
 }
 
 func orDash(s string) string {

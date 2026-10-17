@@ -82,11 +82,13 @@ Feature: An admin of one org cannot decide another org's approval
     And the approval is still pending afterwards
     # -> internal/api:TestAnAdminOfAnotherOrgCannotDecideAnApproval
 
-  Scenario: an approval with no organization on it is decided as before
+  Scenario: an approval with no organization on it needs a principal allowed across orgs
     Given an approval whose recorded context carries no organization at all
-    When any admin key tries to decide it
-    Then the decide succeeds, since org scoping only narrows what was already open
-    # -> internal/api:TestAnApprovalWithNoOrgInItsContextIsDecidedAsBefore
+    When an admin of one of two orgs tries to decide it, and when the admin of the only org does
+    Then the first is refused as though the approval did not exist, and the second succeeds as before
+    # Until 2026-10-17 any admin decided it (finding F-012); see features/approver-is-the-key.feature.
+    # -> internal/api:TestAnApprovalWithNoOrgNeedsAPrincipalAllowedAcrossOrgs
+    # -> internal/api:TestWithOneOrgItsAdminDecidesAnApprovalWithNoOrg
 
 Feature: A request body has a size an operator can name
 

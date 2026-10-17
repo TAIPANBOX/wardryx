@@ -16,6 +16,10 @@ CREATE TABLE IF NOT EXISTS approvals (
 ALTER TABLE approvals ADD COLUMN IF NOT EXISTS agent_id TEXT NOT NULL DEFAULT '';
 ALTER TABLE approvals ADD COLUMN IF NOT EXISTS run_id TEXT NOT NULL DEFAULT '';
 ALTER TABLE approvals ADD COLUMN IF NOT EXISTS context_json JSONB NOT NULL DEFAULT '{}'::jsonb;
+-- The display text a decision was sent with, kept apart from decided_by, which
+-- names the key that decided (F-012 of the 2026-10-17 review). NULL on every
+-- row decided before the column existed, and when no text was sent.
+ALTER TABLE approvals ADD COLUMN IF NOT EXISTS decided_by_label TEXT;
 
 CREATE INDEX IF NOT EXISTS approvals_agent_id ON approvals (agent_id);
 CREATE INDEX IF NOT EXISTS approvals_requested_at ON approvals (requested_at);

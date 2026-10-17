@@ -111,7 +111,7 @@ func TestMemoryDecideApprovalGrantThenAlreadyDecided(t *testing.T) {
 		t.Fatal(err)
 	}
 	decidedAt := time.Now().UTC()
-	got, err := m.DecideApproval(ctx, "ap_3", "grant", "alice@acme.example", decidedAt)
+	got, err := m.DecideApproval(ctx, "ap_3", "grant", "alice@acme.example", "", decidedAt)
 	if err != nil {
 		t.Fatalf("DecideApproval: %v", err)
 	}
@@ -119,16 +119,45 @@ func TestMemoryDecideApprovalGrantThenAlreadyDecided(t *testing.T) {
 		t.Errorf("DecideApproval result = %+v, want decided grant by alice", got)
 	}
 
-	if _, err := m.DecideApproval(ctx, "ap_3", "deny", "bob@acme.example", time.Now()); err == nil {
+	if _, err := m.DecideApproval(ctx, "ap_3", "deny", "bob@acme.example", "", time.Now()); err == nil {
 		t.Fatal("deciding an already-decided approval: expected ErrAlreadyDecided, got nil")
 	} else if !errors.Is(err, ErrAlreadyDecided) {
 		t.Errorf("deciding an already-decided approval: got %v, want ErrAlreadyDecided", err)
 	}
 }
 
+// The label a decision was sent with is kept beside the approver, and read
+// back by every read path; no label stays empty rather than becoming the
+// approver.
+func TestMemoryDecideApprovalKeepsTheLabelApartFromTheApprover(t *testing.T) {
+	m := NewMemory()
+	ctx := context.Background()
+	for _, id := range []string{"ap_l1", "ap_l2"} {
+		if err := m.CreateApproval(ctx, Approval{ApprovalID: id, AgentID: "agent://x/bot", RunID: "r1", RequestedAt: time.Now()}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := m.DecideApproval(ctx, "ap_l1", "grant", "key:0123456789abcdef", "alice", time.Now().UTC())
+	if err != nil || got.DecidedBy != "key:0123456789abcdef" || got.DecidedByLabel != "alice" {
+		t.Fatalf("DecideApproval = %+v, %v", got, err)
+	}
+	if read, _ := m.GetApproval(ctx, "ap_l1"); read.DecidedByLabel != "alice" || read.DecidedBy != "key:0123456789abcdef" {
+		t.Fatalf("GetApproval = %+v", read)
+	}
+	if _, err := m.DecideApproval(ctx, "ap_l2", "deny", "key:fedcba9876543210", "", time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	list, _ := m.ListApprovals(ctx)
+	for _, a := range list {
+		if a.ApprovalID == "ap_l2" && (a.DecidedByLabel != "" || a.DecidedBy != "key:fedcba9876543210") {
+			t.Fatalf("ListApprovals row = %+v, want no label", a)
+		}
+	}
+}
+
 func TestMemoryDecideApprovalNotFound(t *testing.T) {
 	m := NewMemory()
-	if _, err := m.DecideApproval(context.Background(), "missing", "grant", "alice", time.Now()); err == nil {
+	if _, err := m.DecideApproval(context.Background(), "missing", "grant", "alice", "", time.Now()); err == nil {
 		t.Fatal("DecideApproval(missing): expected an error, got nil")
 	} else if !errors.Is(err, ErrNotFound) {
 		t.Errorf("DecideApproval(missing): got %v, want ErrNotFound", err)

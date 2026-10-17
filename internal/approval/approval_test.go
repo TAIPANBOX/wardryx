@@ -236,7 +236,7 @@ func TestRequestAndDecideGrantMintsUsableToken(t *testing.T) {
 		t.Fatal("a freshly requested approval must be Pending")
 	}
 
-	decided, token, err := Decide(ctx, st, secret, held.ApprovalID, "grant", "alice@acme.example", DefaultTTL)
+	decided, token, err := Decide(ctx, st, secret, held.ApprovalID, "grant", "alice@acme.example", "", DefaultTTL)
 	if err != nil {
 		t.Fatalf("Decide: %v", err)
 	}
@@ -271,7 +271,7 @@ func TestDecideDenyReturnsNoToken(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Request: %v", err)
 	}
-	decided, token, err := Decide(ctx, st, []byte("secret"), held.ApprovalID, "deny", "alice", DefaultTTL)
+	decided, token, err := Decide(ctx, st, []byte("secret"), held.ApprovalID, "deny", "alice", "", DefaultTTL)
 	if err != nil {
 		t.Fatalf("Decide: %v", err)
 	}
@@ -290,7 +290,7 @@ func TestDecideGrantFailsClosedWithNoSecretAndLeavesApprovalPending(t *testing.T
 	if err != nil {
 		t.Fatalf("Request: %v", err)
 	}
-	if _, _, err := Decide(ctx, st, nil, held.ApprovalID, "grant", "alice", DefaultTTL); !errors.Is(err, ErrNoSecret) {
+	if _, _, err := Decide(ctx, st, nil, held.ApprovalID, "grant", "alice", "", DefaultTTL); !errors.Is(err, ErrNoSecret) {
 		t.Fatalf("Decide(grant) with no secret = %v, want ErrNoSecret", err)
 	}
 	// The refusal must happen before the store is touched: no
@@ -311,7 +311,7 @@ func TestDecideRejectsUnknownDecisionValue(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Request: %v", err)
 	}
-	if _, _, err := Decide(ctx, st, []byte("secret"), held.ApprovalID, "maybe", "alice", DefaultTTL); !errors.Is(err, ErrInvalidDecision) {
+	if _, _, err := Decide(ctx, st, []byte("secret"), held.ApprovalID, "maybe", "alice", "", DefaultTTL); !errors.Is(err, ErrInvalidDecision) {
 		t.Errorf("Decide with an unknown decision = %v, want ErrInvalidDecision", err)
 	}
 }
@@ -324,10 +324,10 @@ func TestDecideTwiceFails(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Request: %v", err)
 	}
-	if _, _, err := Decide(ctx, st, secret, held.ApprovalID, "grant", "alice", DefaultTTL); err != nil {
+	if _, _, err := Decide(ctx, st, secret, held.ApprovalID, "grant", "alice", "", DefaultTTL); err != nil {
 		t.Fatalf("first Decide: %v", err)
 	}
-	if _, _, err := Decide(ctx, st, secret, held.ApprovalID, "deny", "bob", DefaultTTL); !errors.Is(err, store.ErrAlreadyDecided) {
+	if _, _, err := Decide(ctx, st, secret, held.ApprovalID, "deny", "bob", "", DefaultTTL); !errors.Is(err, store.ErrAlreadyDecided) {
 		t.Errorf("second Decide = %v, want store.ErrAlreadyDecided", err)
 	}
 }
@@ -335,7 +335,7 @@ func TestDecideTwiceFails(t *testing.T) {
 func TestDecideUnknownApprovalID(t *testing.T) {
 	ctx := context.Background()
 	st := store.NewMemory()
-	if _, _, err := Decide(ctx, st, []byte("secret"), "does-not-exist", "grant", "alice", DefaultTTL); !errors.Is(err, store.ErrNotFound) {
+	if _, _, err := Decide(ctx, st, []byte("secret"), "does-not-exist", "grant", "alice", "", DefaultTTL); !errors.Is(err, store.ErrNotFound) {
 		t.Errorf("Decide(unknown id) = %v, want store.ErrNotFound", err)
 	}
 }

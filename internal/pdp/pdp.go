@@ -72,6 +72,12 @@ type DecideRequest struct {
 	// AgentID is the requesting agent's agent:// URI. Matched against each
 	// loaded policy's Target glob.
 	AgentID string
+	// Org is the organisation the decision is asked in: the org of the bearer
+	// key that asked (internal/api sets it from the authenticated principal,
+	// never from the body). A policy with an org governs only the decisions
+	// asked in that org; one without applies across orgs (policy.Set.MatchIn).
+	// Empty, as the offline check asks, reads the policies with no org only.
+	Org string
 	// RunID identifies the run this action belongs to. Part of the
 	// approval_token binding.
 	RunID string
@@ -367,7 +373,7 @@ func (e *Engine) Decide(req DecideRequest) DecideResponse {
 		}
 	}
 
-	matched := policies.Match(req.AgentID)
+	matched := policies.MatchIn(req.AgentID, req.Org)
 	// Set once, before any rule runs, so every return path below --
 	// whichever rule ends up firing -- carries the same answer. See the
 	// field doc comment for why this depends on the matched policy set as

@@ -48,7 +48,7 @@ func (brokenStore) GetApproval(context.Context, string) (store.Approval, error) 
 func (brokenStore) ListApprovals(context.Context) ([]store.Approval, error) {
 	return nil, errStoreIsDown
 }
-func (brokenStore) DecideApproval(context.Context, string, string, string, time.Time) (store.Approval, error) {
+func (brokenStore) DecideApproval(context.Context, string, string, string, string, time.Time) (store.Approval, error) {
 	return store.Approval{}, errStoreIsDown
 }
 func (brokenStore) TryRedeem(context.Context, string) (bool, error) { return false, errStoreIsDown }

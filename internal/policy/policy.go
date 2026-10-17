@@ -26,6 +26,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"unicode"
 
 	"gopkg.in/yaml.v3"
 )
@@ -40,6 +41,21 @@ type Policy struct {
 	Name string `yaml:"name,omitempty" json:"name,omitempty"`
 	// Target is the agent:// glob this policy applies to. Required.
 	Target string `yaml:"target" json:"target"`
+	// Org is the organisation this policy belongs to, the org a WARDRYX_KEYS
+	// entry names. A policy with an org governs only the decisions that org's
+	// keys ask for (see Set.MatchIn); one without, the default, applies across
+	// orgs, to every decision whichever key asked, which is what every policy
+	// did before the field existed. Omitted when empty, so a policy without it
+	// keeps its PolicyVersion byte for byte. An org with surrounding space or
+	// a control character is refused at load: it would match no key, and a
+	// blank one would read as across orgs.
+	//
+	// @claude 2026-10-17, F-012 of the agent-security review: until this field,
+	// a policy had no org, so the admin of one org could write a rule that
+	// changed another org's decisions. internal/api stamps the writer's org on
+	// a policy an org admin writes and lets only a principal allowed across
+	// orgs write one without.
+	Org string `yaml:"org,omitempty" json:"org,omitempty"`
 	// DenyTool lists tool names this policy refuses outright.
 	DenyTool []string `yaml:"deny_tool,omitempty" json:"deny_tool,omitempty"`
 	// AllowTool is the closed list of tool names the agents this policy matches
@@ -362,6 +378,27 @@ func (s *Set) Match(agentID string) []Policy {
 	}
 	return out
 }
+
+// MatchIn returns the policies Match returns that govern a decision asked in
+// org: every one with no org, which applies across orgs, and every one whose
+// org is org. A policy of another org is never returned, so the admin of one
+// org cannot reach the decisions of another. An empty org (a caller that asks
+// in no org, such as the offline check) gets the policies with no org only.
+func (s *Set) MatchIn(agentID, org string) []Policy {
+	var out []Policy
+	for _, p := range s.Match(agentID) {
+		if p.Org == "" || p.Org == org {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// CompileGlob compiles an agent:// glob in Target's syntax into an anchored
+// matcher, the one Match uses. internal/api reads the agent patterns a bearer
+// key may speak for through it, so a key's patterns and a policy's target
+// mean the same thing.
+func CompileGlob(pattern string) (*regexp.Regexp, error) { return compileGlob(pattern) }
 
 // Len reports how many policies are loaded.
 func (s *Set) Len() int {
@@ -722,9 +759,32 @@ func refuseBlankAllowModels(p Policy) error {
 	return nil
 }
 
+// refuseMalformedOrg refuses an org that could never be the org of a key, or
+// that reads as no org: one with surrounding space (WARDRYX_KEYS trims every
+// org, so it would match no key and the policy would silently govern nothing),
+// one that is only space (it would read as across orgs), and one holding a
+// control character.
+func refuseMalformedOrg(p Policy) error {
+	if p.Org == "" {
+		return nil
+	}
+	if strings.TrimSpace(p.Org) != p.Org {
+		return fmt.Errorf("policy %q: org %q has surrounding space, so it would match no key; write the org as WARDRYX_KEYS names it", p.Name, p.Org)
+	}
+	for _, r := range p.Org {
+		if unicode.IsControl(r) {
+			return fmt.Errorf("policy %q: org must not contain a control character", p.Name)
+		}
+	}
+	return nil
+}
+
 func validate(p Policy) error {
 	if p.Target == "" {
 		return fmt.Errorf("policy %q: target is required", p.Name)
+	}
+	if err := refuseMalformedOrg(p); err != nil {
+		return err
 	}
 	if p.RequireHumanAboveUSD != nil && *p.RequireHumanAboveUSD < 0 {
 		return fmt.Errorf("policy %q: require_human_above_usd must not be negative", p.Name)
@@ -765,7 +825,7 @@ func validate(p Policy) error {
 
 // normalize returns a defensive copy of policies with Name defaulted, and
 // DenyTool, AllowTool, AllowModels and AllowDomains deduplicated, sorted, and stripped of blank entries,
-// then sorts the policies themselves by (target, name). The result is
+// then sorts the policies themselves by (target, name, org). The result is
 // deterministic regardless of the input's source-file or field order, which
 // is what makes computeVersion stable across equivalent policy sets.
 func normalize(policies []Policy) []Policy {
@@ -788,7 +848,10 @@ func normalize(policies []Policy) []Policy {
 		if out[i].Target != out[j].Target {
 			return out[i].Target < out[j].Target
 		}
-		return out[i].Name < out[j].Name
+		if out[i].Name != out[j].Name {
+			return out[i].Name < out[j].Name
+		}
+		return out[i].Org < out[j].Org
 	})
 	return out
 }

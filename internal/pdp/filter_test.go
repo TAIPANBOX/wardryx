@@ -163,6 +163,8 @@ func TestFilterAgreesWithDecideOnEveryToolAlone(t *testing.T) {
 	const agentUnderTest = "agent://acme/bot"
 	targets := []string{"agent://acme/*", "agent://acme/bot", "agent://other/*"}
 	toolPool := []string{"shell", "email_send", "search", "delete_account", "http_get"}
+	// "" is a policy across orgs, and a request asked in no org.
+	orgPool := []string{"", "acme", "globex"}
 	caseVariants := []func(string) string{
 		func(s string) string { return s },
 		func(s string) string { return " " + s + " " },
@@ -205,10 +207,14 @@ func TestFilterAgreesWithDecideOnEveryToolAlone(t *testing.T) {
 			policies = append(policies, policy.Policy{
 				Name:      fmt.Sprintf("p%d", i),
 				Target:    target,
+				Org:       orgPool[rng.Intn(len(orgPool))],
 				DenyTool:  denyTool,
 				AllowTool: allowTool,
 			})
 		}
+		// The org the offer and the decision are asked in: a policy of
+		// another org must be skipped by both alike.
+		askedIn := orgPool[rng.Intn(len(orgPool))]
 
 		set, err := policy.Compile(policies)
 		if err != nil {
@@ -219,6 +225,7 @@ func TestFilterAgreesWithDecideOnEveryToolAlone(t *testing.T) {
 		for _, tool := range toolPool {
 			decideResp := engine.Decide(DecideRequest{
 				AgentID:   agentUnderTest,
+				Org:       askedIn,
 				RunID:     "r",
 				ToolNames: []string{tool},
 			})
@@ -226,6 +233,7 @@ func TestFilterAgreesWithDecideOnEveryToolAlone(t *testing.T) {
 
 			filterResp := engine.Filter(FilterRequest{
 				AgentID:   agentUnderTest,
+				Org:       askedIn,
 				RunID:     "r",
 				ToolNames: []string{tool},
 			})

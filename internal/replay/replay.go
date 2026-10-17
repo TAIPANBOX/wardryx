@@ -330,8 +330,18 @@ func question(ev event.Event) (pdp.DecideRequest, string, bool, error) {
 		return pdp.DecideRequest{}, "", false, err
 	}
 
+	// The org the decision was asked in decides which policies applied: a
+	// policy with an org governs that org's decisions only. Optional, because
+	// a record from before the field carries none, and every policy then
+	// applied across orgs, which is what asking in no org reads.
+	org, err := recordedOrg(ev.Data)
+	if err != nil {
+		return pdp.DecideRequest{}, "", false, err
+	}
+
 	return pdp.DecideRequest{
 		AgentID:           ev.AgentID,
+		Org:               org,
 		RunID:             ev.RunID,
 		OnBehalfOf:        ev.OnBehalfOf,
 		ToolNames:         textList(toolNames),
@@ -345,6 +355,20 @@ func question(ev event.Event) (pdp.DecideRequest, string, bool, error) {
 		Signals:           signals,
 		ToolCall:          toolCall,
 	}, v, tokenRequired == true, nil
+}
+
+// recordedOrg reads back the org one event recorded. Absent is none; anything
+// but text is not a question that can be put again.
+func recordedOrg(data map[string]any) (string, error) {
+	v, ok := data["org"]
+	if !ok || v == nil {
+		return "", nil
+	}
+	org, ok := v.(string)
+	if !ok {
+		return "", fmt.Errorf("the recorded org is not text")
+	}
+	return org, nil
 }
 
 // recordedSignals reads back the signals one event recorded. Absent is none; a

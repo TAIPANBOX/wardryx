@@ -57,6 +57,12 @@ jobs:
       - name: the 1.0 compatibility surface is present in the code and rendered
         run: ./scripts/compat-surface.sh
 
+      # F-001 and F-012 of the 2026-10-17 review: the agent, the org and the
+      # approver come from the authenticated key. A handler that drops the
+      # check still answers 200 with a correct-looking decision.
+      - name: the agent, the org and the approver come from the key
+        run: ./scripts/agent-is-bound-to-its-key.sh
+
       # Last, because it mutates tracked files and restores them. It needs a
       # clean tree and says so plainly, so it also reports any earlier step
       # that starts writing into the checkout.

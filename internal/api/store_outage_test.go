@@ -64,7 +64,7 @@ func (refusingStore) GetApproval(context.Context, string) (store.Approval, error
 func (refusingStore) ListApprovals(context.Context) ([]store.Approval, error) {
 	return nil, errRefused("list approvals")
 }
-func (refusingStore) DecideApproval(context.Context, string, string, string, time.Time) (store.Approval, error) {
+func (refusingStore) DecideApproval(context.Context, string, string, string, string, time.Time) (store.Approval, error) {
 	return store.Approval{}, errRefused("decide approval")
 }
 func (refusingStore) TryRedeem(context.Context, string) (bool, error) {
@@ -102,7 +102,7 @@ func (hangingStore) GetApproval(ctx context.Context, _ string) (store.Approval, 
 func (hangingStore) ListApprovals(ctx context.Context) ([]store.Approval, error) {
 	return nil, hang(ctx, "list approvals")
 }
-func (hangingStore) DecideApproval(ctx context.Context, _, _, _ string, _ time.Time) (store.Approval, error) {
+func (hangingStore) DecideApproval(ctx context.Context, _, _, _, _ string, _ time.Time) (store.Approval, error) {
 	return store.Approval{}, hang(ctx, "decide approval")
 }
 func (hangingStore) TryRedeem(ctx context.Context, _ string) (bool, error) {
@@ -403,7 +403,7 @@ func (writeRefusingStore) DeletePolicy(context.Context, string) error {
 // answer is 503 and the live set is exactly what it was.
 func TestAWriteThatFailsAfterTheListAnswers503AndLeavesTheLiveSetAlone(t *testing.T) {
 	mem := store.NewMemory()
-	if err := mem.PutPolicy(context.Background(), "existing", policy.Policy{Name: "existing", Target: "agent://acme.example/ops/*"}, time.Now()); err != nil {
+	if err := mem.PutPolicy(context.Background(), "existing", policy.Policy{Name: "existing", Target: "agent://acme.example/ops/*", Org: "acme"}, time.Now()); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
 	srv := newServerOnStore(t, writeRefusingStore{mem})

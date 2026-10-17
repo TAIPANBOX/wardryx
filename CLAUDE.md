@@ -67,6 +67,7 @@ go build ./...
 ./scripts/readme-numbers.sh
 ./scripts/scenarios-bind-to-tests.sh
 ./scripts/compat-surface.sh      # invariant 19; compat/1.0.json against the code, COMPATIBILITY.md rendered
+./scripts/agent-is-bound-to-its-key.sh  # invariants 36 to 38
 ./scripts/gates-have-teeth.sh   # invariant 12; needs a clean tree
 ```
 
@@ -141,7 +142,9 @@ an absent invariant.
    race-safety suites in `internal/store` for both backends)*
 6. **`POST /v1/approvals/{id}/decide` is admin-only.** Granting an approval is
    the privileged operation in this service; every widening of who may call it
-   is a security decision, not a routing change.
+   is a security decision, not a routing change. The admin roles are `admin`,
+   confined to its own org when there is more than one, and `cross-org-admin`
+   (invariant 37).
    *(test: `TestApprovalDecideRequiresAdminRole`, and
    `TestListPoliciesRequiresAdmin` for the other admin-only route)*
 7. **A hold is stateless.** Do not add server-side session state to carry a
@@ -614,6 +617,13 @@ decision outcome and every exported signature identical.
     `TestFilterToolsAnswersThePartition`, `TestFilterToolsRefusesABodyOverTheCap`,
     `TestFilterToolsRefusesAMissingAgentID`, `TestFilterToolsSurvivesHostileInput`
     in `internal/api`)*
+
+    Since 2026-10-17 the route is bound like `/v1/decide` (invariant 36): a
+    request naming an agent outside the key's allowance is a 403 and is
+    recorded as an `agent_assertion_refused` event. That event records a
+    refusal, not a filter answer, so "no event records a filter answer" still
+    holds. `Filter` reads policies through the same org rule as `Decide`
+    (invariant 38), and the 200-seed agreement sweep draws orgs.
 
 22. **An explicit zero on `require_human_above_usd` or `deny_above_usd` is a
     real threshold or ceiling, never silently the same as the field being
@@ -1246,3 +1256,116 @@ decision outcome and every exported signature identical.
 
 35. **A policy change names the key that made it, as a fingerprint, and never holds the key.** `@claude 2026-10-15`, a design fixed by the supervisor session of this audit. A `policy_updated` event from a `PUT` or a `DELETE` of `/v1/policies/{id}` carries `key_fp`: the first 16 hex characters of SHA-256 over the bearer key that authenticated the write, computed at authentication from the presented key and held on the `Principal`. `decided_by` stays the organisation, unchanged for current readers. The raw key is never stored, logged or emitted, and the field is added only to those two emits; the emit stays fail-open and writes only when an events file is configured. An operator matches a fingerprint to a key with `printf %s "$KEY" | shasum -a 256 | cut -c1-16`. Named limits: the fingerprint identifies the key, not the person holding it, and it is a 64-bit truncation of the hash.
    *(test: `TestAPolicyPutRecordsTheFingerprintOfTheKeyThatMadeIt`, `TestAPolicyDeleteRecordsTheFingerprintOfTheKeyThatMadeIt`, `TestTheRawKeyNeverReachesTheEventFile`, `TestTheRecordedFingerprintIsSixteenLowerCaseHexAndNotTheEmptyKeys`, `TestTwoKeysOfOneOrganisationAreToldApart`, `TestTheDecidedByFieldStillNamesTheOrganisation` in `internal/api`; scenarios in `features/policy-change-names-its-key.feature`; the mutants named in the report, each caught by one of these)*
+
+36. **The agent a decision is about is bound to the key that asks.**
+    `@decided 2026-10-17` (paraphrased): close the agent-security findings of
+    the 2026-10-17 review, starting with the defaults and the small fixes.
+    Finding F-001: `/v1/decide` took `agent_id` from the body and checked only
+    that it was not empty, so any key could ask in any agent's name and get
+    that agent's decisions and approvals (live run L3, P2). `@claude
+    2026-10-17`, the shape, from the review's brief: a `WARDRYX_KEYS` entry
+    may list, after the role, the agents the key speaks for
+    (`key:org:role:pattern|pattern`, each a glob in a policy target's syntax,
+    compiled once by `api.New`). `speaksFor` is the rule: a listed key speaks
+    for exactly its patterns; an unlisted `cross-org-admin` for any agent; an
+    unlisted `pep` (the enforcement point, which authenticated the agent first)
+    or `admin` (which can rewrite the rules that decide) for any agent of its
+    own org, which wardryx can tell only when every key belongs to one org,
+    so with more than one org they speak for none until listed; an unlisted
+    `viewer`, or a role this service does not know, for none. The check runs
+    in `handleDecide` and `handleFilterTools` before anything else in the body
+    is read: a refused request is a 403 that echoes nothing, reaches no rule,
+    holds nothing and reads no approval token, so it cannot spend one, and
+    emits one `agent_assertion_refused` event whose `agent_id` is wardryx's
+    own (`agent://wardryx.internal/auth/agent-binding`) and whose data names
+    the route, the asserted agent and run, and the key's org, role and
+    fingerprint, never the key. `serve` prints at start every key that speaks
+    for no agent, by fingerprint (`KeyPosture`). Named limits: wardryx does not
+    know which trust domains an org owns, so an unlisted `pep` key of a
+    one-org deployment speaks for any agent id; `chain_proven` and
+    `attestation_method` stay the enforcement point's word, believed as
+    before (invariant 13), and nothing here widens them; and an existing
+    gateway key with the `viewer` role must become `pep`.
+    *(gate: `scripts/agent-is-bound-to-its-key.sh`, six cases in
+    `gates-have-teeth.sh`; test: `TestAKeyThatListsItsAgentsCannotAskForAnother`,
+    `TestAKeyThatListsItsAgentsAsksForThemAsBefore`,
+    `TestAnAgentPatternCoversOnlyTheAgentsUnderIt`,
+    `TestAViewerKeyWithNoListSpeaksForNoAgent`,
+    `TestAPepKeySpeaksForAnyAgentWhenThereIsOneOrg`,
+    `TestWithTwoOrgsAnUnlistedKeySpeaksForNoAgent`,
+    `TestACrossOrgAdminKeySpeaksForAnyAgent`,
+    `TestARefusedRequestSpendsNoApprovalToken`,
+    `TestARefusalIsRecordedAndNamesTheKeyByFingerprint`,
+    `TestFilterToolsIsBoundToTheKeyLikeDecide`,
+    `TestParseKeysReadsAnAgentListAfterTheRole`,
+    `TestKeyPostureNamesEveryKeyThatSpeaksForNoAgent`,
+    `TestTheDevkeySpeaksForAnyAgent` in `internal/api`; scenarios in
+    `features/agent-bound-to-its-key.feature`)*
+
+37. **The approver an approval records is the key that decided it, and an
+    approval with no org needs a principal allowed across orgs.** Finding
+    F-012, its approval half (live run L3, P3): `decided_by` was the free text
+    the request sent, recorded as who decided. `@claude 2026-10-17`, the
+    shape: the approval's `decided_by` is `approverID`, `key:` and the
+    fingerprint of the bearer key (invariant 35's `key_fp`), in the store, in
+    `GET /v1/approvals`, in `wardryx approvals` and in the `approval_granted`
+    and `approval_denied` events, which also carry `key_fp`. The text a
+    request sends in `decided_by` is optional and is kept beside it as
+    `decided_by_label` (a column added with `ADD COLUMN IF NOT EXISTS`, NULL
+    when none was sent), at most 256 bytes with no control character and no
+    bidirectional override, refused with a 400 that does not echo it. A
+    principal is allowed across orgs when it has the `cross-org-admin` role,
+    or is an `admin` and every key belongs to one org (a `cross-org-admin` is
+    not counted as an org): only such a principal decides an approval with no
+    org, or of another org, and lists the approvals of every org. Named
+    limits: rows decided before this change hold the text as `decided_by`; a
+    fingerprint names a key, not the person holding it.
+    *(gate: `scripts/agent-is-bound-to-its-key.sh`; test:
+    `TestTheApproverRecordedIsTheKeyNotTheText`,
+    `TestTheTextSentIsKeptAsALabelBesideTheApprover`,
+    `TestAnApprovalDecisionNeedsNoLabel`,
+    `TestAHostileLabelIsRefusedAndTheApprovalStaysPending`,
+    `TestAnApprovalWithNoOrgNeedsAPrincipalAllowedAcrossOrgs`,
+    `TestWithOneOrgItsAdminDecidesAnApprovalWithNoOrg`,
+    `TestACrossOrgAdminListsTheApprovalsOfEveryOrg` in `internal/api`;
+    `TestMemoryDecideApprovalKeepsTheLabelApartFromTheApprover` and, in CI's
+    integration job, `TestPgDecideApprovalKeepsTheLabelApartFromTheApprover`
+    in `internal/store`; `TestTheApprovalsListShowsTheApproverAndTheLabel` in
+    `cmd/wardryx`; scenarios in `features/approver-is-the-key.feature`)*
+
+38. **A policy written by an org's admin governs that org's decisions only.**
+    Finding F-012, its policy half (live run L3, P6): a policy had no org, so
+    the admin of one org wrote a deny that changed another org's decisions.
+    `@claude 2026-10-17`, the shape: `policy.Policy` has `org` (omitted when
+    empty, so a policy without it keeps its `PolicyVersion` byte for byte).
+    `Decide` and `Filter` read `policy.Set.MatchIn(agent, org)`: a policy with
+    an org governs only a decision asked in that org, the org of the key that
+    asked (`DecideRequest.Org`, set from the principal, never the body); one
+    without applies across orgs, as every policy did before. An org admin's
+    `PUT` stamps its own org, refuses a body naming another (403), and may not
+    replace or delete a policy across orgs or of another org (403, and another
+    org's policy reads as 404 on GET, list and DELETE); a principal allowed
+    across orgs (invariant 37) writes any. `/v1/status` counts the policies
+    that govern the caller. Every decision event records `org`, and replay
+    feeds it back; a record from before the field asks in no org, where only
+    policies across orgs apply, which is every policy that then existed. An
+    org with surrounding space or a control character is refused at load.
+    Named limits: `wardryx check` asks in no org, so it applies only policies
+    across orgs; a policy id is one namespace across orgs, so a refused `PUT`
+    tells a caller that an id is taken; a rollback to a build before this one
+    reads a stored `org` with a decoder that drops it, which widens that
+    policy to every org, so remove org-scoped policies first.
+    *(gate: `scripts/agent-is-bound-to-its-key.sh`; test:
+    `TestOneOrgsAdminCannotChangeAnotherOrgsDecisions`,
+    `TestAnOrgAdminCannotWriteForAnotherOrgOrAcrossOrgs`,
+    `TestAnOrgAdminNeitherSeesNorRemovesAnotherOrgsPolicy`,
+    `TestACrossOrgAdminWritesAPolicyThatAppliesAcrossOrgs`,
+    `TestWithOneOrgItsAdminWritesPoliciesAsBefore`,
+    `TestAnOrgScopedDenialReplaysFromTheRecord`,
+    `TestDecisionInputCoversEveryDecideRequestField` in `internal/api`;
+    `TestAPolicyWithAnOrgAppliesOnlyToThatOrgsDecisions`,
+    `TestFilterAgreesWithDecideOnEveryToolAlone` in `internal/pdp`;
+    `TestAPolicyWithoutAnOrgKeepsItsPolicyVersion` (golden values measured on
+    the tree before the field), `TestABlankOrPaddedOrgIsRefusedAtLoad` in
+    `internal/policy`; `TestARecordedOrgIsFedBackToThePDP` in
+    `internal/replay`; scenarios in `features/policy-belongs-to-an-org.feature`)*

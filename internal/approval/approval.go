@@ -548,8 +548,10 @@ func Request(ctx context.Context, st store.Store, agentID, runID string, tools [
 // not merely the policy threshold it exceeded -- via MintApprovalToken; if
 // secret is empty the grant is refused before anything is written, per this
 // package's fail-closed rule -- there is no such thing as a recorded grant
-// with no usable token.
-func Decide(ctx context.Context, st store.Store, secret []byte, id, decision, decidedBy string, ttl time.Duration) (approved store.Approval, token string, err error) {
+// with no usable token. decidedBy is who decided, the authenticated
+// principal; label is the display text the request sent, recorded beside it
+// and never in its place.
+func Decide(ctx context.Context, st store.Store, secret []byte, id, decision, decidedBy, label string, ttl time.Duration) (approved store.Approval, token string, err error) {
 	if decision != "grant" && decision != "deny" {
 		return store.Approval{}, "", fmt.Errorf("%w: got %q", ErrInvalidDecision, decision)
 	}
@@ -569,7 +571,7 @@ func Decide(ctx context.Context, st store.Store, secret []byte, id, decision, de
 		}
 	}
 
-	a, err := st.DecideApproval(ctx, id, decision, decidedBy, time.Now().UTC())
+	a, err := st.DecideApproval(ctx, id, decision, decidedBy, label, time.Now().UTC())
 	if err != nil {
 		return store.Approval{}, "", err
 	}

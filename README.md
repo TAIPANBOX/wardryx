@@ -6,7 +6,7 @@
 
 [![CI](https://github.com/TAIPANBOX/wardryx/actions/workflows/ci.yml/badge.svg)](https://github.com/TAIPANBOX/wardryx/actions/workflows/ci.yml)
 ![Go](https://img.shields.io/badge/go-1.27-00ADD8.svg)
-![tests](https://img.shields.io/badge/tests-478-brightgreen.svg)
+![tests](https://img.shields.io/badge/tests-511-brightgreen.svg)
 ![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)
 ![Status](https://img.shields.io/badge/status-deterministic%20PDP-2dd4bf.svg)
 
@@ -226,6 +226,8 @@ Response (a hold, in this example, because `send_wire_transfer`'s cost is above 
 6. wardryx  -> {"decision": "allow"}                             -> agent
 ```
 
+**Who decided is the key, not the text.** The approval records as `decided_by` the key that authenticated the decide call, written `key:` and the first 16 hex characters of SHA-256 over the bearer key (the same fingerprint `policy_updated` carries as `key_fp`), never the text the request sent. A `decided_by` in the request body is optional display text, at most 256 bytes with no control character and no bidirectional override; it is kept beside the approver as `decided_by_label` in `GET /v1/approvals`, in `wardryx approvals` and in the `approval_granted` and `approval_denied` events, and it is never read as who decided. An approval belongs to the org of the key that made the hold. An admin decides the approvals of its own org; an approval with no org (a row written before org scoping) needs a principal allowed across orgs, see [Which agents a key speaks for](#which-agents-a-key-speaks-for).
+
 Wardryx reads the token from the `approval_token` field of the `/v1/decide` body and from nowhere else; no header carries it. An agent behind TokenFuse does not call `/v1/decide` itself: it resubmits its original request to the gateway with the `x-fuse-approval-token` header, and TokenFuse puts that value in the `approval_token` field of its own `/v1/decide` call.
 
 No connection is ever parked waiting for the human: the agent (or its orchestrator) polls `GET /v1/approvals` or is notified out of band, and the eventual grant is proven by the signed token, not by wardryx remembering an open request. This mirrors the stateless kill-switch pattern already used elsewhere in the TAIPANBOX stack (TokenFuse).
@@ -254,10 +256,12 @@ One event per hold per process lifetime, so an approval nobody answers all after
 
 ## Policy-as-code
 
+**A policy belongs to an org.** A policy may carry `org`, the org a `WARDRYX_KEYS` entry names. A policy with an org governs only the decisions that org's keys ask for; a policy without one applies across orgs, to every decision, which is what every policy did before the field existed (and why a policy without it keeps its `policy_version`). A policy an admin writes through `PUT /v1/policies/{id}` belongs to the admin's org, whatever the body says; a body naming another org is a `403`. A policy across orgs, and a policy of another org, can be written, replaced or deleted only by a principal allowed across orgs. An admin lists and reads its own org's policies and those across orgs; another org's policy reads as `404`. Every decision event records the `org` it was asked in, so `wardryx replay` asks the same question. With one org in `WARDRYX_KEYS` nothing here changes: its admin is the principal allowed across orgs, and a policy it writes without an `org` applies across orgs as before.
+
 `-policy`/`WARDRYX_POLICY` (above) loads policy files once at startup and never hot-reloads them -- that stays exactly true. On top of it, four admin-only routes let an operator manage a second, additional layer of policies at runtime, without a restart:
 
 ```
-GET    /v1/policies       list every store-managed policy
+GET    /v1/policies       list the store-managed policies of the caller's org and those across orgs
 GET    /v1/policies/{id}  fetch one
 PUT    /v1/policies/{id}  create or replace one (body: one policy.Policy document, e.g. the YAML example above as JSON; data after the policy is refused with 400, and a key the policy does not declare is refused with 400 naming it, and nothing is stored; `id` and `updated_at` as a GET returns them are accepted and ignored, so a GET body can be sent back unchanged)
 DELETE /v1/policies/{id}  remove one
@@ -323,8 +327,9 @@ Authorization: Bearer <key>
 `base_policies` is what `-policy`/`WARDRYX_POLICY` loaded at startup (never individually addressable
 through `/v1/policies`); `store_policies` is the same count `/v1/policies` would list; `effective_policies`
 is their sum, the combined set `/v1/decide` actually evaluates against. `effective_policies: 0`, and only
-that, means every request really is allowed. Any authenticated key can read it, admin or viewer, the same
-scoping as `GET /v1/approvals`.
+that, means every request really is allowed. Any authenticated key can read it, admin, viewer or pep. The
+counts are those of the policies that govern the caller's decisions: its org's and those across orgs, and
+every one for a principal allowed across orgs, which with one org is every policy.
 
 ---
 
@@ -398,9 +403,9 @@ This mirrors Wardryx's own stated defaults for its *own* availability: with no `
 
 Beyond the decision engine and the approval flow above, Wardryx ships:
 
-1. **HTTP API** (`internal/api`): `POST /v1/decide`, `POST /v1/filter-tools` (experimental: `Decide`'s deny_tool and allow_tool rules applied to each offered tool alone, for a caller measuring what a policy would remove before anything enforces on the answer; see `compat/1.0.json`), `POST /v1/approvals/{id}/decide` (admin only), `GET /v1/approvals` (org-scoped), `GET /v1/status` (see [GET /v1/status](#get-v1status)), the admin-only `/v1/policies` policy-as-code routes (see [Policy-as-code](#policy-as-code)), `GET /healthz` (liveness) and `GET /readyz` (readiness, see [When the store is down](#when-the-store-is-down)). Bearer-key auth mirrors the Cloud plane's `key:org[:role]` convention (TokenFuse `crates/cloud/src/keys.rs`), reimplemented in Go for the same wire format.
+1. **HTTP API** (`internal/api`): `POST /v1/decide`, `POST /v1/filter-tools` (experimental: `Decide`'s deny_tool and allow_tool rules applied to each offered tool alone, for a caller measuring what a policy would remove before anything enforces on the answer; see `compat/1.0.json`), `POST /v1/approvals/{id}/decide` (admin only), `GET /v1/approvals` (org-scoped), `GET /v1/status` (see [GET /v1/status](#get-v1status)), the admin-only `/v1/policies` policy-as-code routes (see [Policy-as-code](#policy-as-code)), `GET /healthz` (liveness) and `GET /readyz` (readiness, see [When the store is down](#when-the-store-is-down)). Bearer-key auth mirrors the Cloud plane's `key:org[:role]` convention (TokenFuse `crates/cloud/src/keys.rs`), reimplemented in Go for the same wire format, with an optional fourth segment naming the agents a key speaks for (see [Which agents a key speaks for](#which-agents-a-key-speaks-for)).
 2. **Storage** (`internal/store`): Postgres via `pgx/v5` with an embedded, idempotent `schema.sql`, or an in-memory store when no DSN is configured. Both implementations satisfy the same `Store` interface.
-3. **Events** (`source: wardryx`): optional NDJSON `agent-event` output (`WARDRYX_EVENTS_PATH`) via `agent-stack-go/event`: `policy_allow`, `policy_deny`, `approval_requested`, `approval_granted`, `approval_denied`, `approval_timeout` (an agent presenting an approval token whose window had already closed, so usually a human did decide and the agent came back late), `approval_unanswered` (a hold nobody decided, see [The hold nobody decided](#the-hold-nobody-decided)), and `policy_updated` (a runtime `/v1/policies` write). Its `data` carries `action`, `policy_id`, `policy_version`, `decided_by` (the organisation that made the write) and `key_fp`: the first 16 hex characters of SHA-256 over the bearer key that made it, so the record names the key without holding it. To match a `key_fp` to a key, run `printf %s "$KEY" | shasum -a 256 | cut -c1-16` on each candidate key. The key itself is never written to the event file or anywhere else. Events now carry the SPEC §6.5 `prev_hash` chain; verify a stream with `agent-conform -chain <file>`.
+3. **Events** (`source: wardryx`): optional NDJSON `agent-event` output (`WARDRYX_EVENTS_PATH`) via `agent-stack-go/event`: `policy_allow`, `policy_deny`, `approval_requested`, `approval_granted`, `approval_denied`, `approval_timeout` (an agent presenting an approval token whose window had already closed, so usually a human did decide and the agent came back late), `approval_unanswered` (a hold nobody decided, see [The hold nobody decided](#the-hold-nobody-decided)), `policy_updated` (a runtime `/v1/policies` write), and `agent_assertion_refused` (a request that named an agent its key may not speak for, refused with no decision; its `data` carries the `route`, the `asserted_agent_id` and `asserted_run_id`, the key's `org`, `role` and `key_fp`, and its `agent_id` is wardryx's own, never the agent it was made in the name of). Every decision event's `data` carries the `org` it was asked in. `approval_granted` and `approval_denied` carry `decided_by` (`key:` and the key's fingerprint), `key_fp`, and `decided_by_label` when the decision was sent with one. `policy_updated`'s `data` carries `action`, `policy_id`, `policy_version`, `policy_org` (the org of the policy written or removed, empty for one across orgs), `decided_by` (the organisation that made the write) and `key_fp`: the first 16 hex characters of SHA-256 over the bearer key that made it, so the record names the key without holding it. To match a `key_fp` to a key, run `printf %s "$KEY" | shasum -a 256 | cut -c1-16` on each candidate key. The key itself is never written to the event file or anywhere else. Events now carry the SPEC §6.5 `prev_hash` chain; verify a stream with `agent-conform -chain <file>`.
 4. **OTLP export** (`internal/otel`): optional one-span-per-decision export to an OTLP/HTTP collector (`WARDRYX_OTLP_ENDPOINT`), see [OTLP export](#otlp-export).
 5. **CLI** (`cmd/wardryx`): `serve`, `check` (an offline dry-run over a directory of Agent Passports), `approvals` (list from Postgres), `replay` (put recorded decisions back to the engine, see [Replay](#replay-what-a-policy-change-would-have-done)), `version`.
 
@@ -562,7 +567,7 @@ Every `WARDRYX_*` variable is read once at process startup (`internal/config`), 
 | Variable | Flag | Default | Meaning |
 | --- | --- | --- | --- |
 | `WARDRYX_ADDR` | `-addr` | `:8090` | Listen address |
-| `WARDRYX_KEYS` | (none) | (empty) | `key:org[:role],...` bearer keys; with no valid entry, `serve` refuses to start unless `WARDRYX_ALLOW_DEVKEY` is set (see below) |
+| `WARDRYX_KEYS` | (none) | (empty) | `key:org[:role[:agents]],...` bearer keys; with no valid entry, `serve` refuses to start unless `WARDRYX_ALLOW_DEVKEY` is set (see below) |
 | `WARDRYX_ALLOW_DEVKEY` | (none) | `false` | Explicit opt-in to the insecure dev key `devkey` -> `default`/`admin` when `WARDRYX_KEYS` has no valid entry; refused outright (not merely warned about) together with a non-loopback `-addr` |
 | `WARDRYX_DB` | `-db` | (empty) | Postgres DSN; empty uses the in-memory store |
 | `WARDRYX_POLICY` | `-policy` | (empty) | Policy file or directory (YAML/JSON); empty allows every request |
@@ -573,11 +578,24 @@ Every `WARDRYX_*` variable is read once at process startup (`internal/config`), 
 | `WARDRYX_APPROVAL_UNANSWERED_AFTER` | (none) | `15m` | How long a hold may sit undecided before one `approval_unanswered` event is raised for it; a Go duration; `0` turns the sweep off (see [The hold nobody decided](#the-hold-nobody-decided)) |
 | `WARDRYX_OTLP_ENDPOINT` | `-otlp-endpoint` | (empty) | OTLP/HTTP endpoint for decision spans (see [OTLP export](#otlp-export)); empty disables it |
 
-The `[:role]` segment of a `WARDRYX_KEYS` entry is one of `admin` (every endpoint, including `POST /v1/approvals/{id}/decide`) or `viewer` (every other authenticated endpoint), and defaults to `admin` when the segment is omitted.
+The `[:role]` segment of a `WARDRYX_KEYS` entry is one of `admin` (every endpoint, including `POST /v1/approvals/{id}/decide`, for its own org), `cross-org-admin` (every endpoint, for every org), `pep` (an enforcement point: `/v1/decide`, `/v1/filter-tools`, and what a viewer reads) or `viewer` (`GET /v1/approvals` and `GET /v1/status`), and defaults to `admin` when the segment is omitted. The `[:agents]` segment is everything after the third colon: agent patterns separated by `|`, in a policy `target`'s glob syntax, for example `gw-secret:acme:pep:agent://acme.example/*|agent://ops.acme.example/runner`.
 
 ### Authentication
 
 `serve` fails closed: with no valid `WARDRYX_KEYS` entry and no `WARDRYX_ALLOW_DEVKEY` opt-in, it refuses to start rather than either authenticating nobody silently or, as it did before this section was written, installing the built-in `devkey` -> `default`/`admin` credential on whatever address `-addr` bound (every interface, by default). Set `WARDRYX_KEYS` to a real `key:org[:role]` spec for anything but a local run, or set `WARDRYX_ALLOW_DEVKEY=1` for a local, loopback-only development run (`make serve` does exactly this, binding `127.0.0.1:8090`). The devkey fallback together with a non-loopback bind is refused outright rather than warned about, since that pairing is precisely what let a self-labelled pod turn a policy `deny` into `allow` in this stack's own history.
+
+### Which agents a key speaks for
+
+The `agent_id` of a `/v1/decide` or `/v1/filter-tools` request is bound to the key that asks. A request naming an agent outside the key's allowance is a `403` that echoes nothing it was sent, with no decision, no hold and no approval token read or spent, and one `agent_assertion_refused` event. The rule:
+
+- A key whose entry lists agents speaks for exactly the agents its patterns match, whatever its role.
+- An unlisted `cross-org-admin` key speaks for any agent.
+- An unlisted `pep` or `admin` key speaks for any agent of its own org. The enforcement point authenticated the agent before it asked, and an admin can rewrite the rules that decide, so binding either buys nothing within its org. Wardryx knows which agents are an org's only when every key in `WARDRYX_KEYS` belongs to one org, where every agent is; with more than one org, such a key speaks for no agent until its entry lists the agents of its org.
+- An unlisted `viewer` key speaks for no agent.
+
+The same "one org" reading decides who is allowed across orgs: a `cross-org-admin` key, and, when every key belongs to one org, that org's `admin`, since there is no other org to cross into. A `cross-org-admin` key does not count as an org of its own, so adding one never turns a one-org deployment into a multi-org one. `serve` prints, at start, every key that speaks for no agent (by fingerprint) and, with more than one org, that admins are confined to their org.
+
+**What an existing deployment changes.** A key the enforcement point uses (TokenFuse's gateway and its MCP broker, scopyx) and that carries the `viewer` role today must carry `pep`, or every `/v1/decide` it asks is a `403`: `gw-secret:default:viewer` becomes `gw-secret:default:pep`. An `admin` key, the local `devkey`, and an entry that already uses `pep` keep working unchanged in a one-org deployment. A deployment with more than one org lists, on every `pep` and `admin` key that asks for agents, the agents of its org.
 
 ---
 
@@ -607,7 +625,8 @@ Wardryx is itself a security-relevant component, so a few of its own defaults ar
 - A malformed policy file is a **hard error**: `serve` and `check` refuse to start rather than silently loading a smaller rule set than intended.
 - `WARDRYX_APPROVAL_SECRET` unset fails every mint/verify closed; there is no fallback to an unsigned or always-valid token.
 - Single-use approval tokens (the default since 1.0) with no `-db`/`WARDRYX_DB` are only enforced within that one process, not across multiple wardryx instances sharing the load; `serve` warns about this combination at startup rather than silently giving weaker guarantees than the name implies.
-- `/v1/policies` grants whoever holds an admin bearer key the ability to change enforcement rules at runtime, same trust level `/v1/approvals/{id}/decide` already requires -- there is no separate, narrower role for policy management. A leaked admin key is a policy-tampering risk, not just an approvals-tampering one.
+- `/v1/policies` grants whoever holds an admin bearer key the ability to change enforcement rules at runtime, same trust level `/v1/approvals/{id}/decide` already requires -- there is no separate, narrower role for policy management. A leaked admin key is a policy-tampering risk, not just an approvals-tampering one. With more than one org it is confined to its org's policies and approvals; a `cross-org-admin` key is not.
+- A request can no longer name any agent it likes: the agent is bound to the key (see [Which agents a key speaks for](#which-agents-a-key-speaks-for)). `chain_proven` and `attestation_method` are still the enforcement point's word, believed as before.
 
 ---
 

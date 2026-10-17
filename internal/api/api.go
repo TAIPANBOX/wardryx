@@ -54,6 +54,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/TAIPANBOX/agent-stack-go/event"
 	"github.com/TAIPANBOX/wardryx/internal/approval"
@@ -81,7 +83,17 @@ const (
 	// nothing decayed: nobody answered.
 	evApprovalUnanswered = "approval_unanswered"
 	evPolicyUpdated      = "policy_updated"
+	// A request named an agent its key may not speak for, and was refused
+	// with no decision (F-001 of the 2026-10-17 review). Not a decision, so
+	// replay counts it as none.
+	evAgentAssertionRefused = "agent_assertion_refused"
 )
+
+// authAgentID is the agent_id of an agent_assertion_refused event. The agent
+// the request named did not act, and naming it as the event's subject would
+// attribute the attempt to the agent it was made in the name of; it is in the
+// event's data as asserted_agent_id instead.
+const authAgentID = "agent://wardryx.internal/auth/agent-binding"
 
 // systemAgentID is the agent_id agent-event's schema requires on every
 // event (agent-passport SPEC.md Sec 3.1: a well-formed agent:// URI).
@@ -94,11 +106,14 @@ const systemAgentID = "agent://wardryx.internal/admin/policy-api"
 
 // Server is Wardryx's HTTP API.
 type Server struct {
-	engine            *pdp.Engine
-	store             store.Store
-	events            *event.ChainedWriter
-	otel              *wotel.Exporter
-	keys              map[string]Principal
+	engine *pdp.Engine
+	store  store.Store
+	events *event.ChainedWriter
+	otel   *wotel.Exporter
+	keys   map[string]Principal
+	// allow is compiled from keys once: whether they name one org, and each
+	// listed key's agent patterns. See speaksFor.
+	allow             allowance
 	approvalSecret    []byte
 	approvalTTL       time.Duration
 	approvalSingleUse bool
@@ -187,6 +202,7 @@ func New(engine *pdp.Engine, st store.Store, events *event.ChainedWriter, otel *
 		events:            events,
 		otel:              otel,
 		keys:              keys,
+		allow:             newAllowance(keys),
 		approvalSecret:    approvalSecret,
 		approvalTTL:       approval.DefaultTTL,
 		approvalSingleUse: approvalSingleUse,
@@ -410,12 +426,28 @@ func (s *Server) requireAuth(next authedHandler) http.HandlerFunc {
 
 func (s *Server) requireAdmin(next authedHandler) http.HandlerFunc {
 	return s.requireAuth(func(w http.ResponseWriter, r *http.Request, p Principal) {
-		if p.Role != RoleAdmin {
+		if !p.isAdmin() {
 			writeError(w, http.StatusForbidden, "admin role required")
 			return
 		}
 		next(w, r, p)
 	})
+}
+
+// refuseAgent answers a request that names an agent its key may not speak
+// for: a 403 that echoes nothing the request sent, and one event saying who
+// tried, so the attempt is visible to whoever reads the record. Nothing is
+// decided, nothing is held and no approval token is read or spent.
+func (s *Server) refuseAgent(w http.ResponseWriter, p Principal, route, agentID, runID string) {
+	s.emit(evAgentAssertionRefused, event.SeverityHigh, authAgentID, "", nil, map[string]any{
+		"route":             route,
+		"asserted_agent_id": agentID,
+		"asserted_run_id":   runID,
+		"org":               p.Org,
+		"role":              p.Role,
+		"key_fp":            p.KeyFP,
+	})
+	writeError(w, http.StatusForbidden, "this key may not speak for the agent this request names")
 }
 
 // --- POST /v1/decide ---
@@ -531,6 +563,9 @@ func signalsRecord(signals []pdp.Signal) []any {
 // pdp.DecideRequest itself, so a new PDP input cannot quietly skip the record.
 func decisionInput(req pdp.DecideRequest, resp pdp.DecideResponse) map[string]any {
 	in := map[string]any{
+		// The org the decision was asked in decides which policies applied,
+		// so a replay needs it to ask the same question.
+		"org":                req.Org,
 		"tool_names":         req.ToolNames,
 		"domains":            req.Domains,
 		"steps":              req.Steps,
@@ -612,6 +647,13 @@ func (s *Server) handleDecide(w http.ResponseWriter, r *http.Request, principal 
 		writeError(w, http.StatusBadRequest, "agent_id and run_id are required")
 		return
 	}
+	// The agent is bound to the key before anything else in the request is
+	// read: a refused request reaches no rule, holds nothing, and presents no
+	// approval token, so a token cannot be spent by a key that may not use it.
+	if !s.allow.speaksFor(principal, dto.AgentID) {
+		s.refuseAgent(w, principal, "/v1/decide", dto.AgentID, dto.RunID)
+		return
+	}
 
 	signals, toolCall, refusal := decideSignalInputs(dto)
 	if refusal != "" {
@@ -621,6 +663,7 @@ func (s *Server) handleDecide(w http.ResponseWriter, r *http.Request, principal 
 
 	req := pdp.DecideRequest{
 		AgentID:           dto.AgentID,
+		Org:               principal.Org,
 		RunID:             dto.RunID,
 		OnBehalfOf:        dto.OnBehalfOf,
 		ToolNames:         dto.ToolNames,
@@ -775,7 +818,7 @@ type filterToolsResponseDTO struct {
 // and the same JSON-decoding discipline as handleDecide (decodeJSONBody), but
 // no event is emitted -- nothing acts on this answer yet, so nothing records
 // it (see the Filter invariant in CLAUDE.md).
-func (s *Server) handleFilterTools(w http.ResponseWriter, r *http.Request, _ Principal) {
+func (s *Server) handleFilterTools(w http.ResponseWriter, r *http.Request, principal Principal) {
 	var dto filterToolsRequestDTO
 	if !decodeJSONBody(w, r, &dto) {
 		return
@@ -784,9 +827,17 @@ func (s *Server) handleFilterTools(w http.ResponseWriter, r *http.Request, _ Pri
 		writeError(w, http.StatusBadRequest, "agent_id is required")
 		return
 	}
+	// Bound like /v1/decide: the partition is another agent's policy, and a
+	// key that may not ask for the agent may not read it either. The refusal
+	// is recorded; a filter answer still is not.
+	if !s.allow.speaksFor(principal, dto.AgentID) {
+		s.refuseAgent(w, principal, "/v1/filter-tools", dto.AgentID, dto.RunID)
+		return
+	}
 
 	resp := s.engine.Filter(pdp.FilterRequest{
 		AgentID:   dto.AgentID,
+		Org:       principal.Org,
 		RunID:     dto.RunID,
 		ToolNames: dto.ToolNames,
 	})
@@ -810,9 +861,53 @@ func (s *Server) handleFilterTools(w http.ResponseWriter, r *http.Request, _ Pri
 // --- POST /v1/approvals/{id}/decide ---
 
 type approvalDecideRequestDTO struct {
-	Decision  string `json:"decision"`
-	DecidedBy string `json:"decided_by"`
+	Decision string `json:"decision"`
+	// DecidedBy is display text, what a console calls the person who decided.
+	// It is recorded as the approval's decided_by_label and never as who
+	// decided: that is the key that authenticated the request. Optional.
+	DecidedBy string `json:"decided_by,omitempty"`
 }
+
+// maxLabelBytes caps the display label a decision is sent with: a name, not a
+// document. It is shown in a console and in the approvals table a terminal
+// prints, so it is refused rather than trimmed.
+const maxLabelBytes = 256
+
+// labelRefusal says why a display label is refused, or "" for a good one. It
+// never quotes the label: a refusal that echoed a terminal escape would print
+// it.
+func labelRefusal(label string) string {
+	if len(label) > maxLabelBytes {
+		return fmt.Sprintf("decided_by is a display label of at most %d bytes", maxLabelBytes)
+	}
+	if !utf8.ValidString(label) {
+		return "decided_by must be UTF-8 text"
+	}
+	for _, r := range label {
+		if unicode.IsControl(r) || isBidiControl(r) {
+			return "decided_by must not contain a control character or a bidirectional override"
+		}
+	}
+	return ""
+}
+
+// isBidiControl reports the Unicode characters that reorder how the text
+// around them is displayed, so a label could show an approver's name the
+// table or the console does not hold.
+func isBidiControl(r rune) bool {
+	switch {
+	case r == 0x061C, r == 0x200E, r == 0x200F:
+		return true
+	case r >= 0x202A && r <= 0x202E, r >= 0x2066 && r <= 0x2069:
+		return true
+	}
+	return false
+}
+
+// approverID is who decided an approval, as recorded: the key that
+// authenticated the decision, by fingerprint, the form policy_updated's key_fp
+// already uses. The text a request sends is the label beside it.
+func approverID(p Principal) string { return "key:" + p.KeyFP }
 
 type approvalDecideResponseDTO struct {
 	ApprovalID    string `json:"approval_id"`
@@ -834,17 +929,18 @@ func (s *Server) handleApprovalDecide(w http.ResponseWriter, r *http.Request, pr
 		writeError(w, http.StatusBadRequest, `decision must be "grant" or "deny"`)
 		return
 	}
-	if dto.DecidedBy == "" {
-		writeError(w, http.StatusBadRequest, "decided_by is required")
+	if refusal := labelRefusal(dto.DecidedBy); refusal != "" {
+		writeError(w, http.StatusBadRequest, refusal)
 		return
 	}
 
 	// An admin may decide only an approval belonging to their own org.
 	// handleListApprovals already scopes by org (see its own comment); this
 	// route did not, so an admin key for one org could grant or deny a hold
-	// it never listed. An approval with NO org in its context (a row
-	// written before org scoping existed) is decided as today: this check
-	// only narrows what was otherwise wide open, it never widens it.
+	// it never listed. An approval with NO org in its context (a row written
+	// before org scoping existed) belongs to no org, so only a principal
+	// allowed across orgs decides it: a cross-org admin, or the admin of the
+	// only org there is, who decides it exactly as before (F-012).
 	//
 	// The response is the same 404 body as an unknown id, deliberately: a
 	// distinct "wrong org" answer would make this route an oracle for
@@ -858,12 +954,12 @@ func (s *Server) handleApprovalDecide(w http.ResponseWriter, r *http.Request, pr
 		writeInternalError(w, "reading the approval", err)
 		return
 	}
-	if org, ok := existing.Context["org"].(string); ok && org != "" && org != principal.Org {
+	if org, _ := existing.Context["org"].(string); org != principal.Org && !s.allow.acrossOrgs(principal) {
 		writeError(w, http.StatusNotFound, "approval not found")
 		return
 	}
 
-	decided, token, err := approval.Decide(r.Context(), s.store, s.approvalSecret, id, dto.Decision, dto.DecidedBy, s.approvalTTL)
+	decided, token, err := approval.Decide(r.Context(), s.store, s.approvalSecret, id, dto.Decision, approverID(principal), dto.DecidedBy, s.approvalTTL)
 	switch {
 	case errors.Is(err, store.ErrNotFound):
 		writeError(w, http.StatusNotFound, "approval not found")
@@ -879,12 +975,17 @@ func (s *Server) handleApprovalDecide(w http.ResponseWriter, r *http.Request, pr
 		return
 	}
 
+	// decided_by names the key that decided; key_fp is the same fingerprint
+	// on its own, the field policy_updated carries; the label is the text the
+	// request sent, only when it sent one.
+	data := map[string]any{"approval_id": decided.ApprovalID, "decided_by": decided.DecidedBy, "key_fp": principal.KeyFP}
+	if decided.DecidedByLabel != "" {
+		data["decided_by_label"] = decided.DecidedByLabel
+	}
 	if dto.Decision == "grant" {
-		s.emit(evApprovalGranted, event.SeverityInfo, decided.AgentID, decided.RunID, nil,
-			map[string]any{"approval_id": decided.ApprovalID, "decided_by": decided.DecidedBy})
+		s.emit(evApprovalGranted, event.SeverityInfo, decided.AgentID, decided.RunID, nil, data)
 	} else {
-		s.emit(evApprovalDenied, event.SeverityHigh, decided.AgentID, decided.RunID, nil,
-			map[string]any{"approval_id": decided.ApprovalID, "decided_by": decided.DecidedBy})
+		s.emit(evApprovalDenied, event.SeverityHigh, decided.AgentID, decided.RunID, nil, data)
 	}
 
 	writeJSON(w, http.StatusOK, approvalDecideResponseDTO{
@@ -897,22 +998,26 @@ func (s *Server) handleApprovalDecide(w http.ResponseWriter, r *http.Request, pr
 // --- GET /v1/approvals ---
 
 type approvalDTO struct {
-	ApprovalID  string         `json:"approval_id"`
-	AgentID     string         `json:"agent_id"`
-	RunID       string         `json:"run_id"`
-	RequestedAt string         `json:"requested_at"`
-	DecidedAt   string         `json:"decided_at,omitempty"`
-	DecidedBy   string         `json:"decided_by,omitempty"`
-	Decision    string         `json:"decision,omitempty"`
-	Pending     bool           `json:"pending"`
-	Context     map[string]any `json:"context,omitempty"`
+	ApprovalID  string `json:"approval_id"`
+	AgentID     string `json:"agent_id"`
+	RunID       string `json:"run_id"`
+	RequestedAt string `json:"requested_at"`
+	DecidedAt   string `json:"decided_at,omitempty"`
+	DecidedBy   string `json:"decided_by,omitempty"`
+	// DecidedByLabel is the display text the decision was sent with. Who
+	// decided is DecidedBy.
+	DecidedByLabel string         `json:"decided_by_label,omitempty"`
+	Decision       string         `json:"decision,omitempty"`
+	Pending        bool           `json:"pending"`
+	Context        map[string]any `json:"context,omitempty"`
 }
 
-// handleListApprovals lists every approval belonging to the caller's org.
-// Org scoping is applied here, not in internal/store: the schema's
-// context_json column carries "org" (stamped at hold time from the
-// authenticated principal, see handleDecide), and store stays a dumb,
-// auth-agnostic persistence layer.
+// handleListApprovals lists every approval belonging to the caller's org, and
+// to a principal allowed across orgs every approval, of every org and of none,
+// since it is the one that may decide them. Org scoping is applied here, not
+// in internal/store: the schema's context_json column carries "org" (stamped
+// at hold time from the authenticated principal, see handleDecide), and store
+// stays a dumb, auth-agnostic persistence layer.
 func (s *Server) handleListApprovals(w http.ResponseWriter, r *http.Request, principal Principal) {
 	all, err := s.store.ListApprovals(r.Context())
 	if err != nil {
@@ -920,19 +1025,21 @@ func (s *Server) handleListApprovals(w http.ResponseWriter, r *http.Request, pri
 		return
 	}
 	out := make([]approvalDTO, 0, len(all))
+	across := s.allow.acrossOrgs(principal)
 	for _, a := range all {
-		if org, _ := a.Context["org"].(string); org != principal.Org {
+		if org, _ := a.Context["org"].(string); org != principal.Org && !across {
 			continue
 		}
 		dto := approvalDTO{
-			ApprovalID:  a.ApprovalID,
-			AgentID:     a.AgentID,
-			RunID:       a.RunID,
-			RequestedAt: a.RequestedAt.UTC().Format(time.RFC3339),
-			DecidedBy:   a.DecidedBy,
-			Decision:    a.Decision,
-			Pending:     a.Pending(),
-			Context:     a.Context,
+			ApprovalID:     a.ApprovalID,
+			AgentID:        a.AgentID,
+			RunID:          a.RunID,
+			RequestedAt:    a.RequestedAt.UTC().Format(time.RFC3339),
+			DecidedBy:      a.DecidedBy,
+			DecidedByLabel: a.DecidedByLabel,
+			Decision:       a.Decision,
+			Pending:        a.Pending(),
+			Context:        a.Context,
 		}
 		if !a.DecidedAt.IsZero() {
 			dto.DecidedAt = a.DecidedAt.UTC().Format(time.RFC3339)
@@ -1012,21 +1119,55 @@ type statusDTO struct {
 	EffectivePolicies int `json:"effective_policies"`
 }
 
-func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request, _ Principal) {
+// handleStatus counts the policies that govern the caller's decisions: those
+// of its org and those across orgs, and every one for a principal allowed
+// across orgs. With one org that is every policy, as it always was.
+func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request, principal Principal) {
 	stored, err := s.store.ListPolicies(r.Context())
 	if err != nil {
 		writeInternalError(w, "reading status", err)
 		return
 	}
+	base := 0
+	for _, p := range s.basePolicies {
+		if s.canRead(principal, p.Org) {
+			base++
+		}
+	}
+	inStore := 0
+	for _, rec := range stored {
+		if s.canRead(principal, rec.Policy.Org) {
+			inStore++
+		}
+	}
 	writeJSON(w, http.StatusOK, statusDTO{
 		PolicyVersion:     s.engine.PolicyVersion(),
-		BasePolicies:      len(s.basePolicies),
-		StorePolicies:     len(stored),
-		EffectivePolicies: len(s.basePolicies) + len(stored),
+		BasePolicies:      base,
+		StorePolicies:     inStore,
+		EffectivePolicies: base + inStore,
 	})
 }
 
-func (s *Server) handleListPolicies(w http.ResponseWriter, r *http.Request, _ Principal) {
+// canRead reports whether a principal may see a policy of org: one that
+// governs its decisions (its own org's, or one across orgs), or any policy
+// for a principal allowed across orgs. Another org's policy is not shown.
+func (s *Server) canRead(p Principal, org string) bool {
+	return org == "" || org == p.Org || s.allow.acrossOrgs(p)
+}
+
+// canWrite reports whether a principal may write, replace or delete a policy
+// of org: its own org's, and, for a principal allowed across orgs, any,
+// including one with no org, which governs every org's decisions.
+func (s *Server) canWrite(p Principal, org string) bool {
+	return org == p.Org || s.allow.acrossOrgs(p)
+}
+
+// notYourPolicy is the refusal of a policy write a key may not make. It names
+// no other org and says the same thing whether the policy belongs to another
+// org or to none, so it tells a caller only that the id is not theirs to use.
+const notYourPolicy = "an admin key writes the policies of its own org only; a policy of another org, or one that applies across orgs, needs a " + RoleCrossOrgAdmin + " key"
+
+func (s *Server) handleListPolicies(w http.ResponseWriter, r *http.Request, principal Principal) {
 	all, err := s.store.ListPolicies(r.Context())
 	if err != nil {
 		writeInternalError(w, "listing policies", err)
@@ -1034,12 +1175,15 @@ func (s *Server) handleListPolicies(w http.ResponseWriter, r *http.Request, _ Pr
 	}
 	out := make([]policyDTO, 0, len(all))
 	for _, rec := range all {
+		if !s.canRead(principal, rec.Policy.Org) {
+			continue
+		}
 		out = append(out, policyRecordToDTO(rec))
 	}
 	writeJSON(w, http.StatusOK, out)
 }
 
-func (s *Server) handleGetPolicy(w http.ResponseWriter, r *http.Request, _ Principal) {
+func (s *Server) handleGetPolicy(w http.ResponseWriter, r *http.Request, principal Principal) {
 	id := r.PathValue("id")
 	rec, err := s.store.GetPolicy(r.Context(), id)
 	if errors.Is(err, store.ErrNotFound) {
@@ -1048,6 +1192,12 @@ func (s *Server) handleGetPolicy(w http.ResponseWriter, r *http.Request, _ Princ
 	}
 	if err != nil {
 		writeInternalError(w, "reading the policy", err)
+		return
+	}
+	// Another org's policy reads as missing, the same answer an unknown id
+	// gets, as an approval of another org does.
+	if !s.canRead(principal, rec.Policy.Org) {
+		writeError(w, http.StatusNotFound, "policy not found")
 		return
 	}
 	writeJSON(w, http.StatusOK, policyRecordToDTO(rec))
@@ -1078,6 +1228,17 @@ func (s *Server) handlePutPolicy(w http.ResponseWriter, r *http.Request, princip
 		return
 	}
 	p := body.Policy
+	// The org a policy belongs to is the writer's. An org admin's policy is
+	// its org's whatever the body says, and a body naming another org is
+	// refused rather than rewritten; a principal allowed across orgs writes
+	// the org the body names, and a body naming none applies across orgs.
+	if !s.allow.acrossOrgs(principal) {
+		if p.Org != "" && p.Org != principal.Org {
+			writeError(w, http.StatusForbidden, notYourPolicy)
+			return
+		}
+		p.Org = principal.Org
+	}
 
 	// Bounded: every store call below shares one deadline, so a store that
 	// has gone away answers 503 in storeTimeout rather than holding the
@@ -1095,6 +1256,13 @@ func (s *Server) handlePutPolicy(w http.ResponseWriter, r *http.Request, princip
 	replaced := false
 	for _, rec := range stored {
 		if rec.ID == id {
+			// Replacing a policy is changing it: the one stored must be the
+			// writer's to change, or an org admin could take over a policy
+			// that governs every org and narrow it to its own.
+			if !s.canWrite(principal, rec.Policy.Org) {
+				writeError(w, http.StatusForbidden, notYourPolicy)
+				return
+			}
 			candidate = append(candidate, p)
 			replaced = true
 			continue
@@ -1129,7 +1297,7 @@ func (s *Server) handlePutPolicy(w http.ResponseWriter, r *http.Request, princip
 	s.outage.recovered()
 	s.engine.SetPolicies(newSet)
 	s.emit(evPolicyUpdated, event.SeverityHigh, systemAgentID, "", nil,
-		map[string]any{"action": "put", "policy_id": id, "policy_version": newSet.Version(), "decided_by": principal.Org, "key_fp": principal.KeyFP})
+		map[string]any{"action": "put", "policy_id": id, "policy_version": newSet.Version(), "decided_by": principal.Org, "key_fp": principal.KeyFP, "policy_org": p.Org})
 
 	// Rendered from what was just written rather than read back from the
 	// store: the record is id, the body and now, all three in hand, and a
@@ -1156,18 +1324,24 @@ func (s *Server) handleDeletePolicy(w http.ResponseWriter, r *http.Request, prin
 		s.writeStoreFailure(w, "deleting the policy", err)
 		return
 	}
-	found := false
+	var found *store.PolicyRecord
 	candidate := make([]policy.Policy, 0, len(s.basePolicies)+len(stored))
 	candidate = append(candidate, s.basePolicies...)
-	for _, rec := range stored {
+	for i, rec := range stored {
 		if rec.ID == id {
-			found = true
+			found = &stored[i]
 			continue
 		}
 		candidate = append(candidate, rec.Policy)
 	}
-	if !found {
+	// Another org's policy is missing to this key, as on GET; one across orgs
+	// is visible and is not this key's to remove.
+	if found == nil || !s.canRead(principal, found.Policy.Org) {
 		writeError(w, http.StatusNotFound, "policy not found")
+		return
+	}
+	if !s.canWrite(principal, found.Policy.Org) {
+		writeError(w, http.StatusForbidden, notYourPolicy)
 		return
 	}
 
@@ -1194,7 +1368,7 @@ func (s *Server) handleDeletePolicy(w http.ResponseWriter, r *http.Request, prin
 	s.outage.recovered()
 	s.engine.SetPolicies(newSet)
 	s.emit(evPolicyUpdated, event.SeverityHigh, systemAgentID, "", nil,
-		map[string]any{"action": "delete", "policy_id": id, "policy_version": newSet.Version(), "decided_by": principal.Org, "key_fp": principal.KeyFP})
+		map[string]any{"action": "delete", "policy_id": id, "policy_version": newSet.Version(), "decided_by": principal.Org, "key_fp": principal.KeyFP, "policy_org": found.Policy.Org})
 
 	w.WriteHeader(http.StatusNoContent)
 }

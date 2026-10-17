@@ -338,7 +338,7 @@ func TestGrantingAHoldThatCarriedACallBindsTheTokenToIt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, tok, err := Decide(ctx, st, bindSecret, held.ApprovalID, "grant", "alice", DefaultTTL)
+	_, tok, err := Decide(ctx, st, bindSecret, held.ApprovalID, "grant", "alice", "", DefaultTTL)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -365,7 +365,7 @@ func TestAHoldWithADamagedCallDigestIsNotGrantedUnboundAndStaysPending(t *testin
 			if err != nil {
 				t.Fatal(err)
 			}
-			_, tok, err := Decide(ctx, st, bindSecret, held.ApprovalID, "grant", "alice", DefaultTTL)
+			_, tok, err := Decide(ctx, st, bindSecret, held.ApprovalID, "grant", "alice", "", DefaultTTL)
 			if !errors.Is(err, ErrToolCallContext) || tok != "" {
 				t.Fatalf("Decide = %q, %v; want no token and ErrToolCallContext", tok, err)
 			}
@@ -379,7 +379,7 @@ func TestAHoldWithADamagedCallDigestIsNotGrantedUnboundAndStaysPending(t *testin
 	ctx := context.Background()
 	st := store.NewMemory()
 	held, _ := Request(ctx, st, bindAgent, bindRun, bindTools, map[string]any{ContextKeyToolCall: "s3.delete_object"})
-	if _, _, err := Decide(ctx, st, bindSecret, held.ApprovalID, "grant", "alice", DefaultTTL); !errors.Is(err, ErrToolCallContext) {
+	if _, _, err := Decide(ctx, st, bindSecret, held.ApprovalID, "grant", "alice", "", DefaultTTL); !errors.Is(err, ErrToolCallContext) {
 		t.Fatalf("a non-map tool_call = %v, want ErrToolCallContext", err)
 	}
 }
@@ -388,7 +388,7 @@ func TestGrantingAHoldThatCarriedNoCallMintsTheOldFormat(t *testing.T) {
 	ctx := context.Background()
 	st := store.NewMemory()
 	held, _ := Request(ctx, st, bindAgent, bindRun, bindTools, map[string]any{"est_cost_usd": 100.0})
-	_, tok, err := Decide(ctx, st, bindSecret, held.ApprovalID, "grant", "alice", DefaultTTL)
+	_, tok, err := Decide(ctx, st, bindSecret, held.ApprovalID, "grant", "alice", "", DefaultTTL)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -405,7 +405,7 @@ func TestDenyingAHoldNeedsNoDigest(t *testing.T) {
 	ctx := context.Background()
 	st := store.NewMemory()
 	held, _ := Request(ctx, st, bindAgent, bindRun, bindTools, map[string]any{ContextKeyToolCall: map[string]any{"name": "x"}})
-	if _, tok, err := Decide(ctx, st, bindSecret, held.ApprovalID, "deny", "alice", DefaultTTL); err != nil || tok != "" {
+	if _, tok, err := Decide(ctx, st, bindSecret, held.ApprovalID, "deny", "alice", "", DefaultTTL); err != nil || tok != "" {
 		t.Fatalf("deny = %q, %v", tok, err)
 	}
 }
