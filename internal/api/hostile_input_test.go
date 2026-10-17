@@ -83,7 +83,10 @@ func TestARequiredFieldLeftOutIsRefusedRatherThanDefaulted(t *testing.T) {
 		path string
 		body string
 	}{
-		{"a decision with nobody attached", "/v1/approvals/a1/decide", `{"decision":"grant"}`},
+		// "A decision with nobody attached" was a case here until 2026-10-17,
+		// when decided_by stopped being who decided: the approver is now the
+		// key that authenticated the request (approverID), so no decision can
+		// arrive with nobody attached, and decided_by is an optional label.
 		{"a decision that is neither grant nor deny", "/v1/approvals/a1/decide", `{"decision":"maybe","decided_by":"alice"}`},
 		{"an empty decision", "/v1/approvals/a1/decide", `{"decision":"","decided_by":"alice"}`},
 	}

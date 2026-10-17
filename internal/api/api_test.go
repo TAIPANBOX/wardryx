@@ -66,10 +66,14 @@ func newTestServerOpts(t *testing.T, singleUse bool, otel *wotel.Exporter) *Serv
 	}
 	engine := pdp.New(set, []byte(testHMAC))
 	st := store.NewMemory()
+	// Two orgs, so a key that asks for an agent must list the agents it
+	// speaks for (speaksFor). acme's admin lists every agent, explicitly: the
+	// tests that use this fixture are about the decision, and the binding has
+	// its own (agent_binding_test.go).
 	keys := map[string]Principal{
-		adminKey:  {Org: "acme", Role: RoleAdmin},
+		adminKey:  {Org: "acme", Role: RoleAdmin, Agents: "agent://*"},
 		viewerKey: {Org: "acme", Role: RoleViewer},
-		otherOrg:  {Org: "globex", Role: RoleAdmin},
+		otherOrg:  {Org: "globex", Role: RoleAdmin, Agents: "agent://globex.example/*"},
 	}
 	return New(engine, st, nil, otel, keys, []byte(testHMAC), singleUse, set.Policies())
 }
@@ -475,31 +479,12 @@ func TestAnAdminOfAnotherOrgCannotDecideAnApproval(t *testing.T) {
 	}
 }
 
-// TestAnApprovalWithNoOrgInItsContextIsDecidedAsBefore: an approval minted
-// before org scoping existed (or hand-built by an older client) carries no
-// "org" key in its Context at all. W3's check only narrows what was
-// otherwise wide open, so this must still be decidable by any admin, the
-// exact behavior this repository had before the fix.
-func TestAnApprovalWithNoOrgInItsContextIsDecidedAsBefore(t *testing.T) {
-	srv := newTestServer(t)
-	ctx := context.Background()
-	if err := srv.store.CreateApproval(ctx, store.Approval{
-		ApprovalID:  "legacy-1",
-		AgentID:     "agent://acme.example/finance/bot1",
-		RunID:       "r1",
-		RequestedAt: time.Now().UTC(),
-		Context:     map[string]any{"tool_names": []string{"generate_report"}},
-	}); err != nil {
-		t.Fatalf("seeding a legacy approval with no org: %v", err)
-	}
-
-	rec := doRequest(t, srv.Handler(), http.MethodPost, "/v1/approvals/legacy-1/decide", otherOrg,
-		approvalDecideRequestDTO{Decision: "grant", DecidedBy: "mallory@globex.example"})
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200: an approval with no org in its context predates "+
-			"org scoping and must remain decidable by any admin, body = %s", rec.Code, rec.Body.String())
-	}
-}
+// An approval with no org in its context used to be decidable by an admin of
+// any org (TestAnApprovalWithNoOrgInItsContextIsDecidedAsBefore, removed on
+// 2026-10-17 with finding F-012): it now needs a principal allowed across
+// orgs. TestAnApprovalWithNoOrgNeedsAPrincipalAllowedAcrossOrgs and
+// TestWithOneOrgItsAdminDecidesAnApprovalWithNoOrg in approver_test.go hold
+// both sides.
 
 func TestApprovalDecideRejectsInvalidDecisionValue(t *testing.T) {
 	srv := newTestServer(t)
@@ -1304,7 +1289,7 @@ func TestMarkersForDecidedHoldsAreDropped(t *testing.T) {
 		t.Fatalf("want one marker, got %d", len(srv.unansweredSeen))
 	}
 
-	if _, err := srv.store.DecideApproval(context.Background(), "a1", "grant", "yurii", now); err != nil {
+	if _, err := srv.store.DecideApproval(context.Background(), "a1", "grant", "yurii", "", now); err != nil {
 		t.Fatal(err)
 	}
 	srv.sweepUnansweredApprovals(context.Background(), now)

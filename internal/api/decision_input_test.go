@@ -21,6 +21,7 @@ import (
 // fails rather than being silently dropped from the record.
 var fieldHome = map[string]string{
 	"AgentID":           "envelope",
+	"Org":               "data:org",
 	"RunID":             "envelope",
 	"OnBehalfOf":        "envelope",
 	"ToolNames":         "data:tool_names",
@@ -42,6 +43,7 @@ var fieldHome = map[string]string{
 func fullRequest() pdp.DecideRequest {
 	return pdp.DecideRequest{
 		AgentID:           "agent://acme.example/finance/bot1",
+		Org:               "acme",
 		RunID:             "r-input",
 		OnBehalfOf:        []string{"user://acme.example/alice"},
 		ToolNames:         []string{"http_get"},

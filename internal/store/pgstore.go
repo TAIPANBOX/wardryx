@@ -82,7 +82,7 @@ func (p *Postgres) CreateApproval(ctx context.Context, a Approval) error {
 
 func (p *Postgres) GetApproval(ctx context.Context, id string) (Approval, error) {
 	row := p.db.QueryRowContext(ctx,
-		`SELECT approval_id, agent_id, run_id, requested_at, decided_at, decided_by, decision, context_json
+		`SELECT approval_id, agent_id, run_id, requested_at, decided_at, decided_by, decided_by_label, decision, context_json
 		 FROM approvals WHERE approval_id = $1`, id)
 	a, err := scanApproval(row)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -96,7 +96,7 @@ func (p *Postgres) GetApproval(ctx context.Context, id string) (Approval, error)
 
 func (p *Postgres) ListApprovals(ctx context.Context) ([]Approval, error) {
 	rows, err := p.db.QueryContext(ctx,
-		`SELECT approval_id, agent_id, run_id, requested_at, decided_at, decided_by, decision, context_json
+		`SELECT approval_id, agent_id, run_id, requested_at, decided_at, decided_by, decided_by_label, decision, context_json
 		 FROM approvals ORDER BY requested_at ASC`)
 	if err != nil {
 		return nil, fmt.Errorf("store: list approvals: %w", err)
@@ -117,11 +117,13 @@ func (p *Postgres) ListApprovals(ctx context.Context) ([]Approval, error) {
 	return out, nil
 }
 
-func (p *Postgres) DecideApproval(ctx context.Context, id, decision, decidedBy string, decidedAt time.Time) (Approval, error) {
+func (p *Postgres) DecideApproval(ctx context.Context, id, decision, decidedBy, label string, decidedAt time.Time) (Approval, error) {
+	// An empty label is stored as NULL, the value every row decided before
+	// the column existed holds, so "no label was sent" has one spelling.
 	res, err := p.db.ExecContext(ctx,
-		`UPDATE approvals SET decision = $2, decided_by = $3, decided_at = $4
+		`UPDATE approvals SET decision = $2, decided_by = $3, decided_at = $4, decided_by_label = NULLIF($5, '')
 		 WHERE approval_id = $1 AND decision IS NULL`,
-		id, decision, decidedBy, decidedAt)
+		id, decision, decidedBy, decidedAt, label)
 	if err != nil {
 		return Approval{}, fmt.Errorf("store: decide approval %q: %w", id, err)
 	}
@@ -249,12 +251,16 @@ func scanApproval(row rowScanner) (Approval, error) {
 		a          Approval
 		decidedAt  sql.NullTime
 		decidedBy  sql.NullString
+		label      sql.NullString
 		decision   sql.NullString
 		contextRaw []byte
 	)
 	if err := row.Scan(&a.ApprovalID, &a.AgentID, &a.RunID, &a.RequestedAt,
-		&decidedAt, &decidedBy, &decision, &contextRaw); err != nil {
+		&decidedAt, &decidedBy, &label, &decision, &contextRaw); err != nil {
 		return Approval{}, err
+	}
+	if label.Valid {
+		a.DecidedByLabel = label.String
 	}
 	if decidedAt.Valid {
 		a.DecidedAt = decidedAt.Time

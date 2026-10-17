@@ -30,3 +30,23 @@ func TestTheApprovalsListNamesTheCallBeingApproved(t *testing.T) {
 		t.Fatalf("a nil context = %q, want a dash", got)
 	}
 }
+
+// The DECIDED_BY column names the key that decided and, beside it, the label
+// the decision was sent with, quoted so a label never reaches the terminal as
+// anything but text.
+func TestTheApprovalsListShowsTheApproverAndTheLabel(t *testing.T) {
+	decided := store.Approval{Decision: "grant", DecidedBy: "key:0123456789abcdef", DecidedByLabel: "alice"}
+	if got := approvalDecidedBy(decided); got != `key:0123456789abcdef ("alice")` {
+		t.Fatalf("approvalDecidedBy = %q, want the key and the quoted label", got)
+	}
+	decided.DecidedByLabel = "a\x1b[2J"
+	if got := approvalDecidedBy(decided); strings.ContainsRune(got, 0x1b) {
+		t.Fatalf("approvalDecidedBy = %q printed an escape", got)
+	}
+	if got := approvalDecidedBy(store.Approval{Decision: "deny", DecidedBy: "key:fedcba9876543210"}); got != "key:fedcba9876543210" {
+		t.Fatalf("no label = %q, want the key alone", got)
+	}
+	if got := approvalDecidedBy(store.Approval{}); got != "-" {
+		t.Fatalf("pending = %q, want a dash", got)
+	}
+}

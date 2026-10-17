@@ -137,7 +137,7 @@ func (m *Memory) ListApprovals(_ context.Context) ([]Approval, error) {
 	return out, nil
 }
 
-func (m *Memory) DecideApproval(_ context.Context, id, decision, decidedBy string, decidedAt time.Time) (Approval, error) {
+func (m *Memory) DecideApproval(_ context.Context, id, decision, decidedBy, label string, decidedAt time.Time) (Approval, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	a, ok := m.byID[id]
@@ -149,6 +149,7 @@ func (m *Memory) DecideApproval(_ context.Context, id, decision, decidedBy strin
 	}
 	a.Decision = decision
 	a.DecidedBy = decidedBy
+	a.DecidedByLabel = label
 	a.DecidedAt = decidedAt
 	m.byID[id] = a
 	return copyOut(a)

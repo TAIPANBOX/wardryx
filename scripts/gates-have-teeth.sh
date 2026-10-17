@@ -440,6 +440,47 @@ PY
 )" \
 	"measured nothing"
 
+echo "=== agent-is-bound-to-its-key: the agent, the org and the approver come from the key ==="
+
+# The fault the gate exists for (F-001): a handler that reads the agent from
+# the body and never asks whether the key may speak for it. It still answers
+# 200 with a correct-looking decision, which is why no test would notice a
+# handler added later without the check.
+run_case "agent-is-bound-to-its-key: decide stops checking the key may speak for the agent" fail \
+	'./scripts/agent-is-bound-to-its-key.sh' \
+	"$(py 'edit("internal/api/api.go", "if !s.allow.speaksFor(principal, dto.AgentID) {\n\t\ts.refuseAgent(w, principal, \"/v1/decide\"", "if false {\n\t\ts.refuseAgent(w, principal, \"/v1/decide\"")')" \
+	"handleDecide reads dto.AgentID and never checks"
+
+# The same check on the second handler, so the gate reads every handler and
+# not only the first it meets.
+run_case "agent-is-bound-to-its-key: filter-tools stops checking" fail \
+	'./scripts/agent-is-bound-to-its-key.sh' \
+	"$(py 'edit("internal/api/api.go", "if !s.allow.speaksFor(principal, dto.AgentID) {\n\t\ts.refuseAgent(w, principal, \"/v1/filter-tools\"", "if false {\n\t\ts.refuseAgent(w, principal, \"/v1/filter-tools\"")')" \
+	"handleFilterTools reads dto.AgentID and never checks"
+
+# F-012's policy half: the org taken from anywhere but the key.
+run_case "agent-is-bound-to-its-key: a filter request without the key's org" fail \
+	'./scripts/agent-is-bound-to-its-key.sh' \
+	"$(py 'edit("internal/api/api.go", "\t\tOrg:       principal.Org,\n\t\tRunID:     dto.RunID,", "\t\tRunID:     dto.RunID,")')" \
+	"does not set Org: principal.Org"
+
+# F-012's approval half: the free text recorded as who decided.
+run_case "agent-is-bound-to-its-key: the request's text recorded as the approver" fail \
+	'./scripts/agent-is-bound-to-its-key.sh' \
+	"$(py 'edit("internal/api/api.go", "dto.Decision, approverID(principal), dto.DecidedBy,", "dto.Decision, dto.DecidedBy, dto.DecidedBy,")')" \
+	"does not record approverID(principal)"
+
+# A comment that names dto.AgentID is not code that reads it, and a gate
+# that flagged it would flag the explanation of the check it holds.
+run_case "agent-is-bound-to-its-key: a comment naming dto.AgentID" pass \
+	'./scripts/agent-is-bound-to-its-key.sh' \
+	"$(py 'edit("internal/api/api.go", "func (s *Server) handleListApprovals(", "// handleListApprovals never reads dto.AgentID.\nfunc (s *Server) handleListApprovals(")')"
+
+run_case "agent-is-bound-to-its-key: no handler left that reads an agent" fail \
+	'./scripts/agent-is-bound-to-its-key.sh' \
+	"$(py 'import shutil; shutil.rmtree("internal/api")')" \
+	"measured nothing"
+
 echo
 if [ -n "$(git status --porcelain)" ]; then
 	printf 'FAIL: this script left the tree dirty, so it cannot be trusted about anything above\n'

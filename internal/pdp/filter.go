@@ -6,6 +6,9 @@ type FilterRequest struct {
 	// AgentID is the requesting agent's agent:// URI, matched against each
 	// loaded policy's Target glob the same way Decide matches it.
 	AgentID string
+	// Org is the organisation the offer is asked in, read exactly as
+	// DecideRequest.Org is: a policy of another org is never consulted.
+	Org string
 	// RunID identifies the run this offer belongs to. Carried through for
 	// logging; Filter does not branch on it.
 	RunID string
@@ -63,7 +66,7 @@ func (e *Engine) Filter(req FilterRequest) FilterResponse {
 		Allowed:       []string{},
 		Denied:        []DeniedTool{},
 	}
-	matched := policies.Match(req.AgentID)
+	matched := policies.MatchIn(req.AgentID, req.Org)
 
 	seen := make(map[string]bool, len(req.ToolNames))
 	for _, name := range req.ToolNames {
