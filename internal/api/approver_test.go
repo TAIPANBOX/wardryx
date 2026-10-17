@@ -100,6 +100,9 @@ func TestAHostileLabelIsRefusedAndTheApprovalStaysPending(t *testing.T) {
 		"too long": strings.Repeat("a", 257),
 		"c1":       "alice\u0085cleared",
 		"bidi":     "alice\u202ecleared",
+		"isolate":  "alice\u2067cleared",
+		"mark":     "alice\u200fcleared",
+		"arabic":   "alice\u061ccleared",
 	} {
 		rec := h.do(t, http.MethodPost, "/v1/approvals/"+id+"/decide", approverKey, approvalDecideRequestDTO{Decision: "grant", DecidedBy: label})
 		if rec.Code != http.StatusBadRequest {

@@ -263,3 +263,17 @@ func TestKeyPostureNamesEveryKeyThatSpeaksForNoAgent(t *testing.T) {
 		}
 	}
 }
+
+// A principal whose list the server did not compile at start (one built in
+// code rather than parsed from WARDRYX_KEYS) is read the same way, never as
+// unlisted.
+func TestSpeaksForReadsAListItWasNotGivenAtStart(t *testing.T) {
+	a := newAllowance(map[string]Principal{"adm": {Org: "acme", Role: RoleAdmin}})
+	p := Principal{Org: "acme", Role: RoleViewer, Agents: "agent://acme.example/support/*"}
+	if !a.speaksFor(p, bot1) || a.speaksFor(p, bot9) {
+		t.Fatalf("a list compiled on the fly does not bind: bot1 %v, bot9 %v", a.speaksFor(p, bot1), a.speaksFor(p, bot9))
+	}
+	if a.speaksFor(Principal{Org: "acme", Role: "admni"}, bot1) {
+		t.Fatalf("a role this service does not know speaks for an agent")
+	}
+}

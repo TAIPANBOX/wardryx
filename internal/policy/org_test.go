@@ -62,3 +62,36 @@ func mustVersion(t *testing.T, doc string) string {
 	}
 	return set.Version()
 }
+
+// MatchIn is Match narrowed to the policies that govern a decision asked in
+// one org: those of that org and those across orgs, never another org's.
+func TestMatchInReadsOnlyThePoliciesOfTheOrgAskedIn(t *testing.T) {
+	set, err := Compile([]Policy{
+		{Name: "across", Target: "agent://*"},
+		{Name: "acme", Target: "agent://*", Org: "acme"},
+		{Name: "globex", Target: "agent://*", Org: "globex"},
+		{Name: "elsewhere", Target: "agent://other.example/*", Org: "acme"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	names := func(ps []Policy) string {
+		var out []string
+		for _, p := range ps {
+			out = append(out, p.Name)
+		}
+		return strings.Join(out, ",")
+	}
+	for org, want := range map[string]string{"acme": "acme,across", "globex": "across,globex", "": "across", "initech": "across"} {
+		if got := names(set.MatchIn("agent://acme.example/bot", org)); got != want {
+			t.Errorf("MatchIn(%q) = %s, want %s", org, got, want)
+		}
+	}
+	re, err := CompileGlob("agent://acme.example/*")
+	if err != nil || !re.MatchString("agent://acme.example/a/b") || re.MatchString("agent://acme.example.evil/x") {
+		t.Fatalf("CompileGlob reads a pattern unlike a target: %v", err)
+	}
+	if _, err := CompileGlob(""); err == nil {
+		t.Fatalf("CompileGlob accepted an empty pattern")
+	}
+}
