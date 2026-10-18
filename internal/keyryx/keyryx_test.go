@@ -18,6 +18,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/TAIPANBOX/agent-stack-go/delegation"
 )
 
 const testCredential = "wardryx-test-credential-0123456789"
@@ -354,5 +356,45 @@ func TestTheUnixSocketTransportReachesTheSocket(t *testing.T) {
 	}
 	if _, ok := c.Key(id); !ok {
 		t.Fatal("the key served on the socket is not in the cache")
+	}
+}
+
+// Keyryx names its keys with agent-stack-go's delegation.Thumbprint, and this
+// package checks every published kid against its own thumbprint. The two must
+// agree on every key, or a set Keyryx publishes would be refused whole.
+func TestTheThumbprintIsTheOneAgentStackGoComputes(t *testing.T) {
+	for i := 0; i < 20; i++ {
+		k := newKey(t)
+		want, err := delegation.Thumbprint(delegation.FromPublic(&k.PublicKey, ""))
+		if err != nil {
+			t.Fatalf("delegation.Thumbprint: %v", err)
+		}
+		if got := thumbprint(&k.PublicKey); got != want {
+			t.Fatalf("thumbprint = %q, agent-stack-go computes %q", got, want)
+		}
+	}
+}
+
+func TestCurrentRefusesNoActiveKeyOrTwo(t *testing.T) {
+	answers := map[string]string{
+		"no active key":   `{"keys":[{"name":"wardryx-approval","kid":"x","state":"retired"}]}`,
+		"two active keys": `{"keys":[{"name":"wardryx-approval","kid":"a","state":"active"},{"name":"wardryx-approval","kid":"b","state":"active"}]}`,
+		"not JSON":        `<html>`,
+	}
+	for name, body := range answers {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { fmt.Fprint(w, body) }))
+		kid, err := mustClient(t, srv.URL).Current(context.Background())
+		srv.Close()
+		if err == nil || kid != "" {
+			t.Errorf("%s: Current = %q, %v; want an error and no kid", name, kid, err)
+		}
+	}
+}
+
+func TestNewClientRefusesAnUnusableBase(t *testing.T) {
+	for _, base := range []string{"", "ftp://keyryx", "unix://", "not a url", "http://"} {
+		if _, err := NewClient(base, ""); err == nil {
+			t.Errorf("NewClient(%q): want an error", base)
+		}
 	}
 }

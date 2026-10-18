@@ -1501,5 +1501,6 @@ decision outcome and every exported signature identical.
     `TestAMalformedSetIsRefusedWholeAndTheCacheKept`,
     `TestAKidThatIsNotTheKeysThumbprintIsRefused`,
     `TestARevokedKidLeavesTheSetAtOnce`,
-    `TestAPollThatFailsKeepsTheSetItHad` in `internal/keyryx`; scenarios in
+    `TestAPollThatFailsKeepsTheSetItHad`,
+    `TestTheThumbprintIsTheOneAgentStackGoComputes` in `internal/keyryx`; scenarios in
     `features/approval-token-v3.feature`.)*

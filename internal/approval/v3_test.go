@@ -9,6 +9,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -398,4 +399,64 @@ func TestNoSecretAndNoSignerStillRefuses(t *testing.T) {
 	if _, _, err := DecideWith(context.Background(), st, Keys{}, id, "grant", "key:test", "label", DefaultTTL); !errors.Is(err, ErrNoSecret) {
 		t.Fatalf("no secret and no signer: err = %v, want ErrNoSecret", err)
 	}
+}
+
+// signRaw signs header and payload exactly as given, with the key under kid, so
+// a test can present a token whose signature is good and whose claims are not.
+func signRaw(t *testing.T, s *testSigner, kid, header, payload string) string {
+	t.Helper()
+	input := base64.RawURLEncoding.EncodeToString([]byte(header)) + "." + base64.RawURLEncoding.EncodeToString([]byte(payload))
+	d := sha256.Sum256([]byte(input))
+	r, sg, err := ecdsa.Sign(rand.Reader, s.keys[kid], d[:])
+	if err != nil {
+		t.Fatalf("sign: %v", err)
+	}
+	sig := make([]byte, 64)
+	r.FillBytes(sig[:32])
+	sg.FillBytes(sig[32:])
+	return input + "." + base64.RawURLEncoding.EncodeToString(sig)
+}
+
+func TestAV3ClaimsThatAreSignedButNotAGrantAreRefused(t *testing.T) {
+	s := newTestSigner(t, "k1")
+	hdr := `{"alg":"ES256","kid":"k1","typ":"wardryx-approval+jwt"}`
+	now := time.Now().Add(time.Hour).Unix()
+	cases := map[string]struct {
+		token string
+		want  error
+	}{
+		"a token with no approval id": {
+			signRaw(t, s, "k1", hdr, fmt.Sprintf(`{"v":3,"agent_id":%q,"run_id":"run-1","tools":["bucket_delete"],"max_cost_usd":10,"exp":%d,"nonce":"n"}`, testAgent, now)),
+			ErrTokenMalformed,
+		},
+		"a version other than 3": {
+			signRaw(t, s, "k1", hdr, fmt.Sprintf(`{"v":2,"aid":"ap_1","agent_id":%q,"run_id":"run-1","tools":["bucket_delete"],"max_cost_usd":10,"exp":%d,"nonce":"n"}`, testAgent, now)),
+			ErrTokenVersion,
+		},
+		"a malformed digest": {
+			signRaw(t, s, "k1", hdr, fmt.Sprintf(`{"v":3,"aid":"ap_1","agent_id":%q,"run_id":"run-1","tools":["bucket_delete"],"max_cost_usd":10,"exp":%d,"nonce":"n","tcd":"not-hex"}`, testAgent, now)),
+			ErrTokenMalformed,
+		},
+		"data after the header": {
+			signRaw(t, s, "k1", hdr+`{}`, fmt.Sprintf(`{"v":3,"aid":"ap_1","agent_id":%q,"run_id":"run-1","tools":["bucket_delete"],"max_cost_usd":10,"exp":%d,"nonce":"n"}`, testAgent, now)),
+			ErrTokenMalformed,
+		},
+		"a signature of the wrong length": {
+			withShortSignature(signRaw(t, s, "k1", hdr, fmt.Sprintf(`{"v":3,"aid":"ap_1","agent_id":%q,"run_id":"run-1","tools":["bucket_delete"],"max_cost_usd":10,"exp":%d,"nonce":"n"}`, testAgent, now))),
+			ErrTokenSignature,
+		},
+	}
+	for name, c := range cases {
+		err := Keys{JWKS: s.set()}.VerifyForCall(c.token, testAgent, "run-1", testTools, 1, "")
+		if !errors.Is(err, c.want) {
+			t.Errorf("%s: err = %v, want %v", name, err, c.want)
+		}
+	}
+}
+
+// withShortSignature replaces a token's signature with ten bytes, which no ES256
+// signature is.
+func withShortSignature(tok string) string {
+	parts := strings.Split(tok, ".")
+	return parts[0] + "." + parts[1] + "." + base64.RawURLEncoding.EncodeToString(make([]byte, 10))
 }
