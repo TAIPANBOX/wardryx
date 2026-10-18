@@ -2,7 +2,7 @@
 
 `TAIPANBOX/wardryx` promises the surface below from its 1.0 (`compat/1.0.json`, held by `scripts/compat-surface.sh` on every push). A frozen name is not removed or renamed within a major; an additive thing may appear as a minor; an experimental thing may change in any release.
 
-Status: frozen at 1.0.0 (2026-09-13), carried unchanged into 2.0.0 (2026-10-18) and into 2.1.0 (2026-10-18): the surface below is the promise of this major; no frozen name was removed or renamed in 2.0.0 or 2.1.0, its additions in 2.1.0 are listed under additive, and its behaviour changes are in docs/releases/v2.0.0.md and docs/releases/v2.1.0.md. The gate has held it since the manifest was written ahead of the tag
+Status: frozen at 1.0.0 (2026-09-13), carried unchanged into 2.0.0 (2026-10-18), into 2.1.0 (2026-10-18) and into 2.2.0 (2026-10-18): the surface below is the promise of this major; no frozen name was removed or renamed in 2.0.0, 2.1.0 or 2.2.0, its additions in 2.1.0 and 2.2.0 are listed under additive, and its behaviour changes are in docs/releases/v2.0.0.md, docs/releases/v2.1.0.md and docs/releases/v2.2.0.md. The gate has held it since the manifest was written ahead of the tag
 
 ## Frozen
 
@@ -111,6 +111,8 @@ Status: frozen at 1.0.0 (2026-09-13), carried unchanged into 2.0.0 (2026-10-18) 
 - require_identity_source, a new policy field whose absent value means no requirement; additive, so a minor release
 - the approval token's default (single-use or reusable for its TTL) is a configuration default, not wire: it may flip by decision, and WARDRYX_APPROVAL_SINGLE_USE stays the switch either way
 - WARDRYX_RECORD_FAILMODE, an optional environment variable: unset is closed, which refuses an allow or a hold whose record was not written (503 record_unavailable), and open returns it and flags /readyz; a configuration default, not wire, so the default may flip by decision (invariant 40), and the variable stays the switch either way
+- approval tokens signed by Keyryx, an optional mode: with WARDRYX_APPROVAL_SIGNER=keyryx a grant mints an ES256 compact JWS whose header names the kid that signed it, and the token verifies from the key set wardryx caches; the HMAC token of earlier grants stays the default and verifies until WARDRYX_APPROVAL_V2_UNTIL. The token's format is not wire: the approval_token field and its place on /v1/decide are unchanged, and a caller treats the token as an opaque string
+- WARDRYX_APPROVAL_SIGNER, WARDRYX_KEYRYX_URL, WARDRYX_KEYRYX_CREDENTIAL_FILE and WARDRYX_APPROVAL_V2_UNTIL, optional environment variables: unset, each keeps the 2.1.0 behaviour; configuration choices, not wire
 
 ## Experimental
 
