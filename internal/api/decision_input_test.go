@@ -31,6 +31,7 @@ var fieldHome = map[string]string{
 	"ModelAbsent":       "data:model_absent",
 	"EstCostUSD":        "data:est_cost_usd",
 	"AttestationMethod": "data:attestation_method",
+	"IdentitySource":    "data:identity_source",
 	"ChainProven":       "data:chain_proven",
 	"ApprovalToken":     "excluded: a live credential never enters an append-only record",
 	"Signals":           "data:signals",
@@ -288,6 +289,7 @@ func replayRequest(t *testing.T, ev event.Event) pdp.DecideRequest {
 		Model:             str(t, ev.Data["model"]),
 		EstCostUSD:        num(t, ev.Data["est_cost_usd"]),
 		AttestationMethod: str(t, ev.Data["attestation_method"]),
+		IdentitySource:    recordedSource(ev.Data["identity_source"]),
 		ChainProven:       ev.Data["chain_proven"] == true,
 	}
 }

@@ -96,6 +96,7 @@ PREDICATES = {
     "rootPrincipalRefused": "require_root_principal",
     "chainUnproven": "deny_if_chain_unproven",
     "unattestedDenied": "deny_if_unattested",
+    "identitySourceRefused": "require_identity_source",
     "modelRefused": "allow_models",
     "exceededMaxSteps": "max_steps",
     "deniedDomain": "allow_domains",

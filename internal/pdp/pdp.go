@@ -105,7 +105,7 @@ type DecideRequest struct {
 	// ever let through before the rule starts firing.
 	Steps int
 	// Model is the model this call names. Checked against every matched
-	// policy's AllowModels (rule 8) when the request is a model call: it
+	// policy's AllowModels (rule 9) when the request is a model call: it
 	// carries no ToolCall and ModelAbsent is false. Recorded with every
 	// decision either way.
 	Model string
@@ -123,6 +123,15 @@ type DecideRequest struct {
 	// "spiffe-svid"), or "" / "none" for no live attestation. Checked
 	// against every matched policy's DenyIfUnattested.
 	AttestationMethod string
+	// IdentitySource is how the enforcement point knew the agent:
+	// policy.IdentitySourceAgentToken when it verified an agent token at its own
+	// door, policy.IdentitySourceClientKey for a static key, and
+	// policy.IdentitySourceNone for neither, which is also what an absent value
+	// means. Checked against every matched policy's RequireIdentitySource (rule 8).
+	// The caller reports it and wardryx does not verify it: the trust boundary is
+	// the one ChainProven and AttestationMethod have. Any value that is not one of
+	// the three counts as none.
+	IdentitySource string
 	// ChainProven says the enforcement point VERIFIED the delegation proof
 	// on this request (agent-passport SPEC 5.2) before calling.
 	//
@@ -148,7 +157,7 @@ type DecideRequest struct {
 	Signals []Signal
 	// ToolCall is the concrete call this request is about to make, when the
 	// enforcement point knows it. Decide reads its Name in rules 2 and 3
-	// (deny_tool and allow_tool), and in rule 13 whether it is present at all: a
+	// (deny_tool and allow_tool), and in rule 14 whether it is present at all: a
 	// hold_if_signal rule with when_absent: hold holds a tool call that came
 	// with no signal of its name, and never a request without one; that hold's
 	// reason names the call and says whether its arguments were truncated. It
@@ -298,51 +307,54 @@ func (e *Engine) SetPolicies(policies *policy.Set) {
 //     false, denies;
 //  7. a matched policy's deny_if_unattested with no live attestation
 //     denies;
-//  8. a model call whose req.Model a matched policy's allow_models does not
+//  8. a matched policy's require_identity_source, which does not list
+//     req.IdentitySource, denies; every matched list must name the source, so
+//     two lists intersect, and a policy with none adds no restriction;
+//  9. a model call whose req.Model a matched policy's allow_models does not
 //     name denies, a blank model included. Every matched allow_models must
 //     name it, so two lists intersect; a policy with none adds no
 //     restriction, and a request with a tool call or no model sent is not a
 //     model call and is not judged;
-//  9. a matched policy's max_steps, reached or exceeded by req.Steps,
+//  10. a matched policy's max_steps, reached or exceeded by req.Steps,
 //     denies;
-//  10. a matched policy's allow_domains, missing an entry from req.Domains,
+//  11. a matched policy's allow_domains, missing an entry from req.Domains,
 //     denies;
-//  11. a matched policy's deny_above_usd, exceeded by EstCostUSD, denies
+//  12. a matched policy's deny_above_usd, exceeded by EstCostUSD, denies
 //     outright: this is a hard ceiling, not an approval gate, so no
 //     ApprovalToken -- however validly minted -- is even inspected, unlike
-//     rule 12 below;
-//  12. a matched policy's require_human_above_usd, exceeded by EstCostUSD,
+//     rule 13 below;
+//  13. a matched policy's require_human_above_usd, exceeded by EstCostUSD,
 //     resolves to Hold, unless a valid ApprovalToken was presented (then
 //     Allow) or an *invalid* one was presented (then Deny);
-//  13. a matched policy's hold_if_signal, satisfied by one of req.Signals,
+//  14. a matched policy's hold_if_signal, satisfied by one of req.Signals,
 //     or, under when_absent: hold, by a tool call that carries no signal of
 //     its name, resolves to Hold, unless a valid ApprovalToken was presented
 //     (then Allow; for a hold on an absent signal only a token bound to the
 //     call is valid); an invalid token holds, it never denies;
-//  14. otherwise, Allow.
+//  15. otherwise, Allow.
 //
-// Rule 13 is the only rule a signal, or the absence of one, can reach, and it
+// Rule 14 is the only rule a signal, or the absence of one, can reach, and it
 // is last on purpose: it runs only once every deny rule and the cost gate have
 // declined, so a signal can turn an allow into a hold and can change nothing
 // else. It never turns a deny into anything, never replaces another rule's hold
 // or its reason, and never allows. Its invalid-token branch holds where rule
-// 12's denies, because without the signal that same call would have been
+// 13's denies, because without the signal that same call would have been
 // allowed, and a signal must not be able to turn an allow into a refusal.
 //
 // A deny from any rule wins outright: it short-circuits every later rule
 // and Decide never has to reconcile a deny against a later hold or allow.
-// Rules 1-11 are all deny-or-continue and carry no state, so their relative
+// Rules 1-12 are all deny-or-continue and carry no state, so their relative
 // order only changes which single Reason string is reported when a request
 // happens to violate more than one of them at once -- it never changes
-// whether the final Decision is Deny. Rule 11 is deliberately placed before
-// rule 12: a policy that sets both deny_above_usd and
+// whether the final Decision is Deny. Rule 12 is deliberately placed before
+// rule 13: a policy that sets both deny_above_usd and
 // require_human_above_usd, with a cost that exceeds both, must Deny rather
 // than Hold -- the hard ceiling always wins over the approval gate, and
 // require_human_above_usd's threshold is never even reached, so no
-// ApprovalToken is checked at all. Rules 12 and 13 are the only ones that can
+// ApprovalToken is checked at all. Rules 13 and 14 are the only ones that can
 // resolve to something other than Deny or fall-through (Hold, or Allow via a
 // redeemed token), so they come after every unconditional deny check,
-// including the hard ceiling of rule 11 and the model rule, which no approval
+// including the hard ceiling of rule 12 and the model rule, which no approval
 // can lift.
 func (e *Engine) Decide(req DecideRequest) DecideResponse {
 	// Loaded once, up front: every rule below evaluates against this exact
@@ -436,7 +448,18 @@ func (e *Engine) Decide(req DecideRequest) DecideResponse {
 		return resp
 	}
 
-	// Rule 8: the model is a floor like the tool lists, and per request: the
+	// Rule 8: how the enforcement point knew the agent. A source is the caller's
+	// report, believed as chain_proven is, so a policy that requires one bounds
+	// what the caller may claim and verifies nothing itself. An unknown or absent
+	// source is none, which no list that names a real source accepts.
+	if pol, ok := identitySourceRefused(matched, policy.IdentitySourceOf(req.IdentitySource)); ok {
+		resp.Decision = Deny
+		resp.Reason = fmt.Sprintf("policy %q requires identity source %s; this request's identity source is %q",
+			pol.Name, strings.Join(pol.RequireIdentitySource, " or "), policy.IdentitySourceOf(req.IdentitySource))
+		return resp
+	}
+
+	// Rule 9: the model is a floor like the tool lists, and per request: the
 	// same agent and tool set may name another model on the next call, which
 	// is why requestSpecific keeps every decision under a list out of a cache.
 	if pol, ok := modelRefused(matched, req.Model, req.ToolCall == nil && !req.ModelAbsent); ok {
@@ -559,10 +582,15 @@ func requestSpecific(matched []policy.Policy, hasToolCall bool) bool {
 		// the same agent and tool set. AllowModels too: the model is per call,
 		// and a cache keyed on agent and tool set would answer a call naming a
 		// refused model with the allow it stored for a listed one.
+		// RequireIdentitySource joins them for the same reason: how the enforcement
+		// point knew the agent is a claim about one request, so a decision that
+		// could have read it must not be served to a request that came with
+		// another source.
 		if p.MaxSteps > 0 || p.RequireHumanAboveUSD != nil || p.DenyAboveUSD != nil ||
 			len(p.AllowDomains) > 0 || len(p.AllowTool) > 0 || p.DenyIfChainUnproven ||
 			p.MaxChainDepth > 0 || p.RequireRootPrincipal != "" ||
-			p.HoldIfSignal != nil || len(p.AllowModels) > 0 {
+			p.HoldIfSignal != nil || len(p.AllowModels) > 0 ||
+			len(p.RequireIdentitySource) > 0 {
 			return true
 		}
 		// deny_tool reads the tool call's name as well as the tool list (rule 2).
@@ -700,6 +728,19 @@ func unattestedDenied(policies []policy.Policy, method string) (policy.Policy, b
 	}
 	for _, p := range policies {
 		if p.DenyIfUnattested {
+			return p, true
+		}
+	}
+	return policy.Policy{}, false
+}
+
+// identitySourceRefused returns the first matched policy whose
+// RequireIdentitySource does not list source. source is already normalized by
+// policy.IdentitySourceOf, so an unknown value never matches a list: the lists
+// name only the three sources.
+func identitySourceRefused(policies []policy.Policy, source string) (policy.Policy, bool) {
+	for _, p := range policies {
+		if len(p.RequireIdentitySource) > 0 && !contains(p.RequireIdentitySource, source) {
 			return p, true
 		}
 	}

@@ -107,6 +107,8 @@ Status: frozen at 1.0.0 (2026-09-13) and carried unchanged into 2.0.0 (2026-10-1
 - new event types under source wardryx (agent-passport SPEC 6.2 allows them within a source)
 - new policy fields, each with a zero value that means 'no restriction'
 - new routes and new optional request fields on /v1/decide
+- identity_source, an optional request field on /v1/decide: absent or unknown is none, so a caller that sends nothing is decided as before; additive, so a minor release
+- require_identity_source, a new policy field whose absent value means no requirement; additive, so a minor release
 - the approval token's default (single-use or reusable for its TTL) is a configuration default, not wire: it may flip by decision, and WARDRYX_APPROVAL_SINGLE_USE stays the switch either way
 
 ## Experimental
