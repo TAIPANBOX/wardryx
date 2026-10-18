@@ -74,6 +74,8 @@ type Config struct {
 	// /v1/decide outcome. Empty disables OTLP export entirely -- see
 	// internal/otel and internal/api.Server.exportSpan.
 	OTLPEndpoint string
+	// RecordFailMode is WARDRYX_RECORD_FAILMODE (scaffold: raw value).
+	RecordFailMode string
 }
 
 // FromEnv reads every WARDRYX_* variable once. Call it a single time per
@@ -92,6 +94,7 @@ func FromEnv() Config {
 		ApprovalSingleUse:  parseBoolClosed(os.Getenv("WARDRYX_APPROVAL_SINGLE_USE")),
 		ApprovalUnanswered: parseDuration(os.Getenv("WARDRYX_APPROVAL_UNANSWERED_AFTER")),
 		OTLPEndpoint:       os.Getenv("WARDRYX_OTLP_ENDPOINT"),
+		RecordFailMode:     os.Getenv("WARDRYX_RECORD_FAILMODE"),
 	}
 }
 

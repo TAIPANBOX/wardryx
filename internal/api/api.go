@@ -109,8 +109,10 @@ type Server struct {
 	engine *pdp.Engine
 	store  store.Store
 	events *event.ChainedWriter
-	otel   *wotel.Exporter
-	keys   map[string]Principal
+	// records is what emit writes through. Scaffold: tests swap it.
+	records recordSink
+	otel    *wotel.Exporter
+	keys    map[string]Principal
 	// allow is compiled from keys once: whether they name one org, and each
 	// listed key's agent patterns. See speaksFor.
 	allow             allowance
@@ -232,6 +234,15 @@ const DefaultUnansweredAfter = 15 * time.Minute
 // disables the sweep entirely, which is a real choice: an operator who watches
 // the approval queue themselves does not need to be told about it.
 func (s *Server) SetUnansweredAfter(d time.Duration) { s.unansweredAfter = d }
+
+// recordSink is the write side of the record: what emit writes an event to.
+// *event.ChainedWriter satisfies it. Tests substitute a writer that refuses.
+type recordSink interface {
+	Write(event.Event) error
+}
+
+// SetRecordFailOpen is a scaffold stub: it keeps today's behaviour.
+func (s *Server) SetRecordFailOpen(open bool) {}
 
 // SetPolicyArchive attaches the archive that keeps every policy set this
 // server makes effective, and immediately keeps the set already in force:

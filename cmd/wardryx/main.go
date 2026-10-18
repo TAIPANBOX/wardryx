@@ -415,6 +415,9 @@ func singleUseInMemoryWarning(singleUse bool, dbDSN string) string {
 	return "wardryx: approval tokens are single-use (the default; WARDRYX_APPROVAL_SINGLE_USE=false turns reuse back on) with no -db (in-memory approval store): single-use is only enforced within this one process, not across multiple wardryx instances -- pass -db for single-use that holds across a multi-instance deployment"
 }
 
+// recordFailModeWarning is a scaffold stub: it says nothing yet.
+func recordFailModeWarning(mode string) string { return "" }
+
 func displayAddr(addr string) string {
 	if strings.HasPrefix(addr, ":") {
 		return "localhost" + addr
