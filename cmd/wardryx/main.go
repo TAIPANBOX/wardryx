@@ -178,7 +178,7 @@ func runServe(args []string) error {
 	} else {
 		fmt.Fprintf(os.Stderr, "wardryx: loaded %d policy(ies) from %s, version %s\n", policies.Len(), *policyPath, policies.Version())
 	}
-	if cfg.ApprovalSecret == "" && policies.RequiresHumanApproval() {
+	if cfg.ApprovalSecret == "" && strings.TrimSpace(cfg.ApprovalSigner) == "" && policies.RequiresHumanApproval() {
 		fmt.Fprintln(os.Stderr, "wardryx: WARDRYX_APPROVAL_SECRET is empty but a policy requires human approval; hold decisions cannot be granted until it is set")
 	}
 
@@ -240,9 +240,20 @@ func runServe(args []string) error {
 	for _, w := range postureWarnings {
 		fmt.Fprintln(os.Stderr, "wardryx: "+w)
 	}
+	approvalKeys, keyryxRefresh, err := buildApprovalKeys(cfg)
+	if err != nil {
+		return fmt.Errorf("approval tokens: %w", err)
+	}
 	engine := pdp.New(policies, []byte(cfg.ApprovalSecret))
 	basePolicies := policies.Policies()
-	srv := api.New(engine, st, events, otelExporter, keys, []byte(cfg.ApprovalSecret), cfg.ApprovalSingleUse, basePolicies)
+	srv := api.New(engine, st, events, otelExporter, keys, []byte(cfg.ApprovalSecret), cfg.ApprovalSingleUse, basePolicies).WithApprovalKeys(approvalKeys)
+	if keyryxRefresh != nil {
+		kctx, kcancel := context.WithCancel(context.Background())
+		defer kcancel()
+		go keyryxRefresh(kctx, func(err error) {
+			fmt.Fprintf(os.Stderr, "wardryx: approval key set from Keyryx not refreshed, keeping the set it has: %v\n", err)
+		})
+	}
 	srv.SetRecordFailOpen(cfg.RecordFailMode == "open")
 	if warn := recordFailModeWarning(cfg.RecordFailMode); warn != "" {
 		fmt.Fprintln(os.Stderr, warn)

@@ -17,7 +17,7 @@
 #      s.allow.speaksFor(principal, dto.AgentID), before it asks the engine.
 #   2. Every pdp.DecideRequest and pdp.FilterRequest the API builds sets
 #      Org: principal.Org, so the org is the key's and not the body's.
-#   3. Every approval.Decide call records approverID(principal) as who
+#   3. Every approval.Decide or approval.DecideWith call records approverID(principal) as who
 #      decided, with dto.DecidedBy only as the label after it.
 #
 # WHAT THIS CANNOT DO
@@ -73,9 +73,9 @@ for f in $files; do
 			if (!litorg) printf "PROBLEM %s:%d: a pdp request built here does not set Org: principal.Org, so the org it is asked in is not the key'"'"'s\n", file, litline
 			inlit = 0
 		}
-		/approval\.Decide\(/ {
+		/approval\.Decide(With)?\(/ {
 			decides++
-			if ($0 !~ /, dto\.Decision, approverID\(principal\), dto\.DecidedBy, /) printf "PROBLEM %s:%d: approval.Decide does not record approverID(principal) as the approver, with dto.DecidedBy as the label after it\n", file, FNR
+			if ($0 !~ /, dto\.Decision, approverID\(principal\), dto\.DecidedBy, /) printf "PROBLEM %s:%d: approval.Decide(With) does not record approverID(principal) as the approver, with dto.DecidedBy as the label after it\n", file, FNR
 		}
 		END { close_func(); printf "COUNT %d %d %d\n", handlers, literals, decides }
 	' "$f")
@@ -89,7 +89,7 @@ for f in $files; do
 done
 
 if [ "$handlers" -eq 0 ] || [ "$literals" -eq 0 ] || [ "$decides" -eq 0 ]; then
-	echo "FAIL: found $handlers handler(s) reading dto.AgentID, $literals pdp request literal(s) and $decides approval.Decide call(s) under $subject."
+	echo "FAIL: found $handlers handler(s) reading dto.AgentID, $literals pdp request literal(s) and $decides approval.Decide(With) call(s) under $subject."
 	echo "      One of the three subjects is gone, so this measured nothing; an absent subject is not a passing one."
 	exit 2
 fi

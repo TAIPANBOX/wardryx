@@ -417,48 +417,53 @@ func TestDenyingAHoldNeedsNoDigest(t *testing.T) {
 // cannot hold this; the source can.
 func TestTheSignatureAndTheDigestAreComparedInConstantTime(t *testing.T) {
 	fset := token.NewFileSet()
-	f, err := parser.ParseFile(fset, "approval.go", nil, 0)
+	// The verification moved to keys.go in W2a: the signature is compared in
+	// parseV2 and the digest in checkClaims. Both are read, and together they
+	// must hold the two constant-time compares.
+	f, err := parser.ParseFile(fset, "keys.go", nil, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	var fn *ast.FuncDecl
+	var fns []*ast.FuncDecl
 	for _, d := range f.Decls {
-		if x, ok := d.(*ast.FuncDecl); ok && x.Name.Name == "VerifyApprovalTokenForCall" {
-			fn = x
+		if x, ok := d.(*ast.FuncDecl); ok && (x.Name.Name == "parseV2" || x.Name.Name == "checkClaims") {
+			fns = append(fns, x)
 		}
 	}
-	if fn == nil {
-		t.Fatal("VerifyApprovalTokenForCall not found: this test measured nothing")
+	if len(fns) != 2 {
+		t.Fatal("parseV2 and checkClaims not both found: this test measured nothing")
 	}
 	equalCalls := 0
 	var plain []string
-	ast.Inspect(fn.Body, func(n ast.Node) bool {
-		switch x := n.(type) {
-		case *ast.CallExpr:
-			if sel, ok := x.Fun.(*ast.SelectorExpr); ok {
-				if id, ok := sel.X.(*ast.Ident); ok && id.Name == "hmac" && sel.Sel.Name == "Equal" {
-					equalCalls++
+	for _, fn := range fns {
+		ast.Inspect(fn.Body, func(n ast.Node) bool {
+			switch x := n.(type) {
+			case *ast.CallExpr:
+				if sel, ok := x.Fun.(*ast.SelectorExpr); ok {
+					if id, ok := sel.X.(*ast.Ident); ok && id.Name == "hmac" && sel.Sel.Name == "Equal" {
+						equalCalls++
+					}
 				}
-			}
-		case *ast.BinaryExpr:
-			// Comparing with the empty string asks whether a value is present,
-			// which reveals nothing about its content.
-			if lit, ok := x.Y.(*ast.BasicLit); ok && lit.Value == `""` {
-				return true
-			}
-			if x.Op == token.EQL || x.Op == token.NEQ {
-				for _, side := range []ast.Expr{x.X, x.Y} {
-					text := exprText(side)
-					if strings.Contains(text, "ToolCallDigest") || text == "sig" || text == "want" || text == "toolCallDigest" {
-						plain = append(plain, text)
+			case *ast.BinaryExpr:
+				// Comparing with the empty string asks whether a value is present,
+				// which reveals nothing about its content.
+				if lit, ok := x.Y.(*ast.BasicLit); ok && lit.Value == `""` {
+					return true
+				}
+				if x.Op == token.EQL || x.Op == token.NEQ {
+					for _, side := range []ast.Expr{x.X, x.Y} {
+						text := exprText(side)
+						if strings.Contains(text, "ToolCallDigest") || text == "sig" || text == "want" || text == "toolCallDigest" {
+							plain = append(plain, text)
+						}
 					}
 				}
 			}
-		}
-		return true
-	})
+			return true
+		})
+	}
 	if equalCalls < 2 {
-		t.Errorf("hmac.Equal is called %d times in VerifyApprovalTokenForCall, want the signature and the digest (2)", equalCalls)
+		t.Errorf("hmac.Equal is called %d times in parseV2 and checkClaims, want the signature and the digest (2)", equalCalls)
 	}
 	if len(plain) > 0 {
 		t.Errorf("a secret-derived value is compared with == or !=: %v", plain)

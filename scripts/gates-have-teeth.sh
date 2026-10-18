@@ -522,6 +522,33 @@ run_case "decision-record-is-checked: the handler renamed away" fail \
 	"$(py 'edit("internal/api/api.go", "func (s *Server) handleDecide(", "func (s *Server) handleDecideRenamed(")')" \
 	"measured nothing"
 
+# Invariant 41: the v3 verifier never reads a key from the token, never calls the
+# HMAC, pins ES256, and the decision path never imports the Keyryx client.
+run_case "approval-verifier-trusts-its-keys: a header that brings its own key" fail \
+	'./scripts/approval-verifier-trusts-its-keys.sh' \
+	"$(py 'edit("internal/approval/v3.go", "const (\n\tjwsAlg", "var _ = \"jwk\"\n\nconst (\n\tjwsAlg")')" \
+	"reads a key or a key location"
+
+run_case "approval-verifier-trusts-its-keys: the HMAC checks a v3 token" fail \
+	'./scripts/approval-verifier-trusts-its-keys.sh' \
+	"$(py 'edit("internal/approval/v3.go", "const (\n\tjwsAlg", "var _ = hmac.Equal\n\nconst (\n\tjwsAlg")')" \
+	"calls the HMAC"
+
+run_case "approval-verifier-trusts-its-keys: the algorithm pin removed" fail \
+	'./scripts/approval-verifier-trusts-its-keys.sh' \
+	"$(py 'edit("internal/approval/v3.go", "jwsAlg         = \"ES256\"", "jwsAlg         = \"ES512\"")')" \
+	"does not pin ES256"
+
+run_case "approval-verifier-trusts-its-keys: the decision path imports the client" fail \
+	'./scripts/approval-verifier-trusts-its-keys.sh' \
+	"$(py 'edit("internal/pdp/pdp.go", "import (", "import (\n\t_ \"github.com/TAIPANBOX/wardryx/internal/keyryx\"")')" \
+	"imports the Keyryx client"
+
+# A comment that names the header member is prose, not a key read.
+run_case "approval-verifier-trusts-its-keys: a comment naming a jwk header" pass \
+	'./scripts/approval-verifier-trusts-its-keys.sh' \
+	"$(py 'edit("internal/approval/v3.go", "// Nothing in this file touches the HMAC secret.", "// Nothing in this file touches the HMAC secret. A jwk header member is never read.")')"
+
 echo
 if [ -n "$(git status --porcelain)" ]; then
 	printf 'FAIL: this script left the tree dirty, so it cannot be trusted about anything above\n'

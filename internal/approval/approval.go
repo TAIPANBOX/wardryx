@@ -152,6 +152,9 @@ type claims struct {
 	Nonce          string   `json:"nonce"`
 	V              int      `json:"v,omitempty"`
 	ToolCallDigest string   `json:"tcd,omitempty"`
+	// AID is the approval the token was granted for. Only v3 tokens carry it;
+	// a v2 token never does, so its bytes are unchanged.
+	AID string `json:"aid,omitempty"`
 }
 
 // tokenVersionToolCall is the claims version that carries a ToolCallDigest.
@@ -325,60 +328,7 @@ func VerifyApprovalTokenForCall(secret []byte, token, agentID, runID string, too
 	if len(secret) == 0 {
 		return ErrNoSecret
 	}
-	payload, sig, ok := strings.Cut(token, ".")
-	if !ok || payload == "" || sig == "" {
-		return ErrTokenMalformed
-	}
-	// Verify the signature over the still-encoded payload before decoding
-	// or trusting any of its content.
-	want := sign(secret, payload)
-	if !hmac.Equal([]byte(sig), []byte(want)) {
-		return ErrTokenSignature
-	}
-
-	body, err := base64.RawURLEncoding.DecodeString(payload)
-	if err != nil {
-		return fmt.Errorf("%w: %v", ErrTokenMalformed, err)
-	}
-	var c claims
-	if err := json.Unmarshal(body, &c); err != nil {
-		return fmt.Errorf("%w: %v", ErrTokenMalformed, err)
-	}
-
-	// The version is signed, so it is read after the signature and before
-	// anything it decides the meaning of. Absent is the original format and
-	// carries no digest; 2 carries one, required and well formed; nothing else
-	// is understood, and an original-format token that nonetheless carries a
-	// digest is not something this package mints, so it is refused.
-	switch c.V {
-	case 0:
-		if c.ToolCallDigest != "" {
-			return fmt.Errorf("%w: a digest in the original format", ErrTokenVersion)
-		}
-	case tokenVersionToolCall:
-		if !validToolCallDigest(c.ToolCallDigest) {
-			return fmt.Errorf("%w: no usable tool-call digest", ErrTokenMalformed)
-		}
-	default:
-		return fmt.Errorf("%w: %d", ErrTokenVersion, c.V)
-	}
-
-	if time.Now().Unix() > c.Exp {
-		return ErrTokenExpired
-	}
-	if c.AgentID != agentID || c.RunID != runID {
-		return ErrTokenBinding
-	}
-	if !sameToolSet(c.Tools, sortedCopy(tools)) {
-		return ErrTokenBinding
-	}
-	if c.ToolCallDigest != "" && !hmac.Equal([]byte(c.ToolCallDigest), []byte(toolCallDigest)) {
-		return ErrTokenToolCall
-	}
-	if estCostUSD > c.MaxCostUSD {
-		return fmt.Errorf("%w: approved ceiling %s exceeded by requested %s", ErrTokenCostExceeded, formatUSD(c.MaxCostUSD), formatUSD(estCostUSD))
-	}
-	return nil
+	return Keys{Secret: secret, V2: V2Rule{Accepted: true}}.VerifyForCall(token, agentID, runID, tools, estCostUSD, toolCallDigest)
 }
 
 // VerifyApprovalTokenBoundToCall is VerifyApprovalTokenForCall for a hold that
@@ -396,17 +346,10 @@ func VerifyApprovalTokenForCall(secret []byte, token, agentID, runID string, too
 // The digest comparison stays inside VerifyApprovalTokenForCall, in constant
 // time; this function only asks, after it, whether there was a digest at all.
 func VerifyApprovalTokenBoundToCall(secret []byte, token, agentID, runID string, tools []string, estCostUSD float64, toolCallDigest string) error {
-	if err := VerifyApprovalTokenForCall(secret, token, agentID, runID, tools, estCostUSD, toolCallDigest); err != nil {
-		return err
+	if len(secret) == 0 {
+		return ErrNoSecret
 	}
-	// The signature verified over this payload, so it decodes as it did there.
-	payload, _, _ := strings.Cut(token, ".")
-	body, _ := base64.RawURLEncoding.DecodeString(payload)
-	var c claims
-	if json.Unmarshal(body, &c) != nil || c.ToolCallDigest == "" {
-		return ErrTokenUnbound
-	}
-	return nil
+	return Keys{Secret: secret, V2: V2Rule{Accepted: true}}.VerifyBoundToCall(token, agentID, runID, tools, estCostUSD, toolCallDigest)
 }
 
 // formatUSD renders a USD amount for this error's text with just enough
@@ -552,42 +495,7 @@ func Request(ctx context.Context, st store.Store, agentID, runID string, tools [
 // principal; label is the display text the request sent, recorded beside it
 // and never in its place.
 func Decide(ctx context.Context, st store.Store, secret []byte, id, decision, decidedBy, label string, ttl time.Duration) (approved store.Approval, token string, err error) {
-	if decision != "grant" && decision != "deny" {
-		return store.Approval{}, "", fmt.Errorf("%w: got %q", ErrInvalidDecision, decision)
-	}
-	if decision == "grant" && len(secret) == 0 {
-		return store.Approval{}, "", ErrNoSecret
-	}
-	if decision == "grant" {
-		// Refuse before writing anything: a hold that was about a tool call
-		// must be granted bound to it, never as a token that binds nothing
-		// because its context was damaged. The approval stays pending.
-		pre, err := st.GetApproval(ctx, id)
-		if err != nil {
-			return store.Approval{}, "", err
-		}
-		if _, err := toolCallDigestFromContext(pre.Context); err != nil {
-			return store.Approval{}, "", err
-		}
-	}
-
-	a, err := st.DecideApproval(ctx, id, decision, decidedBy, label, time.Now().UTC())
-	if err != nil {
-		return store.Approval{}, "", err
-	}
-	if decision != "grant" {
-		return a, "", nil
-	}
-
-	digest, err := toolCallDigestFromContext(a.Context)
-	if err != nil {
-		return a, "", err
-	}
-	tok, _, err := MintApprovalTokenForCall(secret, a.AgentID, a.RunID, toolsFromContext(a.Context), costFromContext(a.Context), digest, ttl)
-	if err != nil {
-		return a, "", err
-	}
-	return a, tok, nil
+	return DecideWith(ctx, st, Keys{Secret: secret, V2: V2Rule{Accepted: true}}, id, decision, decidedBy, label, ttl)
 }
 
 // ContextKeyToolCall is the key under which internal/api stamps the held
