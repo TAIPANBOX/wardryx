@@ -61,6 +61,7 @@ func codeDefaults(t *testing.T) map[string]string {
 		"WARDRYX_APPROVAL_SINGLE_USE":       strconv.FormatBool(cfg.ApprovalSingleUse),
 		"WARDRYX_APPROVAL_UNANSWERED_AFTER": unanswered.String(),
 		"WARDRYX_OTLP_ENDPOINT":             cfg.OTLPEndpoint,
+		"WARDRYX_RECORD_FAILMODE":           cfg.RecordFailMode,
 	}
 }
 

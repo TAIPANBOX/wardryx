@@ -481,6 +481,47 @@ run_case "agent-is-bound-to-its-key: no handler left that reads an agent" fail \
 	"$(py 'import shutil; shutil.rmtree("internal/api")')" \
 	"measured nothing"
 
+echo "=== decision-record-is-checked: an allow or a hold is refused when its record cannot be written ==="
+
+# The fault the gate exists for (F-011): the allow's record written and its
+# result thrown away, so the allow goes out whatever the write did. It still
+# answers 200 with the right decision, which is why no test on a healthy record
+# would notice the drop.
+run_case "decision-record-is-checked: an allow written and its result ignored" fail \
+	'./scripts/decision-record-is-checked.sh' \
+	"$(py 'edit("internal/api/api.go", "if !s.recordDecision(evPolicyAllow", "s.recordDecision(evPolicyAllow")')" \
+	"its result is not checked"
+
+# The same fault on the allow's refusal: the check is there, the answer is not
+# refused when it fails.
+run_case "decision-record-is-checked: an allow that is not refused when its write fails" fail \
+	'./scripts/decision-record-is-checked.sh' \
+	"$(py 'edit("internal/api/api.go", "writeRecordUnavailable(w)", "_ = w")')" \
+	"is not refused when the write fails"
+
+# The hold's refusal, the second of the two answers the gate reads.
+run_case "decision-record-is-checked: a hold that is not refused when its write fails" fail \
+	'./scripts/decision-record-is-checked.sh' \
+	"$(py 'edit("internal/api/api.go", "\t\t\theldInput) {\n\t\t\twriteRecordUnavailable(w)", "\t\t\theldInput) {\n\t\t\t_ = w")')" \
+	"is not refused when the write fails"
+
+# An allow written through emit, the fail-open path, skips the check entirely.
+run_case "decision-record-is-checked: an allow written through emit" fail \
+	'./scripts/decision-record-is-checked.sh' \
+	"$(py 'edit("internal/api/api.go", "\tcase pdp.Deny:\n\t\ts.emit(evPolicyDeny,", "\tcase pdp.Deny:\n\t\ts.emit(evPolicyAllow, event.SeverityInfo, req.AgentID, req.RunID, req.OnBehalfOf, nil)\n\t\ts.emit(evPolicyDeny,")')" \
+	"bypasses the check"
+
+# A comment that names the call is not code, and a gate that flagged it would
+# flag the explanation of the check it holds.
+run_case "decision-record-is-checked: a comment naming the record call" pass \
+	'./scripts/decision-record-is-checked.sh' \
+	"$(py 'edit("internal/api/api.go", "\tswitch resp.Decision {\n\tcase pdp.Allow:", "\t// s.recordDecision(evPolicyAllow, ...) is the call this gate reads; a comment is not code.\n\tswitch resp.Decision {\n\tcase pdp.Allow:")')"
+
+run_case "decision-record-is-checked: the handler renamed away" fail \
+	'./scripts/decision-record-is-checked.sh' \
+	"$(py 'edit("internal/api/api.go", "func (s *Server) handleDecide(", "func (s *Server) handleDecideRenamed(")')" \
+	"measured nothing"
+
 echo
 if [ -n "$(git status --porcelain)" ]; then
 	printf 'FAIL: this script left the tree dirty, so it cannot be trusted about anything above\n'

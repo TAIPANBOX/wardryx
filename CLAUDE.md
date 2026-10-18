@@ -68,6 +68,7 @@ go build ./...
 ./scripts/scenarios-bind-to-tests.sh
 ./scripts/compat-surface.sh      # invariant 19; compat/1.0.json against the code, COMPATIBILITY.md rendered
 ./scripts/agent-is-bound-to-its-key.sh  # invariants 36 to 38
+./scripts/decision-record-is-checked.sh  # invariant 40
 ./scripts/gates-have-teeth.sh   # invariant 12; needs a clean tree
 ```
 
@@ -1420,3 +1421,42 @@ decision outcome and every exported signature identical.
     recorded, the cache marker dropped, replay reading the field strictly,
     replay ignoring it, the load check skipped, and only the first matched
     policy checked, each caught)*
+
+40. **An allow or a hold is not returned when its record could not be written,
+    under the closed record fail mode.** `@decided 2026-10-18` (paraphrased):
+    wardryx does not answer a caller with an allow or a hold that no record
+    holds, because that answer is the one an audit later has nothing to say
+    about. Finding F-011 of the 2026-10-17 review: `emit` logged the write error
+    and the handler answered anyway, so a full volume or an unwritable stream
+    gave decisions with no record, and only a log line said so.
+
+    `WARDRYX_RECORD_FAILMODE` picks the mode. `closed`, the default, answers
+    `503 record_unavailable` in place of an allow or a hold whose record was not
+    written. `open` returns it anyway and makes `/readyz` answer 503 with
+    `"record": "failing"` until a write succeeds; `serve` warns at startup when
+    `open` is chosen. Any value other than `open` is closed. A deny is returned
+    either way: it starts no action, so refusing it would trade a known refusal
+    for an unknown one, and it stays fail-open through `emit`. Only an allow or
+    a hold goes through `recordDecision`.
+
+    Named limits. With no event file (`WARDRYX_EVENTS_PATH` unset) there is no
+    record to fail, and nothing is refused. The record of an approval grant or
+    denial and of a policy write stays fail-open, as before: the approval's row
+    in the store is the durable record of a grant, and an allow that uses its
+    token is refused under closed if its own record fails. A single-use token
+    redeemed for an allow that was then refused stays spent, and a refused hold
+    stays pending in the approval queue. The gate reads the handler's shape; it
+    does not judge whether a given refusal is right.
+
+    *(gate: `scripts/decision-record-is-checked.sh`, six cases in
+    `scripts/gates-have-teeth.sh`; test: `TestAnAllowIsRefusedWhenItsRecordCannotBeWritten`,
+    `TestAHoldIsRefusedWhenItsRecordCannotBeWritten`,
+    `TestADenyIsStillReturnedWhenItsRecordCannotBeWritten`,
+    `TestTheAllowRecordIsAttemptedBeforeItIsReturned`,
+    `TestOpenModeReturnsTheAllowAndRaisesTheHealthFlag`,
+    `TestReadyzClearsWhenARecordWriteSucceedsAgain`,
+    `TestWithNoRecordWriterNothingIsRefused` in `internal/api`;
+    `TestTheRecordFailModeDefaultsToClosed` and
+    `TestRecordFailModeIsOpenOnlyWhenAskedFor` in `internal/config`;
+    `TestTheOpenFailModeIsWarnedAtStartup` in `cmd/wardryx`; scenarios in
+    `features/record-failmode.feature`)*

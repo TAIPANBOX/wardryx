@@ -8,6 +8,7 @@ package config
 import (
 	"os"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -74,7 +75,13 @@ type Config struct {
 	// /v1/decide outcome. Empty disables OTLP export entirely -- see
 	// internal/otel and internal/api.Server.exportSpan.
 	OTLPEndpoint string
-	// RecordFailMode is WARDRYX_RECORD_FAILMODE (scaffold: raw value).
+	// RecordFailMode is WARDRYX_RECORD_FAILMODE: what a decision does when its
+	// record cannot be written. "closed", the default, refuses an allow or a
+	// hold whose record was not written (answering 503 record_unavailable);
+	// "open" returns it anyway and makes /readyz answer 503 with the record
+	// named as failing until a write succeeds. Only "open" (case and
+	// surrounding space aside) selects the open mode; anything else reads as
+	// closed, the safe side. Invariant 40.
 	RecordFailMode string
 }
 
@@ -94,8 +101,17 @@ func FromEnv() Config {
 		ApprovalSingleUse:  parseBoolClosed(os.Getenv("WARDRYX_APPROVAL_SINGLE_USE")),
 		ApprovalUnanswered: parseDuration(os.Getenv("WARDRYX_APPROVAL_UNANSWERED_AFTER")),
 		OTLPEndpoint:       os.Getenv("WARDRYX_OTLP_ENDPOINT"),
-		RecordFailMode:     os.Getenv("WARDRYX_RECORD_FAILMODE"),
+		RecordFailMode:     recordFailMode(os.Getenv("WARDRYX_RECORD_FAILMODE")),
 	}
+}
+
+// recordFailMode reads WARDRYX_RECORD_FAILMODE. Only the word open selects the
+// open mode; unset, empty or anything else is closed.
+func recordFailMode(s string) string {
+	if strings.EqualFold(strings.TrimSpace(s), "open") {
+		return "open"
+	}
+	return "closed"
 }
 
 // parseDuration reports a Go duration, or zero when the variable is unset or

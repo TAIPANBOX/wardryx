@@ -108,11 +108,17 @@ const systemAgentID = "agent://wardryx.internal/admin/policy-api"
 type Server struct {
 	engine *pdp.Engine
 	store  store.Store
-	events *event.ChainedWriter
-	// records is what emit writes through. Scaffold: tests swap it.
+	// records is what every event is written through. Nil when no event file
+	// is configured (WARDRYX_EVENTS_PATH unset): no record, so none can fail.
 	records recordSink
-	otel    *wotel.Exporter
-	keys    map[string]Principal
+	// recordOpen is the record fail mode. False, the default, refuses an allow
+	// or a hold whose record was not written; true returns it and lets
+	// /readyz say so. See recordDecision and invariant 40.
+	recordOpen bool
+	// record remembers whether the last record write failed, for /readyz.
+	record recordHealth
+	otel   *wotel.Exporter
+	keys   map[string]Principal
 	// allow is compiled from keys once: whether they name one org, and each
 	// listed key's agent patterns. See speaksFor.
 	allow             allowance
@@ -198,10 +204,9 @@ func (o *storeOutage) recovered() {
 // empty policy set) contributes no fixed floor, so the admin policy API
 // alone determines what Engine decides against.
 func New(engine *pdp.Engine, st store.Store, events *event.ChainedWriter, otel *wotel.Exporter, keys map[string]Principal, approvalSecret []byte, approvalSingleUse bool, basePolicies []policy.Policy) *Server {
-	return &Server{
+	s := &Server{
 		engine:            engine,
 		store:             st,
-		events:            events,
 		otel:              otel,
 		keys:              keys,
 		allow:             newAllowance(keys),
@@ -213,6 +218,10 @@ func New(engine *pdp.Engine, st store.Store, events *event.ChainedWriter, otel *
 		unansweredSeen:    map[string]bool{},
 		storeTimeout:      DefaultStoreTimeout,
 	}
+	if events != nil {
+		s.records = events
+	}
+	return s
 }
 
 // DefaultStoreTimeout is how long a policy write, or the readiness ping,
@@ -241,8 +250,51 @@ type recordSink interface {
 	Write(event.Event) error
 }
 
-// SetRecordFailOpen is a scaffold stub: it keeps today's behaviour.
-func (s *Server) SetRecordFailOpen(open bool) {}
+// SetRecordFailOpen selects the record fail mode (invariant 40). False is the
+// closed default: an allow or a hold whose record was not written is refused.
+// True is the explicit open mode: it is returned, and /readyz answers 503 with
+// the record named as failing until a write succeeds again.
+func (s *Server) SetRecordFailOpen(open bool) { s.recordOpen = open }
+
+// recordHealth remembers whether the last record write failed, so the log
+// carries one line when the record starts failing and one when it writes
+// again, and /readyz can say so. Like storeOutage it is in memory: a restart
+// that starts healthy is saying something true about a process that has lost
+// its memory of the failure.
+type recordHealth struct {
+	mu      sync.Mutex
+	failing bool
+}
+
+// failed records a write that failed, and logs the first one since the record
+// last wrote. The detail goes to the log and nowhere else (invariant 10).
+func (h *recordHealth) failed(evType string, err error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.failing {
+		return
+	}
+	h.failing = true
+	log.Printf("wardryx: the record is failing (%s: %v); /readyz answers 503 until a write succeeds", evType, err)
+}
+
+// recovered records a write that succeeded, and logs it only if the record was
+// failing.
+func (h *recordHealth) recovered() {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if !h.failing {
+		return
+	}
+	h.failing = false
+	log.Printf("wardryx: the record is writing again")
+}
+
+func (h *recordHealth) isFailing() bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.failing
+}
 
 // SetPolicyArchive attaches the archive that keeps every policy set this
 // server makes effective, and immediately keeps the set already in force:
@@ -378,27 +430,38 @@ func handleHealthz(w http.ResponseWriter, _ *http.Request) {
 	_, _ = w.Write([]byte("ok"))
 }
 
-// readyDTO is what /readyz answers: one field, "ok" or "unreachable", and
-// nothing about why. The why is the driver's text and goes to the log.
+// readyDTO is what /readyz answers: "ok" or "unreachable" for the store, and
+// "failing" for the record only while a record write is failing (absent
+// otherwise). Neither says why: the why is the driver's or the writer's text
+// and goes to the log.
 type readyDTO struct {
-	Store string `json:"store"`
+	Store  string `json:"store"`
+	Record string `json:"record,omitempty"`
 }
 
 // handleReadyz reads nothing from the request: no body, no query, no bearer.
 // It is unauthenticated because the launcher checks that need it (a compose
 // healthcheck, a Kubernetes readiness probe, install.sh's own probe) carry no
-// credential, and what it reveals is one word about whether the store
-// answered.
+// credential, and what it reveals is whether the store answered and whether
+// the record is being written. Either one failing is a 503 (invariant 20 for
+// the store, invariant 40 for the record).
 func (s *Server) handleReadyz(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), s.storeTimeout)
 	defer cancel()
+	dto := readyDTO{Store: "ok"}
+	status := http.StatusOK
 	if err := s.store.Ping(ctx); err != nil {
 		s.outage.failed("pinging the store", err)
-		writeJSON(w, http.StatusServiceUnavailable, readyDTO{Store: "unreachable"})
-		return
+		dto.Store = "unreachable"
+		status = http.StatusServiceUnavailable
+	} else {
+		s.outage.recovered()
 	}
-	s.outage.recovered()
-	writeJSON(w, http.StatusOK, readyDTO{Store: "ok"})
+	if s.record.isFailing() {
+		dto.Record = "failing"
+		status = http.StatusServiceUnavailable
+	}
+	writeJSON(w, status, dto)
 }
 
 // --- auth ---
@@ -734,8 +797,14 @@ func (s *Server) handleDecide(w http.ResponseWriter, r *http.Request, principal 
 
 	switch resp.Decision {
 	case pdp.Allow:
-		s.emit(evPolicyAllow, event.SeverityInfo, req.AgentID, req.RunID, req.OnBehalfOf,
-			decisionInput(req, resp))
+		// A refused allow has already redeemed its token above. The token stays
+		// spent and a person grants again: an allow the record does not hold is
+		// not returned (invariant 40).
+		if !s.recordDecision(evPolicyAllow, event.SeverityInfo, req.AgentID, req.RunID, req.OnBehalfOf,
+			decisionInput(req, resp)) {
+			writeRecordUnavailable(w)
+			return
+		}
 		s.exportSpan(req.AgentID, req.RunID, resp.Decision, resp.Reason, resp.PolicyVersion, req.ToolNames)
 
 	case pdp.Deny:
@@ -795,8 +864,13 @@ func (s *Server) handleDecide(w http.ResponseWriter, r *http.Request, principal 
 		// holds, not only denials.
 		heldInput := decisionInput(req, resp)
 		heldInput["approval_id"] = held.ApprovalID
-		s.emit(evApprovalRequested, event.SeverityMedium, req.AgentID, req.RunID, req.OnBehalfOf,
-			heldInput)
+		// A refused hold leaves its approval pending in the queue: nobody was
+		// given its ID, so nobody waits on it (named in invariant 40).
+		if !s.recordDecision(evApprovalRequested, event.SeverityMedium, req.AgentID, req.RunID, req.OnBehalfOf,
+			heldInput) {
+			writeRecordUnavailable(w)
+			return
+		}
 		s.exportSpan(req.AgentID, req.RunID, resp.Decision, resp.Reason, resp.PolicyVersion, req.ToolNames)
 	}
 
@@ -1422,6 +1496,13 @@ func writeInternalError(w http.ResponseWriter, op string, err error) {
 	writeError(w, http.StatusInternalServerError, "internal error while "+op)
 }
 
+// writeRecordUnavailable answers an allow or a hold that the closed fail mode
+// refused because its record could not be written. The body names the refusal
+// and nothing about the write: the cause is in the log (invariant 10).
+func writeRecordUnavailable(w http.ResponseWriter) {
+	writeError(w, http.StatusServiceUnavailable, "record_unavailable")
+}
+
 // writeStoreFailure answers a store call that failed on a bounded path. A
 // store that is gone (store.IsUnavailable: the deadline passed, or the
 // network said no) is a 503 with a reason wardryx composed, and the outage
@@ -1527,15 +1608,14 @@ func writeBodyError(w http.ResponseWriter, err error) bool {
 	return false
 }
 
-// emit writes one agent-event, source "wardryx", chained via the SPEC 6.5
-// prev_hash the ChainedWriter stamps on it. A nil ChainedWriter (events
-// disabled: WARDRYX_EVENTS_PATH unset) makes this a no-op. A write failure
-// is logged and dropped, fail-open, matching event.ChainedWriter's own
-// contract and TokenFuse's exporter: event delivery never blocks or fails
-// the decision path it is describing.
-func (s *Server) emit(evType, severity, agentID, runID string, onBehalfOf []string, data map[string]any) {
-	if s.events == nil {
-		return
+// writeRecord writes one agent-event, source "wardryx", chained via the SPEC
+// 6.5 prev_hash the ChainedWriter stamps on it, and reports whether the write
+// succeeded. A nil record writer (events disabled: WARDRYX_EVENTS_PATH unset)
+// writes nothing and reports nothing wrong: no record is configured, so none
+// can fail. A failed write marks the record as failing for /readyz.
+func (s *Server) writeRecord(evType, severity, agentID, runID string, onBehalfOf []string, data map[string]any) error {
+	if s.records == nil {
+		return nil
 	}
 	e := event.Event{
 		Schema:     event.SchemaV02,
@@ -1548,9 +1628,36 @@ func (s *Server) emit(evType, severity, agentID, runID string, onBehalfOf []stri
 		OnBehalfOf: onBehalfOf,
 		Data:       data,
 	}
-	if err := s.events.Write(e); err != nil {
-		log.Printf("wardryx: failed to write %s event: %v", evType, err)
+	if err := s.records.Write(e); err != nil {
+		s.record.failed(evType, err)
+		return err
 	}
+	s.record.recovered()
+	return nil
+}
+
+// emit writes an event whose failure no decision depends on: a policy write,
+// an approval grant or denial, a refusal, the unanswered-approval sweep. It is
+// fail-open, as event.ChainedWriter and TokenFuse's exporter are: event
+// delivery never blocks or fails the request it describes. A failure is
+// visible on /readyz (recordHealth), and the caller carries on.
+func (s *Server) emit(evType, severity, agentID, runID string, onBehalfOf []string, data map[string]any) {
+	_ = s.writeRecord(evType, severity, agentID, runID, onBehalfOf, data)
+}
+
+// recordDecision writes the record of an allow or a hold, the two answers a
+// caller acts on, and reports whether the answer may be returned. Under the
+// closed fail mode, the default, it may not when the write failed, and the
+// caller answers 503 record_unavailable (invariant 40). Under the open fail
+// mode it may, and /readyz says the record is failing until a write succeeds.
+// A deny is not written through here. It puts no action in motion, so
+// refusing it would only trade a known refusal for an unknown one, and it
+// stays fail-open through emit.
+func (s *Server) recordDecision(evType, severity, agentID, runID string, onBehalfOf []string, data map[string]any) bool {
+	if s.writeRecord(evType, severity, agentID, runID, onBehalfOf, data) == nil {
+		return true
+	}
+	return s.recordOpen
 }
 
 // exportSpan posts one OTLP span for a /v1/decide outcome. A nil otel

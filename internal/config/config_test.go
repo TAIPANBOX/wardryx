@@ -22,6 +22,7 @@ func TestFromEnv(t *testing.T) {
 		ApprovalSecret:    "shh",
 		ApprovalSingleUse: true,
 		OTLPEndpoint:      "http://otel:4318",
+		RecordFailMode:    "closed",
 	}
 	if cfg != want {
 		t.Errorf("FromEnv = %+v, want %+v", cfg, want)
@@ -36,10 +37,12 @@ func TestFromEnvUnsetIsZeroValue(t *testing.T) {
 		t.Setenv(k, "")
 	}
 	cfg := FromEnv()
-	// Every field is its zero value with one exception, named so nobody reads
-	// it as drift: ApprovalSingleUse defaults to true since 1.0 (invariant 5),
-	// and TestFromEnvApprovalSingleUseDefaultsOn pins that on its own.
-	want := Config{ApprovalSingleUse: true}
+	// Every field is its zero value with two exceptions, named so nobody reads
+	// them as drift: ApprovalSingleUse defaults to true since 1.0 (invariant 5),
+	// and TestFromEnvApprovalSingleUseDefaultsOn pins that on its own;
+	// RecordFailMode defaults to closed (invariant 40), pinned by
+	// TestTheRecordFailModeDefaultsToClosed.
+	want := Config{ApprovalSingleUse: true, RecordFailMode: "closed"}
 	if cfg != want {
 		t.Errorf("FromEnv with everything unset = %+v, want %+v", cfg, want)
 	}

@@ -110,6 +110,7 @@ Status: frozen at 1.0.0 (2026-09-13) and carried unchanged into 2.0.0 (2026-10-1
 - identity_source, an optional request field on /v1/decide: absent or unknown is none, so a caller that sends nothing is decided as before; additive, so a minor release
 - require_identity_source, a new policy field whose absent value means no requirement; additive, so a minor release
 - the approval token's default (single-use or reusable for its TTL) is a configuration default, not wire: it may flip by decision, and WARDRYX_APPROVAL_SINGLE_USE stays the switch either way
+- WARDRYX_RECORD_FAILMODE, an optional environment variable: unset is closed, which refuses an allow or a hold whose record was not written (503 record_unavailable), and open returns it and flags /readyz; a configuration default, not wire, so the default may flip by decision (invariant 40), and the variable stays the switch either way
 
 ## Experimental
 
