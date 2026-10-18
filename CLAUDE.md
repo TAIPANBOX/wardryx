@@ -69,6 +69,7 @@ go build ./...
 ./scripts/compat-surface.sh      # invariant 19; compat/1.0.json against the code, COMPATIBILITY.md rendered
 ./scripts/agent-is-bound-to-its-key.sh  # invariants 36 to 38
 ./scripts/decision-record-is-checked.sh  # invariant 40
+./scripts/approval-verifier-trusts-its-keys.sh  # invariant 41
 ./scripts/gates-have-teeth.sh   # invariant 12; needs a clean tree
 ```
 
@@ -118,12 +119,14 @@ an absent invariant.
    name, so two loads of one policy set are byte-comparable and a diff between
    deployments means something. *(test:
    `TestLoadIsDeterministicAcrossRepeatedLoads`)*
-4. **An approval token is always HMAC-signed and never falls back to unsigned.**
-   The key is `WARDRYX_APPROVAL_SECRET`. If the secret is absent the service
-   must refuse to mint a token, not mint an unsigned one. An unsigned approval
-   is an approval anyone can forge.
+4. **An approval token is always signed and never falls back to unsigned.**
+   The v2 form is HMAC-signed with `WARDRYX_APPROVAL_SECRET`; the v3 form
+   (invariant 41) is ES256-signed by Keyryx. With neither a signer nor a secret
+   the service must refuse to mint a token, not mint an unsigned one. An
+   unsigned approval is an approval anyone can forge.
    *(test: `TestMintAndVerifyFailClosedWithNoSecret`,
-   `TestDecideGrantFailsClosedWithNoSecretAndLeavesApprovalPending`)*
+   `TestDecideGrantFailsClosedWithNoSecretAndLeavesApprovalPending`,
+   `TestNoSecretAndNoSignerStillRefuses` in `internal/approval`)*
 5. **An approval token is single-use.** A redeemed token allows exactly one
    `/v1/decide` call for the approval it was minted for; a second presentation
    of the same token returns a fresh hold. Replay of an approval is the whole
@@ -1460,3 +1463,43 @@ decision outcome and every exported signature identical.
     `TestRecordFailModeIsOpenOnlyWhenAskedFor` in `internal/config`;
     `TestTheOpenFailModeIsWarnedAtStartup` in `cmd/wardryx`; scenarios in
     `features/record-failmode.feature`)*
+
+41. **An approval token signed by Keyryx is verified by its signature under the
+    kid it names, from a key set the verifier holds, and by nothing else.**
+    `@decided 2026-10-18` (paraphrased): the approval key is held by the custody
+    service, Keyryx, so the record can show what a person approved and an auditor
+    can check a token without the service that issued it. The HMAC tokens of
+    earlier grants are accepted only until a deadline the operator sets.
+    `@claude 2026-10-18`, the shape: with `WARDRYX_APPROVAL_SIGNER=keyryx` a grant
+    mints a v3 token, a compact JWS whose header is `alg` ES256, `kid`, and
+    `typ` `wardryx-approval+jwt`, and whose claims are `v` 3, `aid` (the
+    approval), the agent, run, tools, `max_cost_usd`, `tcd` when the hold named a
+    call, `exp` and `nonce`. Keyryx signs at grant time and before the approval
+    is written, so a grant that cannot be signed leaves the hold pending and
+    answers 503. Verification reads only the set wardryx holds: each key is a
+    P-256 point on the curve whose kid is its RFC 7638 thumbprint, a kid the set
+    does not hold is refused, a key or key location in the header is refused as
+    malformed, the HMAC is never used for v3, and a failed fetch keeps the set
+    it had. Everything after the signature is what invariants 5 to 29 state for
+    v2. A v2 token verifies before `WARDRYX_APPROVAL_V2_UNTIL` and not after, and
+    with a signer and no deadline it is refused. Named limits: a token is trusted
+    as far as Keyryx's key and its use log are; the cached set has no age bound
+    while Keyryx is unreachable, so a revoked kid verifies until the next
+    successful fetch; a verifier that never fetched the set refuses every v3
+    token; a fingerprint names a key, not a person. *(gate:
+    `scripts/approval-verifier-trusts-its-keys.sh`, five cases in
+    `gates-have-teeth.sh`; test: `TestAGrantMintsAnES256TokenNamingItsKidAndTheApproval`,
+    `TestAnUnknownKidIsRefused`, `TestAForgedOrAlteredSignatureIsRefused`,
+    `TestTheHeaderMustPinES256AndCarryNoKey`, `TestV3BindsWhatV2Binds`,
+    `TestAGrantWithTheSignerDownLeavesTheHoldPending`,
+    `TestAV2TokenVerifiesOnlyBeforeTheDeadline`,
+    `TestAKidThatMovesTwiceFailsTheGrant` in `internal/approval`;
+    `TestAGrantWithKeyryxMintsAV3TokenThatDecideAccepts`,
+    `TestAnUnknownKidHoldsAgainOnDecide`,
+    `TestAGrantWithKeyryxDownAnswers503AndLeavesTheHoldPending`,
+    `TestCachedKeysVerifyWhileKeyryxIsDown` in `internal/api`;
+    `TestAMalformedSetIsRefusedWholeAndTheCacheKept`,
+    `TestAKidThatIsNotTheKeysThumbprintIsRefused`,
+    `TestARevokedKidLeavesTheSetAtOnce`,
+    `TestAPollThatFailsKeepsTheSetItHad` in `internal/keyryx`; scenarios in
+    `features/approval-token-v3.feature`.)*

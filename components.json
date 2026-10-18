@@ -76,6 +76,18 @@
           },
           "WARDRYX_RECORD_FAILMODE": {
             "required": false
+          },
+          "WARDRYX_APPROVAL_SIGNER": {
+            "required": false
+          },
+          "WARDRYX_KEYRYX_URL": {
+            "required": false
+          },
+          "WARDRYX_KEYRYX_CREDENTIAL_FILE": {
+            "required": false
+          },
+          "WARDRYX_APPROVAL_V2_UNTIL": {
+            "required": false
           }
         },
         "starts_with_empty_environment": false,

@@ -250,18 +250,19 @@ type DecideResponse struct {
 // concurrent /v1/decide calls, with policy-as-code updates (internal/api's
 // admin policy routes) swapping the pointer underneath them.
 type Engine struct {
-	policies       atomic.Pointer[policy.Set]
-	approvalSecret []byte
+	policies  atomic.Pointer[policy.Set]
+	approvals approval.Keys
 }
 
 // New returns an Engine over policies, using approvalSecret (may be nil) to
-// verify any approval_token presented in a DecideRequest. A nil policies is
-// treated as policy.Empty(): every request falls through to Allow.
+// verify any approval_token presented in a DecideRequest: a v2 token under it,
+// and nothing else until WithApprovalKeys sets more. A nil policies is treated
+// as policy.Empty(): every request falls through to Allow.
 func New(policies *policy.Set, approvalSecret []byte) *Engine {
 	if policies == nil {
 		policies = policy.Empty()
 	}
-	e := &Engine{approvalSecret: approvalSecret}
+	e := &Engine{approvals: approval.Keys{Secret: approvalSecret, V2: approval.V2Rule{Accepted: true}}}
 	e.policies.Store(policies)
 	return e
 }
@@ -489,7 +490,7 @@ func (e *Engine) Decide(req DecideRequest) DecideResponse {
 	if pol, ok := overThreshold(matched, req.EstCostUSD); ok {
 		resp.ApprovalTokenRequired = true
 		if req.ApprovalToken != "" {
-			verr := approval.VerifyApprovalTokenForCall(e.approvalSecret, req.ApprovalToken, req.AgentID, req.RunID, req.ToolNames, req.EstCostUSD, req.ToolCall.Digest())
+			verr := e.approvals.VerifyForCall(req.ApprovalToken, req.AgentID, req.RunID, req.ToolNames, req.EstCostUSD, req.ToolCall.Digest())
 			if verr == nil {
 				resp.Decision = Allow
 				resp.Reason = fmt.Sprintf("estimated cost %s exceeds policy %q threshold %s; allowed via a valid approval_token", formatUSD(req.EstCostUSD), pol.Name, formatUSD(*pol.RequireHumanAboveUSD))
@@ -517,12 +518,12 @@ func (e *Engine) Decide(req DecideRequest) DecideResponse {
 		why := held.reason(req.ToolCall)
 		// A hold on an absent signal is lifted only by a token bound to this
 		// call; any other signal hold by any token that verifies for it.
-		verify := approval.VerifyApprovalTokenForCall
+		verify := e.approvals.VerifyForCall
 		if held.callMustBeBound {
-			verify = approval.VerifyApprovalTokenBoundToCall
+			verify = e.approvals.VerifyBoundToCall
 		}
 		if req.ApprovalToken != "" &&
-			verify(e.approvalSecret, req.ApprovalToken, req.AgentID, req.RunID, req.ToolNames, req.EstCostUSD, req.ToolCall.Digest()) == nil {
+			verify(req.ApprovalToken, req.AgentID, req.RunID, req.ToolNames, req.EstCostUSD, req.ToolCall.Digest()) == nil {
 			resp.Decision = Allow
 			resp.Reason = why + "; allowed via a valid approval_token"
 			return resp

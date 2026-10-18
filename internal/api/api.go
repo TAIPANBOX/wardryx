@@ -122,7 +122,7 @@ type Server struct {
 	// allow is compiled from keys once: whether they name one org, and each
 	// listed key's agent patterns. See speaksFor.
 	allow             allowance
-	approvalSecret    []byte
+	approvals         approval.Keys
 	approvalTTL       time.Duration
 	approvalSingleUse bool
 	// basePolicies is the file-loaded policy set's own rules, fixed at
@@ -210,7 +210,7 @@ func New(engine *pdp.Engine, st store.Store, events *event.ChainedWriter, otel *
 		otel:              otel,
 		keys:              keys,
 		allow:             newAllowance(keys),
-		approvalSecret:    approvalSecret,
+		approvals:         approval.Keys{Secret: approvalSecret, V2: approval.V2Rule{Accepted: true}},
 		approvalTTL:       approval.DefaultTTL,
 		approvalSingleUse: approvalSingleUse,
 		basePolicies:      basePolicies,
@@ -817,7 +817,7 @@ func (s *Server) handleDecide(w http.ResponseWriter, r *http.Request, principal 
 		// policy_deny above, distinct from approval_requested (which
 		// covers only a *fresh* hold).
 		if dto.ApprovalToken != "" {
-			verr := approval.VerifyApprovalTokenForCall(s.approvalSecret, dto.ApprovalToken, req.AgentID, req.RunID, req.ToolNames, req.EstCostUSD, req.ToolCall.Digest())
+			verr := s.approvals.VerifyForCall(dto.ApprovalToken, req.AgentID, req.RunID, req.ToolNames, req.EstCostUSD, req.ToolCall.Digest())
 			if errors.Is(verr, approval.ErrTokenExpired) {
 				s.emit(evApprovalTimeout, event.SeverityHigh, req.AgentID, req.RunID, req.OnBehalfOf,
 					map[string]any{"reason": "presented approval_token had expired"})
@@ -1058,7 +1058,7 @@ func (s *Server) handleApprovalDecide(w http.ResponseWriter, r *http.Request, pr
 		return
 	}
 
-	decided, token, err := approval.Decide(r.Context(), s.store, s.approvalSecret, id, dto.Decision, approverID(principal), dto.DecidedBy, s.approvalTTL)
+	decided, token, err := approval.DecideWith(r.Context(), s.store, s.approvals, id, dto.Decision, approverID(principal), dto.DecidedBy, s.approvalTTL)
 	switch {
 	case errors.Is(err, store.ErrNotFound):
 		writeError(w, http.StatusNotFound, "approval not found")
@@ -1068,6 +1068,9 @@ func (s *Server) handleApprovalDecide(w http.ResponseWriter, r *http.Request, pr
 		return
 	case errors.Is(err, approval.ErrNoSecret):
 		writeError(w, http.StatusInternalServerError, "WARDRYX_APPROVAL_SECRET is not configured; cannot grant")
+		return
+	case errors.Is(err, approval.ErrSigner):
+		writeError(w, http.StatusServiceUnavailable, "the approval signing service is unavailable; the hold stays pending")
 		return
 	case err != nil:
 		writeInternalError(w, "deciding the approval", err)

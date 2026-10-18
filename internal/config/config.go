@@ -83,6 +83,23 @@ type Config struct {
 	// surrounding space aside) selects the open mode; anything else reads as
 	// closed, the safe side. Invariant 40.
 	RecordFailMode string
+	// ApprovalSigner is WARDRYX_APPROVAL_SIGNER: where a grant's approval token
+	// is signed. Empty, the default, mints the v2 HMAC token under
+	// ApprovalSecret, as before. "keyryx" mints a v3 ES256 token through Keyryx
+	// (CLAUDE.md invariant 41) and needs KeyryxURL. Any other value is refused
+	// at start by cmd/wardryx, so a typo never falls back to HMAC silently.
+	ApprovalSigner string
+	// KeyryxURL is WARDRYX_KEYRYX_URL: the Keyryx custody endpoint, an http or
+	// https URL, or unix:///path for its socket. Read with ApprovalSigner
+	// "keyryx".
+	KeyryxURL string
+	// KeyryxCredentialFile is WARDRYX_KEYRYX_CREDENTIAL_FILE: a file holding the
+	// bearer key wardryx presents to Keyryx over http. A socket needs none.
+	KeyryxCredentialFile string
+	// ApprovalV2Until is WARDRYX_APPROVAL_V2_UNTIL: an RFC 3339 instant after
+	// which v2 HMAC tokens are refused. Set, v2 verifies before it; unset, v2
+	// verifies forever without a signer and not at all with one.
+	ApprovalV2Until string
 }
 
 // FromEnv reads every WARDRYX_* variable once. Call it a single time per
@@ -90,18 +107,22 @@ type Config struct {
 // result through as a value.
 func FromEnv() Config {
 	return Config{
-		Addr:               os.Getenv("WARDRYX_ADDR"),
-		Keys:               os.Getenv("WARDRYX_KEYS"),
-		AllowDevkey:        parseBool(os.Getenv("WARDRYX_ALLOW_DEVKEY")),
-		DB:                 os.Getenv("WARDRYX_DB"),
-		Policy:             os.Getenv("WARDRYX_POLICY"),
-		EventsPath:         os.Getenv("WARDRYX_EVENTS_PATH"),
-		PolicyArchive:      os.Getenv("WARDRYX_POLICY_ARCHIVE"),
-		ApprovalSecret:     os.Getenv("WARDRYX_APPROVAL_SECRET"),
-		ApprovalSingleUse:  parseBoolClosed(os.Getenv("WARDRYX_APPROVAL_SINGLE_USE")),
-		ApprovalUnanswered: parseDuration(os.Getenv("WARDRYX_APPROVAL_UNANSWERED_AFTER")),
-		OTLPEndpoint:       os.Getenv("WARDRYX_OTLP_ENDPOINT"),
-		RecordFailMode:     recordFailMode(os.Getenv("WARDRYX_RECORD_FAILMODE")),
+		Addr:                 os.Getenv("WARDRYX_ADDR"),
+		Keys:                 os.Getenv("WARDRYX_KEYS"),
+		AllowDevkey:          parseBool(os.Getenv("WARDRYX_ALLOW_DEVKEY")),
+		DB:                   os.Getenv("WARDRYX_DB"),
+		Policy:               os.Getenv("WARDRYX_POLICY"),
+		EventsPath:           os.Getenv("WARDRYX_EVENTS_PATH"),
+		PolicyArchive:        os.Getenv("WARDRYX_POLICY_ARCHIVE"),
+		ApprovalSecret:       os.Getenv("WARDRYX_APPROVAL_SECRET"),
+		ApprovalSingleUse:    parseBoolClosed(os.Getenv("WARDRYX_APPROVAL_SINGLE_USE")),
+		ApprovalUnanswered:   parseDuration(os.Getenv("WARDRYX_APPROVAL_UNANSWERED_AFTER")),
+		OTLPEndpoint:         os.Getenv("WARDRYX_OTLP_ENDPOINT"),
+		RecordFailMode:       recordFailMode(os.Getenv("WARDRYX_RECORD_FAILMODE")),
+		ApprovalSigner:       os.Getenv("WARDRYX_APPROVAL_SIGNER"),
+		KeyryxURL:            os.Getenv("WARDRYX_KEYRYX_URL"),
+		KeyryxCredentialFile: os.Getenv("WARDRYX_KEYRYX_CREDENTIAL_FILE"),
+		ApprovalV2Until:      os.Getenv("WARDRYX_APPROVAL_V2_UNTIL"),
 	}
 }
 

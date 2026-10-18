@@ -62,6 +62,10 @@ func codeDefaults(t *testing.T) map[string]string {
 		"WARDRYX_APPROVAL_UNANSWERED_AFTER": unanswered.String(),
 		"WARDRYX_OTLP_ENDPOINT":             cfg.OTLPEndpoint,
 		"WARDRYX_RECORD_FAILMODE":           cfg.RecordFailMode,
+		"WARDRYX_APPROVAL_SIGNER":           cfg.ApprovalSigner,
+		"WARDRYX_KEYRYX_URL":                cfg.KeyryxURL,
+		"WARDRYX_KEYRYX_CREDENTIAL_FILE":    cfg.KeyryxCredentialFile,
+		"WARDRYX_APPROVAL_V2_UNTIL":         cfg.ApprovalV2Until,
 	}
 }
 
