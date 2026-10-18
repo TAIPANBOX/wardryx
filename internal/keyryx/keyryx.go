@@ -13,7 +13,6 @@ package keyryx
 import (
 	"bytes"
 	"context"
-	"crypto/ecdh"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/sha256"
@@ -22,7 +21,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"math/big"
 	"net"
 	"net/http"
 	"net/url"
@@ -266,7 +264,8 @@ func parseSet(body []byte) (map[string]*ecdsa.PublicKey, error) {
 		if err != nil {
 			return nil, err
 		}
-		if k.Kid == "" || k.Kid != thumbprint(pub) {
+		want, err := thumbprint(pub)
+		if err != nil || k.Kid == "" || k.Kid != want {
 			return nil, errors.New("keyryx: jwks: a kid is not the thumbprint of its key")
 		}
 		if _, dup := out[k.Kid]; dup {
@@ -277,8 +276,9 @@ func parseSet(body []byte) (map[string]*ecdsa.PublicKey, error) {
 	return out, nil
 }
 
-// p256Key decodes base64url coordinates and checks the point is on the curve,
-// by the crypto/ecdh parser, which refuses a point that is not.
+// p256Key decodes base64url coordinates into a P-256 public key. The point
+// 0x04 || x || y is parsed by crypto/ecdsa, which refuses one that is not on
+// the curve, so the coordinates are never read back off a key.
 func p256Key(xs, ys string) (*ecdsa.PublicKey, error) {
 	x, errX := base64.RawURLEncoding.DecodeString(xs)
 	y, errY := base64.RawURLEncoding.DecodeString(ys)
@@ -286,20 +286,23 @@ func p256Key(xs, ys string) (*ecdsa.PublicKey, error) {
 		return nil, errors.New("keyryx: jwks: a coordinate is not 32 bytes")
 	}
 	point := append(append([]byte{4}, x...), y...)
-	if _, err := ecdh.P256().NewPublicKey(point); err != nil {
+	pub, err := ecdsa.ParseUncompressedPublicKey(elliptic.P256(), point)
+	if err != nil {
 		return nil, errors.New("keyryx: jwks: a point is not on P-256")
 	}
-	return &ecdsa.PublicKey{Curve: elliptic.P256(), X: new(big.Int).SetBytes(x), Y: new(big.Int).SetBytes(y)}, nil
+	return pub, nil
 }
 
 // thumbprint is the RFC 7638 thumbprint of a P-256 key: the SHA-256 of its
-// required members in lexicographic order, base64url without padding.
-func thumbprint(k *ecdsa.PublicKey) string {
-	x, y := make([]byte, 32), make([]byte, 32)
-	k.X.FillBytes(x)
-	k.Y.FillBytes(y)
+// required members in lexicographic order, base64url without padding. The
+// coordinates are cut from the key's uncompressed encoding.
+func thumbprint(k *ecdsa.PublicKey) (string, error) {
+	point, err := k.Bytes()
+	if err != nil || len(point) != 65 || point[0] != 4 {
+		return "", errors.New("keyryx: a key that is not an uncompressed P-256 point")
+	}
 	js := fmt.Sprintf(`{"crv":"P-256","kty":"EC","x":%q,"y":%q}`,
-		base64.RawURLEncoding.EncodeToString(x), base64.RawURLEncoding.EncodeToString(y))
+		base64.RawURLEncoding.EncodeToString(point[1:33]), base64.RawURLEncoding.EncodeToString(point[33:65]))
 	sum := sha256.Sum256([]byte(js))
-	return base64.RawURLEncoding.EncodeToString(sum[:])
+	return base64.RawURLEncoding.EncodeToString(sum[:]), nil
 }

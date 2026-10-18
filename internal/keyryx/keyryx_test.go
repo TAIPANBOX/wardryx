@@ -9,7 +9,6 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"math/big"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -27,16 +26,21 @@ const testCredential = "wardryx-test-credential-0123456789"
 // thumbprint is RFC 7638 for a P-256 key, written out here rather than shared
 // with the code under test, so the test cannot agree with a wrong implementation.
 func testThumbprint(k *ecdsa.PublicKey) string {
-	x, y := coord(k.X), coord(k.Y)
+	x, y := coordinate(k, 0), coordinate(k, 1)
 	js := fmt.Sprintf(`{"crv":"P-256","kty":"EC","x":%q,"y":%q}`, x, y)
 	sum := sha256.Sum256([]byte(js))
 	return base64.RawURLEncoding.EncodeToString(sum[:])
 }
 
-func coord(n *big.Int) string {
-	b := make([]byte, 32)
-	n.FillBytes(b)
-	return base64.RawURLEncoding.EncodeToString(b)
+// coordinate is the base64url x (which 0) or y (which 1) of k, cut from its
+// uncompressed encoding.
+func coordinate(k *ecdsa.PublicKey, which int) string {
+	point, err := k.Bytes()
+	if err != nil {
+		panic(err)
+	}
+	start := 1 + 32*which
+	return base64.RawURLEncoding.EncodeToString(point[start : start+32])
 }
 
 func newKey(t *testing.T) *ecdsa.PrivateKey {
@@ -52,7 +56,7 @@ func newKey(t *testing.T) *ecdsa.PrivateKey {
 func jwks(keys map[string]*ecdsa.PublicKey) string {
 	var out []map[string]any
 	for kid, k := range keys {
-		out = append(out, map[string]any{"kty": "EC", "crv": "P-256", "x": coord(k.X), "y": coord(k.Y),
+		out = append(out, map[string]any{"kty": "EC", "crv": "P-256", "x": coordinate(k, 0), "y": coordinate(k, 1),
 			"kid": kid, "alg": "ES256", "use": "sig"})
 	}
 	b, _ := json.Marshal(map[string]any{"keys": out})
@@ -62,7 +66,7 @@ func jwks(keys map[string]*ecdsa.PublicKey) string {
 // jwksWithKid serves one key under the kid the test names, which need not be its thumbprint.
 func jwksWithKid(kid string, k *ecdsa.PublicKey) string {
 	b, _ := json.Marshal(map[string]any{"keys": []map[string]any{{"kty": "EC", "crv": "P-256",
-		"x": coord(k.X), "y": coord(k.Y), "kid": kid, "alg": "ES256", "use": "sig"}}})
+		"x": coordinate(k, 0), "y": coordinate(k, 1), "kid": kid, "alg": "ES256", "use": "sig"}}})
 	return string(b)
 }
 
@@ -211,7 +215,7 @@ func TestTheCacheHoldsTheSetItFetchedAndRefusesAnUnknownKid(t *testing.T) {
 	if err := c.Refresh(context.Background()); err != nil {
 		t.Fatalf("Refresh: %v", err)
 	}
-	if got, ok := c.Key(kid); !ok || got.X.Cmp(k.X) != 0 || got.Y.Cmp(k.Y) != 0 {
+	if got, ok := c.Key(kid); !ok || coordinate(got, 0) != coordinate(&k.PublicKey, 0) || coordinate(got, 1) != coordinate(&k.PublicKey, 1) {
 		t.Fatalf("the published key is not in the cache under its kid")
 	}
 	if _, ok := c.Key("nope"); ok {
@@ -248,7 +252,7 @@ func TestAMalformedSetIsRefusedWholeAndTheCacheKept(t *testing.T) {
 	// A second key whose coordinates are not on the curve: the whole set is refused.
 	bad := `{"keys":[{"kty":"EC","crv":"P-256","kid":"bad","alg":"ES256","use":"sig",` +
 		`"x":"` + base64.RawURLEncoding.EncodeToString(make([]byte, 32)) + `","y":"` + base64.RawURLEncoding.EncodeToString(make([]byte, 32)) + `"},` +
-		`{"kty":"EC","crv":"P-256","kid":"` + goodKid + `","x":"` + coord(good.X) + `","y":"` + coord(good.Y) + `"}]}`
+		`{"kty":"EC","crv":"P-256","kid":"` + goodKid + `","x":"` + coordinate(&good.PublicKey, 0) + `","y":"` + coordinate(&good.PublicKey, 1) + `"}]}`
 	j.body.Store(bad)
 	if err := c.Refresh(context.Background()); err == nil {
 		t.Fatal("a set with an off-curve key must be refused")
@@ -369,8 +373,9 @@ func TestTheThumbprintIsTheOneAgentStackGoComputes(t *testing.T) {
 		if err != nil {
 			t.Fatalf("delegation.Thumbprint: %v", err)
 		}
-		if got := thumbprint(&k.PublicKey); got != want {
-			t.Fatalf("thumbprint = %q, agent-stack-go computes %q", got, want)
+		got, err := thumbprint(&k.PublicKey)
+		if err != nil || got != want {
+			t.Fatalf("thumbprint = %q, %v; agent-stack-go computes %q", got, err, want)
 		}
 	}
 }
