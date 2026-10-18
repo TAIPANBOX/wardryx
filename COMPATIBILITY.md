@@ -2,7 +2,7 @@
 
 `TAIPANBOX/wardryx` promises the surface below from its 1.0 (`compat/1.0.json`, held by `scripts/compat-surface.sh` on every push). A frozen name is not removed or renamed within a major; an additive thing may appear as a minor; an experimental thing may change in any release.
 
-Status: frozen at 1.0.0 (2026-09-13): the surface below is the promise of this major; the gate has held it since the manifest was written ahead of the tag
+Status: frozen at 1.0.0 (2026-09-13) and carried unchanged into 2.0.0 (2026-10-18): the surface below is the promise of this major; no frozen name was removed or renamed in 2.0.0, and its behaviour changes are in docs/releases/v2.0.0.md. The gate has held it since the manifest was written ahead of the tag
 
 ## Frozen
 
