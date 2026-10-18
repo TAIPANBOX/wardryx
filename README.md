@@ -6,7 +6,7 @@
 
 [![CI](https://github.com/TAIPANBOX/wardryx/actions/workflows/ci.yml/badge.svg)](https://github.com/TAIPANBOX/wardryx/actions/workflows/ci.yml)
 ![Go](https://img.shields.io/badge/go-1.27-00ADD8.svg)
-![tests](https://img.shields.io/badge/tests-529-brightgreen.svg)
+![tests](https://img.shields.io/badge/tests-539-brightgreen.svg)
 ![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)
 ![Status](https://img.shields.io/badge/status-deterministic%20PDP-2dd4bf.svg)
 
@@ -563,6 +563,17 @@ an allowance, everything the agent would have done next is a world nothing
 recorded. The honest question is aggregate: over this history, which decisions
 would the candidate have taken differently.
 
+## The record of a decision
+
+When `WARDRYX_EVENTS_PATH` is set, every allow, deny and hold is written to the event file, and an allow or a hold is written before it is returned. `WARDRYX_RECORD_FAILMODE` says what happens when that write fails (invariant 40, decided 2026-10-18 for finding F-011 of the 2026-10-17 review):
+
+- **`closed`, the default.** An allow or a hold whose record was not written is not returned. `/v1/decide` answers `503` with `{"error": "record_unavailable"}`. A single-use approval token redeemed for that allow stays spent, so a person grants again. A refused hold stays pending in the approval queue, where nothing waits on it.
+- **`open`.** The allow or the hold is returned anyway, and `/readyz` answers `503` with `"record": "failing"` until a write succeeds again. The log carries one line when the record starts failing and one when it writes again.
+
+A deny is returned whether or not its record was written. It starts no action, so refusing it would trade a known refusal for an unknown one. Any value of `WARDRYX_RECORD_FAILMODE` other than `open` is `closed`, and `serve` warns at startup when `open` is chosen.
+
+Named limits: with no event file configured there is no record, so nothing can fail to be written. The records of approval grants and denials and of policy writes are still written fail-open: the approval's own row in the store is the durable record of a grant, and the allow that uses its token is refused under `closed` if its record cannot be written. `scripts/decision-record-is-checked.sh` reads the source to hold the two refusals in place; the tests in `internal/api` prove their behaviour.
+
 ## Configuration
 
 Every `WARDRYX_*` variable is read once at process startup (`internal/config`), never per-request. Each `serve` flag falls back to its environment variable when the flag itself is left unset. The Default column is what applies when the variable is unset, and `TestReadmeEnvTableStatesTheDefaultsTheCodeUses` checks every cell against the code; `TestReadmeProseNeverContradictsTheCodeDefaults` holds the rest of this README to the same defaults.
@@ -580,6 +591,7 @@ Every `WARDRYX_*` variable is read once at process startup (`internal/config`), 
 | `WARDRYX_APPROVAL_SINGLE_USE` | (none) | `true` | `true`, or any value that does not parse as a bool, makes each granted token allow exactly one `/v1/decide` call; only an explicit `false` keeps a token reusable for its full TTL (see [Stateless human-in-the-loop](#stateless-human-in-the-loop)) |
 | `WARDRYX_APPROVAL_UNANSWERED_AFTER` | (none) | `15m` | How long a hold may sit undecided before one `approval_unanswered` event is raised for it; a Go duration; `0` turns the sweep off (see [The hold nobody decided](#the-hold-nobody-decided)) |
 | `WARDRYX_OTLP_ENDPOINT` | `-otlp-endpoint` | (empty) | OTLP/HTTP endpoint for decision spans (see [OTLP export](#otlp-export)); empty disables it |
+| `WARDRYX_RECORD_FAILMODE` | (none) | `closed` | What an allow or a hold does when its record cannot be written: `closed` refuses it (503 `record_unavailable`), `open` returns it and `/readyz` answers 503 with the record named as failing; any value other than `open` is `closed` (see [The record of a decision](#the-record-of-a-decision)) |
 
 The `[:role]` segment of a `WARDRYX_KEYS` entry is one of `admin` (every endpoint, including `POST /v1/approvals/{id}/decide`, for its own org), `cross-org-admin` (every endpoint, for every org), `pep` (an enforcement point: `/v1/decide`, `/v1/filter-tools`, and what a viewer reads) or `viewer` (`GET /v1/approvals` and `GET /v1/status`), and defaults to `admin` when the segment is omitted. The `[:agents]` segment is everything after the third colon: agent patterns separated by `|`, in a policy `target`'s glob syntax, for example `gw-secret:acme:pep:agent://acme.example/*|agent://ops.acme.example/runner`.
 

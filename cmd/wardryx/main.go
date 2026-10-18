@@ -243,6 +243,10 @@ func runServe(args []string) error {
 	engine := pdp.New(policies, []byte(cfg.ApprovalSecret))
 	basePolicies := policies.Policies()
 	srv := api.New(engine, st, events, otelExporter, keys, []byte(cfg.ApprovalSecret), cfg.ApprovalSingleUse, basePolicies)
+	srv.SetRecordFailOpen(cfg.RecordFailMode == "open")
+	if warn := recordFailModeWarning(cfg.RecordFailMode); warn != "" {
+		fmt.Fprintln(os.Stderr, warn)
+	}
 
 	// Attached before anything is restored or served, because it keeps the
 	// set already in force as a side effect: the file-loaded base decides
@@ -413,6 +417,16 @@ func singleUseInMemoryWarning(singleUse bool, dbDSN string) string {
 		return ""
 	}
 	return "wardryx: approval tokens are single-use (the default; WARDRYX_APPROVAL_SINGLE_USE=false turns reuse back on) with no -db (in-memory approval store): single-use is only enforced within this one process, not across multiple wardryx instances -- pass -db for single-use that holds across a multi-instance deployment"
+}
+
+// recordFailModeWarning says, once at startup, that the open record fail mode
+// is in force: a decision whose record cannot be written is returned anyway,
+// and /readyz is the only place that says so. The closed default says nothing.
+func recordFailModeWarning(mode string) string {
+	if mode != "open" {
+		return ""
+	}
+	return "wardryx: WARDRYX_RECORD_FAILMODE=open: an allow or a hold whose record cannot be written is returned anyway; /readyz answers 503 with the record named as failing until a write succeeds (the closed default refuses such an answer)"
 }
 
 func displayAddr(addr string) string {

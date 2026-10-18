@@ -73,6 +73,9 @@
           },
           "WARDRYX_POLICY_ARCHIVE": {
             "required": false
+          },
+          "WARDRYX_RECORD_FAILMODE": {
+            "required": false
           }
         },
         "starts_with_empty_environment": false,
