@@ -465,6 +465,13 @@ type decideRequestDTO struct {
 	Model             *string `json:"model,omitempty"`
 	EstCostUSD        float64 `json:"est_cost_usd,omitempty"`
 	AttestationMethod string  `json:"attestation_method,omitempty"`
+	// IdentitySource: how the enforcement point knew the agent, "agent-token" when
+	// it verified an agent token at its own door, "client-key" for a static key,
+	// "none" for neither. Absent is none, and so is any other value, so a caller
+	// that predates this field is decided exactly as before, and no source it
+	// sends can earn more than it says. Set by the enforcement point from its door,
+	// never from the agent (CLAUDE.md invariant 39).
+	IdentitySource string `json:"identity_source,omitempty"`
 	// ChainProven: the enforcement point VERIFIED this request's delegation
 	// proof (agent-passport SPEC 5.2) before calling. Absent means it did
 	// not, never "it did and forgot to say": a default of true would make
@@ -559,6 +566,10 @@ func signalsRecord(signals []pdp.Signal) []any {
 //     short-lived secret into a permanent one. A replay does not need it:
 //     whether a token verified is already visible in Decision and Reason.
 //
+// identity_source is recorded normalized, as the rule read it, so a replay feeds
+// back the source the decision stood on; a record from before the field reads as
+// none.
+//
 // TestDecisionInputCoversEveryDecideRequestField holds this to the shape of
 // pdp.DecideRequest itself, so a new PDP input cannot quietly skip the record.
 func decisionInput(req pdp.DecideRequest, resp pdp.DecideResponse) map[string]any {
@@ -572,6 +583,7 @@ func decisionInput(req pdp.DecideRequest, resp pdp.DecideResponse) map[string]an
 		"model":              req.Model,
 		"est_cost_usd":       req.EstCostUSD,
 		"attestation_method": req.AttestationMethod,
+		"identity_source":    policy.IdentitySourceOf(req.IdentitySource),
 		"chain_proven":       req.ChainProven,
 		"policy_version":     resp.PolicyVersion,
 		"reason":             resp.Reason,
@@ -673,6 +685,7 @@ func (s *Server) handleDecide(w http.ResponseWriter, r *http.Request, principal 
 		ModelAbsent:       dto.Model == nil,
 		EstCostUSD:        dto.EstCostUSD,
 		AttestationMethod: dto.AttestationMethod,
+		IdentitySource:    policy.IdentitySourceOf(dto.IdentitySource),
 		ChainProven:       dto.ChainProven,
 		ApprovalToken:     dto.ApprovalToken,
 		Signals:           signals,
@@ -737,6 +750,7 @@ func (s *Server) handleDecide(w http.ResponseWriter, r *http.Request, principal 
 			"model":              req.Model,
 			"est_cost_usd":       req.EstCostUSD,
 			"attestation_method": req.AttestationMethod,
+			"identity_source":    policy.IdentitySourceOf(req.IdentitySource),
 			"on_behalf_of":       req.OnBehalfOf,
 			"chain_proven":       req.ChainProven,
 			"reason":             resp.Reason,

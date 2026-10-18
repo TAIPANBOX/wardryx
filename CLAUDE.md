@@ -265,7 +265,25 @@ an absent invariant.
    **Absent means not verified, never "verified and unsaid".** A default of
    true would make every enforcement point that has not been upgraded look like
    one that verifies, which is a fleet mid-upgrade silently satisfying a rule
-   none of it implements. *(test:
+   none of it implements.
+
+   **identity_source extends this in words, and changes none of it.**
+   `@decided 2026-10-18` (paraphrased): the enforcement point reports how it
+   knew the agent, as `agent-token` (it verified an agent token at its own
+   door), `client-key` (a static key) or `none`, and a policy may require one
+   of them (invariant 39). wardryx still does not verify a token: it holds no
+   verifier, no JWKS and no key for the agent, and it never sees the agent's
+   request, so what arrives is the enforcement point's FACT, believed the way
+   `chain_proven` is believed. A lying enforcement point can claim a stronger
+   source than it had, and that is the same residual as a lying
+   `chain_proven`, named rather than closed. What the source adds is a bound
+   a policy can state, not a check wardryx performs. Absent or unknown is none,
+   never the strongest value. *(test:
+   `TestARequireIdentitySourceDeniesARequestThatSentNoSource` and
+   `TestAnUnknownIdentitySourceCountsAsNone` in `internal/api`, which hold the
+   absent and unknown cases as none)*
+
+   *(test:
    `TestAnAbsentChainProvenMeansNotVerified`,
    `TestTheWireCarriesWhetherAnybodyVerifiedTheProof`, both of which exist
    because a planted mutant hardcoding `ChainProven: true` in the HTTP layer
@@ -1369,3 +1387,36 @@ decision outcome and every exported signature identical.
     the tree before the field), `TestABlankOrPaddedOrgIsRefusedAtLoad` in
     `internal/policy`; `TestARecordedOrgIsFedBackToThePDP` in
     `internal/replay`; scenarios in `features/policy-belongs-to-an-org.feature`)*
+
+39. **A policy can require the identity source the enforcement point reports,
+    and a request without a known source is refused by such a policy.**
+    `@decided 2026-10-18` (paraphrased): the decision names how the enforcement
+    point knew the agent, and a policy may list the sources it accepts.
+    `require_identity_source` takes `agent-token`, `client-key` and `none`; a
+    value that is none of those is refused at load, naming it. Every matched
+    policy's list must name the request's source, so two lists intersect. An
+    absent `identity_source`, and any value that is not one of the three, is
+    `none`, which no list naming a real source accepts. The rule is rule 8 of
+    `Decide`, after `deny_if_unattested` and before the model rule, and a
+    decision under a policy that carries it is never cacheable. A policy that
+    does not set the field keeps its `PolicyVersion` byte for byte, and each
+    decision event records the normalized source. Replay reads a record that
+    lacks one as `none`, never as unreadable. Named limits: wardryx trusts the
+    reported source, as invariant 13 says; `wardryx check` has no enforcement
+    point and so judges such a rule as `none`; the rule denies and never holds.
+    *(gate: `scripts/decide-order-is-documented.sh`, which reads the rule's
+    place in the order; test: `TestTheSourceRuleComesAfterDenyIfUnattested`,
+    `TestEveryMatchedPolicyMustListTheSource`,
+    `TestAPolicyThatReadsTheSourceIsNeverCacheable`,
+    `TestARecordedIdentitySourceReplaysToTheSameVerdict`,
+    `TestDecisionInputCoversEveryDecideRequestField` in `internal/api`;
+    `TestAnUnlistedIdentitySourceIsRefusedAtLoad`,
+    `TestTheOrderOfTheSourceListDoesNotChangeThePolicyVersion`,
+    `TestAPolicyWithoutTheRequirementKeepsItsVersion` in `internal/policy`;
+    `TestARecordedSourceIsReadBack`,
+    `TestAnOldRecordWithoutASourceIsReadAsNone` in `internal/replay`; scenarios
+    in `features/a-policy-can-require-a-verified-agent.feature`; mutants: an
+    absent source read as agent-token, the rule inverted, the source not
+    recorded, the cache marker dropped, replay reading the field strictly,
+    replay ignoring it, the load check skipped, and only the first matched
+    policy checked, each caught)*

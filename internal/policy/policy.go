@@ -145,6 +145,18 @@ type Policy struct {
 	// DenyIfUnattested denies any request from an agent with no live
 	// attestation (attestation method "" or "none").
 	DenyIfUnattested bool `yaml:"deny_if_unattested,omitempty" json:"deny_if_unattested,omitempty"`
+	// RequireIdentitySource lists the identity sources a request must come with
+	// to be decided by this policy: any of IdentitySourceAgentToken,
+	// IdentitySourceClientKey and IdentitySourceNone. A request whose
+	// identity_source is not listed is denied. Every matched policy's list must
+	// name the source, so two lists intersect, as allow_tool's do. Nil or empty
+	// (the default) means no requirement.
+	//
+	// The source is the enforcement point's report of how it knew the agent,
+	// believed as chain_proven is (CLAUDE.md invariant 13). It is not a claim
+	// wardryx checks: a policy that asks for agent-token trusts the enforcement
+	// point to have verified the token at its own door.
+	RequireIdentitySource []string `yaml:"require_identity_source,omitempty" json:"require_identity_source,omitempty"`
 	// DenyIfChainUnproven denies a request whose delegation chain is present
 	// and was not PROVED (agent-passport SPEC 5.2).
 	//
@@ -706,6 +718,46 @@ func decodeYAMLDocument(data []byte, index int) ([]Policy, error) {
 	return []Policy{one}, nil
 }
 
+// The identity sources a request can come with, as the enforcement point reports
+// them in identity_source. A request's source is never read from the agent, and
+// any value that is not one of these is none.
+const (
+	// IdentitySourceAgentToken: the enforcement point verified an agent token at
+	// its own door (agent-passport's delegation proof, the DPoP-bound token).
+	IdentitySourceAgentToken = "agent-token"
+	// IdentitySourceClientKey: the agent presented a static client key.
+	IdentitySourceClientKey = "client-key"
+	// IdentitySourceNone: the enforcement point knew no source, which is also
+	// what an absent identity_source means. It is the weakest of the three.
+	IdentitySourceNone = "none"
+)
+
+// IdentitySourceOf returns the identity source a request named, exactly as
+// spelled: one of the three sources, or IdentitySourceNone for anything else,
+// an empty value included. A source in another case, or with a space, is not
+// one of the three, so it counts as none: an unknown value never earns a
+// requirement that names a stronger source.
+func IdentitySourceOf(s string) string {
+	switch s {
+	case IdentitySourceAgentToken, IdentitySourceClientKey, IdentitySourceNone:
+		return s
+	}
+	return IdentitySourceNone
+}
+
+// refuseUnknownIdentitySource refuses a require_identity_source value that is
+// not one of the three sources. A value that matched nothing would deny every
+// request, or, in a typo of a source that is not weaker, pass one that should
+// have been refused, so the load says which value it could not read.
+func refuseUnknownIdentitySource(p Policy) error {
+	for _, v := range p.RequireIdentitySource {
+		if IdentitySourceOf(v) != v {
+			return fmt.Errorf("policy %q: require_identity_source names %q, which is not an identity source; the identity sources are agent-token, client-key and none", p.Name, v)
+		}
+	}
+	return nil
+}
+
 // Compile normalizes and validates policies, compiles each Target glob, and
 // returns the resulting Set. Compile(nil) returns a valid, empty Set.
 func Compile(policies []Policy) (*Set, error) {
@@ -716,6 +768,9 @@ func Compile(policies []Policy) (*Set, error) {
 			return nil, err
 		}
 		if err := refuseBlankAllowModels(p); err != nil {
+			return nil, err
+		}
+		if err := refuseUnknownIdentitySource(p); err != nil {
 			return nil, err
 		}
 	}
@@ -836,6 +891,7 @@ func normalize(policies []Policy) []Policy {
 		np.AllowTool = sortedUnique(p.AllowTool)
 		np.AllowModels = sortedUnique(p.AllowModels)
 		np.AllowDomains = sortedUnique(p.AllowDomains)
+		np.RequireIdentitySource = sortedUnique(p.RequireIdentitySource)
 		np.RequireHumanAboveUSD = cloneUSD(p.RequireHumanAboveUSD)
 		np.DenyAboveUSD = cloneUSD(p.DenyAboveUSD)
 		np.HoldIfSignal = p.HoldIfSignal.clone()

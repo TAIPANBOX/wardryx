@@ -294,6 +294,10 @@ func question(ev event.Event) (pdp.DecideRequest, string, bool, error) {
 	model := need("model")
 	cost := need("est_cost_usd")
 	attestation := need("attestation_method")
+	// Read leniently, not through need: a record from before identity_source
+	// existed has none, and a request that came with no source is none, not an
+	// unreadable record.
+	identity := text(ev.Data["identity_source"])
 	chainProven := need("chain_proven")
 	version := need("policy_version")
 	tokenRequired := need("approval_token_required")
@@ -351,6 +355,7 @@ func question(ev event.Event) (pdp.DecideRequest, string, bool, error) {
 		ModelAbsent:       ev.Data["model_absent"] == true,
 		EstCostUSD:        number(cost),
 		AttestationMethod: text(attestation),
+		IdentitySource:    policy.IdentitySourceOf(identity),
 		ChainProven:       chainProven == true,
 		Signals:           signals,
 		ToolCall:          toolCall,
