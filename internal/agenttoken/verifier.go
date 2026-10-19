@@ -9,6 +9,7 @@
 package agenttoken
 
 import (
+	"container/heap"
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
@@ -79,12 +80,17 @@ const (
 	// fetchTimeout bounds one poll of a source.
 	fetchTimeout = 10 * time.Second
 	// DefaultProofAge and maxProofAge bound how far a DPoP proof's iat may sit
-	// from now. There is no replay cache for proofs: one agent call can cause
-	// several decides, so a proof is good for the window, as a token is for its life.
+	// from now. A proof is single use within that window: its jti is remembered
+	// until the window closes (recordProof), so a proof captured in its window is
+	// refused on a second presentation at any door. A caller sends a fresh proof
+	// with each decide, as RFC 9449 has a proof made per request.
 	DefaultProofAge = 60 * time.Second
 	maxProofAge     = 300 * time.Second
 	// maxProofJTI is the longest proof jti accepted, as the library bounds it.
 	maxProofJTI = 256
+	// maxProofReplays bounds the record of accepted proofs. A full record refuses
+	// a new proof (fail closed) until the window of an entry closes.
+	maxProofReplays = 1 << 18
 )
 
 // Verifier checks tokens against the sources it holds.
@@ -94,6 +100,13 @@ type Verifier struct {
 	revs   *delegation.Revocations // nil when no revocation list is configured
 	doors  map[string]bool         // the normalised door origins a proof may name
 
+	// proofs is the record of accepted proofs, jti to the unix second its window
+	// closes; proofCap bounds it. Both are read and written under proofMu.
+	proofMu  sync.Mutex
+	proofs   map[string]int64
+	proofQ   proofQueue
+	proofCap int
+
 	mu         sync.RWMutex
 	keys       delegation.Set
 	keysJSON   string // the installed set, for the change check
@@ -101,6 +114,29 @@ type Verifier struct {
 	cache      map[string]cacheEntry
 	fromURL    []delegation.JWK // the last set the URL served
 	fromFile   []delegation.JWK // the last set the file held
+}
+
+// proofEntry is one accepted proof: its jti, and the unix second its window
+// closes. A proof is refused for its age once that second has passed, so the
+// entry can be forgotten then and not before.
+type proofEntry struct {
+	jti   string
+	until int64
+}
+
+// proofQueue is a min-heap of accepted proofs by the second their window closes,
+// so the record is pruned from the front in order of expiry.
+type proofQueue []proofEntry
+
+func (q proofQueue) Len() int           { return len(q) }
+func (q proofQueue) Less(i, j int) bool { return q[i].until < q[j].until }
+func (q proofQueue) Swap(i, j int)      { q[i], q[j] = q[j], q[i] }
+func (q *proofQueue) Push(x any)        { *q = append(*q, x.(proofEntry)) }
+func (q *proofQueue) Pop() any {
+	old := *q
+	e := old[len(old)-1]
+	*q = old[:len(old)-1]
+	return e
 }
 
 // cacheEntry is a token that verified: its claims, kept until its exp, and the
@@ -167,7 +203,8 @@ func New(cfg Config, client *http.Client) (*Verifier, error) {
 			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 		}
 	}
-	v := &Verifier{cfg: cfg, client: client, doors: doors, cache: map[string]cacheEntry{}}
+	v := &Verifier{cfg: cfg, client: client, doors: doors, cache: map[string]cacheEntry{},
+		proofs: map[string]int64{}, proofCap: maxProofReplays}
 	if cfg.RevocationURL != "" {
 		v.revs = delegation.NewRevocations(delegation.DefaultRevocationMaxAge, delegation.FailClosed)
 	}
@@ -326,7 +363,8 @@ func (v *Verifier) verifyProof(proof, token, boundJKT string, now time.Time) err
 	if htu == "" {
 		return refuse("no htu")
 	}
-	if jti, _ := claims["jti"].(string); jti == "" || len(jti) > maxProofJTI {
+	jti, _ := claims["jti"].(string)
+	if jti == "" || len(jti) > maxProofJTI {
 		return refuse("no usable jti")
 	}
 	iat, ok := claims["iat"].(float64)
@@ -349,6 +387,35 @@ func (v *Verifier) verifyProof(proof, token, boundJKT string, now time.Time) err
 	if !v.doors[origin] {
 		return refuse("htu is not a configured door origin")
 	}
+	// Last of all: a proof refused for anything else records nothing, and a
+	// proof that passes every check is single use within its window.
+	return v.recordProof(jti, int64(iat), now)
+}
+
+// recordProof remembers an accepted proof's jti until its window closes, and
+// refuses a jti that is already remembered (a replay) or a new one when the
+// record is full (fail closed, since the replay cannot then be ruled out). The
+// check and the insert are one step under proofMu, so a proof presented twice at
+// once is accepted once.
+func (v *Verifier) recordProof(jti string, iat int64, now time.Time) error {
+	v.proofMu.Lock()
+	defer v.proofMu.Unlock()
+	nowS := now.Unix()
+	// A window that closed before now has closed for good: a proof whose iat is
+	// older than the window is refused by the window check, whatever the record says.
+	for len(v.proofQ) > 0 && v.proofQ[0].until < nowS {
+		e := heap.Pop(&v.proofQ).(proofEntry)
+		delete(v.proofs, e.jti)
+	}
+	if _, seen := v.proofs[jti]; seen {
+		return fmt.Errorf("%w: the proof's jti was already used within its window", ErrProof)
+	}
+	if len(v.proofs) >= v.proofCap {
+		return fmt.Errorf("%w: the proof record is full, so this proof cannot be checked for replay", ErrProof)
+	}
+	until := iat + int64(v.cfg.ProofMaxAge/time.Second)
+	v.proofs[jti] = until
+	heap.Push(&v.proofQ, proofEntry{jti: jti, until: until})
 	return nil
 }
 

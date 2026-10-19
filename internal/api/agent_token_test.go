@@ -319,3 +319,21 @@ func TestAProofToAForeignDoorIsRefusedWith403(t *testing.T) {
 		t.Fatalf("a proof to a foreign door: status %d, body %s, want 403 agent_token_proof_invalid", rec.Code, rec.Body)
 	}
 }
+
+// A proof is single use within its window (finding F-013's residual): the same
+// proof sent on a second /v1/decide is refused, though the first was allowed.
+// A caller makes one proof per decide request, so this refuses a replay only.
+func TestAReplayedProofIsRefusedWith403(t *testing.T) {
+	k := newTokenKeySet(t)
+	srv := agentTokenServer(t, requireAgentToken(), k, true, "")
+	tok := mintAgentToken(t, k, tokSubject, nil)
+	dto := decideRequestDTO{AgentID: tokSubject, RunID: "r1", AgentToken: tok,
+		AgentDPoPProof: mintDPoPProof(t, k, tok, tokHTU, time.Now().Unix(), "p-replayed")}
+	if got := decisionFor(t, srv, dto); got.Decision != "allow" {
+		t.Fatalf("the first presentation of a fresh proof: decision %q, reason %q", got.Decision, got.Reason)
+	}
+	rec := doRequest(t, srv.Handler(), http.MethodPost, "/v1/decide", adminKey, dto)
+	if rec.Code != http.StatusForbidden || !strings.Contains(rec.Body.String(), "agent_token_proof_invalid") {
+		t.Fatalf("the same proof sent again: status %d, body %s, want 403 agent_token_proof_invalid", rec.Code, rec.Body)
+	}
+}
