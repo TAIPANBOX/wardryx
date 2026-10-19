@@ -18,7 +18,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/TAIPANBOX/agent-stack-go/chain"
+	"github.com/TAIPANBOX/agent-stack-go/v2/chain"
 	"io"
 	"math"
 	"os"

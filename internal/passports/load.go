@@ -7,7 +7,7 @@
 // and skipped, never fatal to the rest of the batch.
 package passports
 
-import "github.com/TAIPANBOX/agent-stack-go/passport"
+import "github.com/TAIPANBOX/agent-stack-go/v2/passport"
 
 // Report summarizes one Load call: how many passport files were attempted
 // and how many were malformed and skipped.

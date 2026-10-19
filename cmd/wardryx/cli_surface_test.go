@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/TAIPANBOX/agent-stack-go/event"
+	"github.com/TAIPANBOX/agent-stack-go/v2/event"
 )
 
 // envSet, chainPreview and orDash were all at 0%, and runApprovals at a third.

@@ -57,7 +57,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
-	"github.com/TAIPANBOX/agent-stack-go/event"
+	"github.com/TAIPANBOX/agent-stack-go/v2/event"
 	"github.com/TAIPANBOX/wardryx/internal/approval"
 	"github.com/TAIPANBOX/wardryx/internal/archive"
 	wotel "github.com/TAIPANBOX/wardryx/internal/otel"
