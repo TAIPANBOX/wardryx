@@ -109,12 +109,12 @@ func TestANearMissKeyIsRefusedWith401(t *testing.T) {
 
 	last := len(storeAdminSecret) - 1
 	nearMiss := map[string]string{
-		"one byte off at the end":        storeAdminSecret[:last] + "x",
-		"one byte off at the start":      "x" + storeAdminSecret[1:],
-		"the same prefix, shorter":       storeAdminSecret[:last-2],
-		"the same prefix, longer":        storeAdminSecret + "0",
-		"the prefix alone, three bytes":  storeAdminSecret[:3],
-		"upper case of the whole secret": strings.ToUpper(storeAdminSecret),
+		"one byte off at the end":          storeAdminSecret[:last] + "x",
+		"one byte off at the start":        "x" + storeAdminSecret[1:],
+		"the same prefix, shorter":         storeAdminSecret[:last-2],
+		"the same prefix, longer":          storeAdminSecret + "0",
+		"the prefix alone, three bytes":    storeAdminSecret[:3],
+		"upper case of the whole secret":   strings.ToUpper(storeAdminSecret),
 		"another role's key, one byte off": storeViewerSecret[:len(storeViewerSecret)-1] + "x",
 	}
 	for name, presented := range nearMiss {

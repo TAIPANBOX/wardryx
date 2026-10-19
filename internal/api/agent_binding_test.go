@@ -226,11 +226,11 @@ func TestParseKeysReadsAnAgentListAfterTheRole(t *testing.T) {
 		"e": {Org: "acme", Role: RoleViewer},
 	}
 	for k, w := range want {
-		if keys[k] != w {
-			t.Errorf("%s = %+v, want %+v", k, keys[k], w)
+		if keys[keyDigest(k)] != w {
+			t.Errorf("%s = %+v, want %+v", k, keys[keyDigest(k)], w)
 		}
 	}
-	if got := keys["c"].agentPatterns(); len(got) != 2 || got[1] != "agent://b.example/*" {
+	if got := keys[keyDigest("c")].agentPatterns(); len(got) != 2 || got[1] != "agent://b.example/*" {
 		t.Fatalf("patterns of c = %q", got)
 	}
 	// The two new roles are known: no warning.

@@ -66,7 +66,7 @@ func newSigHarness(t *testing.T, singleUse bool, pols ...policy.Policy) *sigHarn
 	if err != nil {
 		t.Fatalf("NewChainedWriter: %v", err)
 	}
-	keys := map[string]Principal{adminKey: {Org: "acme", Role: RoleAdmin}}
+	keys := map[string]Principal{keyDigest(adminKey): {Org: "acme", Role: RoleAdmin}}
 	srv := New(pdp.New(set, []byte(testHMAC)), store.NewMemory(), ew, nil, keys, []byte(testHMAC), singleUse, set.Policies())
 	a, err := archive.New(t.TempDir())
 	if err != nil {

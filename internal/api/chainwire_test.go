@@ -30,7 +30,7 @@ func chainServer(t *testing.T) *Server {
 	if err != nil {
 		t.Fatal(err)
 	}
-	keys := map[string]Principal{adminKey: {Org: "acme", Role: RoleAdmin}}
+	keys := map[string]Principal{keyDigest(adminKey): {Org: "acme", Role: RoleAdmin}}
 	return New(pdp.New(set, []byte(testHMAC)), store.NewMemory(), nil, nil,
 		keys, []byte(testHMAC), false, set.Policies())
 }

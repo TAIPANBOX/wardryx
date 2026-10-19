@@ -53,8 +53,8 @@ func fingerprintServer(t *testing.T, path string) *Server {
 	}
 	engine := pdp.New(set, []byte(testHMAC))
 	keys := map[string]Principal{
-		fpAlphaKey: {Org: "acme", Role: RoleAdmin},
-		fpBravoKey: {Org: "acme", Role: RoleAdmin},
+		keyDigest(fpAlphaKey): {Org: "acme", Role: RoleAdmin},
+		keyDigest(fpBravoKey): {Org: "acme", Role: RoleAdmin},
 	}
 	return New(engine, store.NewMemory(), ew, nil, keys, []byte(testHMAC), false, nil)
 }

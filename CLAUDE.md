@@ -70,6 +70,7 @@ go build ./...
 ./scripts/agent-is-bound-to-its-key.sh  # invariants 36 to 38
 ./scripts/decision-record-is-checked.sh  # invariant 40
 ./scripts/approval-verifier-trusts-its-keys.sh  # invariant 41
+./scripts/no-raw-secret-lookup.sh  # invariant 42
 ./scripts/gates-have-teeth.sh   # invariant 12; needs a clean tree
 ```
 
@@ -1504,3 +1505,9 @@ decision outcome and every exported signature identical.
     `TestAPollThatFailsKeepsTheSetItHad`,
     `TestTheThumbprintIsTheOneAgentStackGoComputes` in `internal/keyryx`; scenarios in
     `features/approval-token-v3.feature`.)*
+
+42. **No map in `internal/` is indexed by a bearer key a request presented, and every configured bearer is stored under its SHA-256 digest.**
+    `@decided 2026-10-17` (paraphrased): close finding F-023 of the 2026-10-17 review, bearer keys compared by a lookup on the raw value rather than in constant time.
+    `@claude 2026-10-19`, the shape: `ParseKeys` keys each entry by `keyDigest`, the lowercase hex SHA-256 of the key; `authenticate` digests the presented bearer and looks that digest up; `keyFingerprint` takes the digest, so the `key_fp` every audit record carries (invariant 35) is unchanged. The MAC comparisons already used `hmac.Equal` (the v2 signature and the tool-call digest in `internal/approval`), so they stay as they are and a source-reading test holds them.
+    Named limits: the comparison is between one-way digests, not between the secret and the presented bytes. The gate follows one assignment from the Authorization header, not a chain of them, and a lookup inside a helper that takes the bearer is not seen.
+    *(gate: `scripts/no-raw-secret-lookup.sh`, four cases in `scripts/gates-have-teeth.sh`; test: `TestTheKeyStoreHoldsNoRawSecret`, `TestEveryRoleStillAuthenticatesWithItsKey` and `TestANearMissKeyIsRefusedWith401` in `internal/api`, `TestTheSignatureAndTheDigestAreComparedInConstantTime` in `internal/approval`; scenarios in `features/bearer-key-store.feature`)*

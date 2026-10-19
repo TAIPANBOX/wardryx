@@ -34,7 +34,7 @@ func TestASpentTokenHoldReplaysAsApprovalSpent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("policy.Compile: %v", err)
 	}
-	keys := map[string]Principal{adminKey: {Org: "acme", Role: RoleAdmin}}
+	keys := map[string]Principal{keyDigest(adminKey): {Org: "acme", Role: RoleAdmin}}
 	srv := New(pdp.New(set, []byte(testHMAC)), store.NewMemory(), ew, nil, keys, []byte(testHMAC), true, set.Policies())
 	a, err := archive.New(t.TempDir())
 	if err != nil {
@@ -99,7 +99,7 @@ func TestARefusedTokenDenyReplaysAsApprovalRefused(t *testing.T) {
 	if err != nil {
 		t.Fatalf("policy.Compile: %v", err)
 	}
-	keys := map[string]Principal{adminKey: {Org: "acme", Role: RoleAdmin}}
+	keys := map[string]Principal{keyDigest(adminKey): {Org: "acme", Role: RoleAdmin}}
 	srv := New(pdp.New(set, []byte(testHMAC)), store.NewMemory(), ew, nil, keys, []byte(testHMAC), true, set.Policies())
 	a, err := archive.New(t.TempDir())
 	if err != nil {

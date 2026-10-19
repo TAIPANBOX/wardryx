@@ -7,11 +7,11 @@ import (
 
 func TestParseKeysOrgAndRole(t *testing.T) {
 	keys, _ := ParseKeys("a:acme,b:globex:viewer", false)
-	if keys["a"] != (Principal{Org: "acme", Role: RoleAdmin}) {
-		t.Errorf("a = %+v, want acme/admin (default role)", keys["a"])
+	if keys[keyDigest("a")] != (Principal{Org: "acme", Role: RoleAdmin}) {
+		t.Errorf("a = %+v, want acme/admin (default role)", keys[keyDigest("a")])
 	}
-	if keys["b"] != (Principal{Org: "globex", Role: RoleViewer}) {
-		t.Errorf("b = %+v, want globex/viewer", keys["b"])
+	if keys[keyDigest("b")] != (Principal{Org: "globex", Role: RoleViewer}) {
+		t.Errorf("b = %+v, want globex/viewer", keys[keyDigest("b")])
 	}
 }
 
@@ -27,8 +27,8 @@ func TestParseKeysEmptySpecYieldsDevKey(t *testing.T) {
 	if len(keys) != 1 {
 		t.Fatalf("len = %d, want 1", len(keys))
 	}
-	if keys["devkey"] != (Principal{Org: "default", Role: RoleAdmin}) {
-		t.Errorf("devkey = %+v, want default/admin", keys["devkey"])
+	if keys[keyDigest("devkey")] != (Principal{Org: "default", Role: RoleAdmin}) {
+		t.Errorf("devkey = %+v, want default/admin", keys[keyDigest("devkey")])
 	}
 }
 
@@ -37,15 +37,15 @@ func TestParseKeysSkipsMalformedEntries(t *testing.T) {
 	if len(keys) != 1 {
 		t.Fatalf("len = %d, want 1: %+v", len(keys), keys)
 	}
-	if _, ok := keys["good"]; !ok {
+	if _, ok := keys[keyDigest("good")]; !ok {
 		t.Errorf("keys = %+v, want \"good\" present", keys)
 	}
 }
 
 func TestParseKeysWhitespaceIsTrimmed(t *testing.T) {
 	keys, _ := ParseKeys(" a : acme : viewer ", false)
-	if keys["a"] != (Principal{Org: "acme", Role: RoleViewer}) {
-		t.Errorf("a = %+v, want acme/viewer", keys["a"])
+	if keys[keyDigest("a")] != (Principal{Org: "acme", Role: RoleViewer}) {
+		t.Errorf("a = %+v, want acme/viewer", keys[keyDigest("a")])
 	}
 }
 
@@ -53,7 +53,7 @@ func TestParseKeysWhitespaceIsTrimmed(t *testing.T) {
 // of the empty-spec case above, same opt-in requirement.
 func TestParseKeysAllMalformedYieldsDevKey(t *testing.T) {
 	keys, _ := ParseKeys("nokey,,:noorg", true)
-	if len(keys) != 1 || keys["devkey"].Org != "default" {
+	if len(keys) != 1 || keys[keyDigest("devkey")].Org != "default" {
 		t.Errorf("keys = %+v, want just the devkey fallback", keys)
 	}
 }
@@ -80,7 +80,7 @@ func TestNoKeysAndNoOptInAuthenticatesNobody(t *testing.T) {
 			t.Errorf("ParseKeys(%q, false) = %+v, want an empty map: nobody should authenticate "+
 				"without an explicit WARDRYX_ALLOW_DEVKEY opt-in", spec, keys)
 		}
-		if _, ok := keys["devkey"]; ok {
+		if _, ok := keys[keyDigest("devkey")]; ok {
 			t.Errorf("ParseKeys(%q, false) installed the devkey fallback without allowDevkey", spec)
 		}
 	}
@@ -127,8 +127,8 @@ func TestParseKeysNormalSpecUnaffectedByAllowDevkeyFlag(t *testing.T) {
 func TestParseKeysUnknownRoleWarns(t *testing.T) {
 	t.Run("an unknown role is stored as given and produces one warning naming the key and the role", func(t *testing.T) {
 		keys, warnings := ParseKeys("a:acme:admni", false)
-		if keys["a"] != (Principal{Org: "acme", Role: "admni"}) {
-			t.Errorf("a = %+v, want acme/admni stored as-is (fails closed on admin routes, not silently corrected)", keys["a"])
+		if keys[keyDigest("a")] != (Principal{Org: "acme", Role: "admni"}) {
+			t.Errorf("a = %+v, want acme/admni stored as-is (fails closed on admin routes, not silently corrected)", keys[keyDigest("a")])
 		}
 		if len(warnings) != 1 {
 			t.Fatalf("warnings = %v, want exactly 1", warnings)
