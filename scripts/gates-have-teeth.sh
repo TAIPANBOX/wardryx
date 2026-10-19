@@ -549,6 +549,31 @@ run_case "approval-verifier-trusts-its-keys: a comment naming a jwk header" pass
 	'./scripts/approval-verifier-trusts-its-keys.sh' \
 	"$(py 'edit("internal/approval/v3.go", "// Nothing in this file touches the HMAC secret.", "// Nothing in this file touches the HMAC secret. A jwk header member is never read.")')"
 
+# Invariant 42, finding F-023: the key store is keyed by digest, and the bearer
+# is looked up by its digest. The fault is the lookup by the presented value,
+# the shape the store had before the change.
+run_case "no-raw-secret-lookup: the store indexed by the presented bearer" fail \
+	'./scripts/no-raw-secret-lookup.sh' \
+	"$(py 'edit("internal/api/api.go", "p, ok := s.keys[digest]", "p, ok := s.keys[token]")')" \
+	"indexes a map by the presented bearer"
+
+# A comment that names the old lookup is prose, not a lookup.
+run_case "no-raw-secret-lookup: a comment naming the old lookup" pass \
+	'./scripts/no-raw-secret-lookup.sh' \
+	"$(py 'edit("internal/api/api.go", "\t// The presented bearer is looked up by its digest", "\t// s.keys[token] was the old lookup, see invariant 42.\n\t// The presented bearer is looked up by its digest")')"
+
+# An index by the bearer's length is an index by a number, not by the bearer.
+run_case "no-raw-secret-lookup: an index by the bearer length" pass \
+	'./scripts/no-raw-secret-lookup.sh' \
+	"$(py 'edit("internal/api/api.go", "digest := keyDigest(token)", "digest := keyDigest(token)\n\t_ = keyDigest(token)[len(token)%64]")')"
+
+# No code reads the bearer from the header any more: the gate measured nothing,
+# and must say so rather than report success.
+run_case "no-raw-secret-lookup: no code reads the Authorization header" fail \
+	'./scripts/no-raw-secret-lookup.sh' \
+	"$(py 'edit("internal/api/api.go", "r.Header.Get(\"Authorization\")", "r.Header.Get(\"X-Authz\")")')" \
+	"measured nothing"
+
 echo
 if [ -n "$(git status --porcelain)" ]; then
 	printf 'FAIL: this script left the tree dirty, so it cannot be trusted about anything above\n'

@@ -115,13 +115,22 @@ func KeyPosture(keys map[string]Principal) []string {
 	return out
 }
 
-// keyFingerprint is the first 16 hex characters of SHA-256 over the bytes of
-// a bearer key. An operator recovers it with
-// printf %s "$KEY" | shasum -a 256 | cut -c1-16, so the audit record can be
-// matched to a key without the record ever holding one.
-func keyFingerprint(key string) string {
+// keyDigest is the form a bearer key is stored under: the lowercase hex
+// SHA-256 of its bytes. ParseKeys computes it once, when the keys are parsed,
+// and authenticate computes it for the presented bearer before the lookup, so
+// no map in this package is indexed by a raw key (CLAUDE.md invariant 42).
+func keyDigest(key string) string {
 	sum := sha256.Sum256([]byte(key))
-	return hex.EncodeToString(sum[:])[:16]
+	return hex.EncodeToString(sum[:])
+}
+
+// keyFingerprint is the first 16 hex characters of a key's digest, the value
+// the audit record carries as key_fp. An operator recovers it with
+// printf %s "$KEY" | shasum -a 256 | cut -c1-16, so the audit record can be
+// matched to a key without the record ever holding one. It takes a digest
+// (keyDigest), the form the key store is keyed by.
+func keyFingerprint(digest string) string {
+	return digest[:16]
 }
 
 // ParseKeys parses "key:org[:role[:agents]],...". Entries missing a key or an
@@ -131,6 +140,11 @@ func keyFingerprint(key string) string {
 // is everything after the third colon (an agent id holds colons of its own):
 // agent patterns separated by "|", each trimmed, blanks dropped. An entry of
 // three segments or fewer parses exactly as it did before agents existed.
+//
+// The map is keyed by keyDigest of each key, never by the key itself: the raw
+// bearer is not kept anywhere in the store, and a presented bearer is looked
+// up by its own digest (authenticate). A caller of New passes this map as it
+// comes back from ParseKeys.
 //
 // Fails closed by default. With no valid entries (an empty spec, WARDRYX_KEYS
 // unset, or every entry malformed) and allowDevkey false, ParseKeys returns
@@ -195,12 +209,12 @@ func ParseKeys(spec string, allowDevkey bool) (map[string]Principal, []string) {
 				}
 			}
 		}
-		keys[key] = Principal{Org: org, Role: role, Agents: strings.Join(agents, "|")}
+		keys[keyDigest(key)] = Principal{Org: org, Role: role, Agents: strings.Join(agents, "|")}
 	}
 	if len(keys) == 0 && allowDevkey {
 		// The local development key: one org, so as an admin it speaks for any
 		// agent and is the cross-org admin of a deployment with no other org.
-		keys["devkey"] = Principal{Org: "default", Role: RoleAdmin}
+		keys[keyDigest("devkey")] = Principal{Org: "default", Role: RoleAdmin}
 	}
 	return keys, warnings
 }

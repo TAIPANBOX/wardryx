@@ -118,7 +118,8 @@ type Server struct {
 	// record remembers whether the last record write failed, for /readyz.
 	record recordHealth
 	otel   *wotel.Exporter
-	keys   map[string]Principal
+	// keys is keyed by keyDigest of each bearer key, never by the key (invariant 42).
+	keys map[string]Principal
 	// allow is compiled from keys once: whether they name one org, and each
 	// listed key's agent patterns. See speaksFor.
 	allow             allowance
@@ -195,10 +196,11 @@ func (o *storeOutage) recovered() {
 // silent no-op (opt-in, per WARDRYX_EVENTS_PATH). otel may also be nil,
 // which makes OTLP span export a silent no-op (opt-in, per
 // WARDRYX_OTLP_ENDPOINT; see internal/otel and exportSpan). keys should
-// come from ParseKeys, which never returns an empty map. approvalSingleUse
-// is WARDRYX_APPROVAL_SINGLE_USE (internal/config): false preserves the
-// original behavior of a granted approval_token staying reusable for its
-// full TTL; see handleDecide. basePolicies is normally the file-loaded
+// come from ParseKeys, which never returns an empty map and keys each entry by
+// its digest. approvalSingleUse is WARDRYX_APPROVAL_SINGLE_USE
+// (internal/config): false preserves the original behavior of a granted
+// approval_token staying reusable for its full TTL; see handleDecide.
+// basePolicies is normally the file-loaded
 // policy.Set's own Policies() (cmd/wardryx passes policies.Policies()); nil
 // or empty is valid and means the file path (-policy unset, or set to an
 // empty policy set) contributes no fixed floor, so the admin policy API
@@ -479,11 +481,14 @@ func (s *Server) authenticate(r *http.Request) (Principal, bool) {
 	if token == "" {
 		return Principal{}, false
 	}
-	p, ok := s.keys[token]
+	// The presented bearer is looked up by its digest, the form the store is
+	// keyed by, never by its own value (invariant 42, finding F-023).
+	digest := keyDigest(token)
+	p, ok := s.keys[digest]
 	if !ok {
 		return Principal{}, false
 	}
-	p.KeyFP = keyFingerprint(token)
+	p.KeyFP = keyFingerprint(digest)
 	return p, true
 }
 

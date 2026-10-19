@@ -71,9 +71,9 @@ func newTestServerOpts(t *testing.T, singleUse bool, otel *wotel.Exporter) *Serv
 	// tests that use this fixture are about the decision, and the binding has
 	// its own (agent_binding_test.go).
 	keys := map[string]Principal{
-		adminKey:  {Org: "acme", Role: RoleAdmin, Agents: "agent://*"},
-		viewerKey: {Org: "acme", Role: RoleViewer},
-		otherOrg:  {Org: "globex", Role: RoleAdmin, Agents: "agent://globex.example/*"},
+		keyDigest(adminKey):  {Org: "acme", Role: RoleAdmin, Agents: "agent://*"},
+		keyDigest(viewerKey): {Org: "acme", Role: RoleViewer},
+		keyDigest(otherOrg):  {Org: "globex", Role: RoleAdmin, Agents: "agent://globex.example/*"},
 	}
 	return New(engine, st, nil, otel, keys, []byte(testHMAC), singleUse, set.Policies())
 }
@@ -1021,7 +1021,7 @@ func newTestServerWithEvents(t *testing.T, path string) (*Server, *event.Chained
 		t.Fatalf("policy.Compile: %v", err)
 	}
 	engine := pdp.New(set, []byte(testHMAC))
-	keys := map[string]Principal{adminKey: {Org: "acme", Role: RoleAdmin}}
+	keys := map[string]Principal{keyDigest(adminKey): {Org: "acme", Role: RoleAdmin}}
 	return New(engine, store.NewMemory(), ew, nil, keys, []byte(testHMAC), false, set.Policies()), ew
 }
 
