@@ -107,3 +107,15 @@ Feature: wardryx verifies the agent's own token before it trusts who the agent i
     When the configuration is read
     Then each value reaches its setting
     # -> internal/config:TestAgentTokenSettingsAreReadFromTheEnvironment
+
+  Scenario: The key set is fetched from its URL, and a refused poll keeps the set held
+    Given WARDRYX_AGENT_TOKEN_JWKS_URL names a key set that loaded
+    When the URL answers with an error on a later poll
+    Then a token that verified under the held set still verifies
+    # -> internal/agenttoken:TestTheKeySetIsFetchedFromItsURLAndAFailedRefreshKeepsIt
+
+  Scenario: The sources are polled on their interval
+    Given a running verifier with a key set URL
+    When time passes
+    Then the URL is asked again and again, not once
+    # -> internal/agenttoken:TestTheSourcesArePolledOnTheInterval

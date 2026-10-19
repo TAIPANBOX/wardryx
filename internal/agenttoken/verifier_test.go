@@ -1,6 +1,7 @@
 package agenttoken
 
 import (
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -311,5 +312,94 @@ func TestAnIncompleteConfigurationIsRefused(t *testing.T) {
 		if _, err := New(cfg, http.DefaultClient); err == nil {
 			t.Errorf("%s: New accepted the configuration, want a refusal naming what is missing", name)
 		}
+	}
+}
+
+// keySetServer serves a JWK set whose body and status the test can change.
+type keySetServer struct {
+	mu     sync.Mutex
+	body   []byte
+	status int
+	hits   int
+	srv    *httptest.Server
+}
+
+func newKeySetServer(t *testing.T, body []byte) *keySetServer {
+	t.Helper()
+	s := &keySetServer{body: body, status: http.StatusOK}
+	s.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		s.hits++
+		w.WriteHeader(s.status)
+		_, _ = w.Write(s.body)
+	}))
+	t.Cleanup(s.srv.Close)
+	return s
+}
+
+func (s *keySetServer) set(status int, body []byte) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.status, s.body = status, body
+}
+
+func (s *keySetServer) count() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.hits
+}
+
+// The key set is polled from its URL. A refresh that the URL answers with an
+// error keeps the set held, and the token it verified under still verifies.
+func TestTheKeySetIsFetchedFromItsURLAndAFailedRefreshKeepsIt(t *testing.T) {
+	key := newKey(t)
+	raw, err := json.Marshal(delegation.Set{Keys: []delegation.JWK{delegation.FromPublic(&key.PublicKey, testKid)}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ks := newKeySetServer(t, raw)
+	v, err := New(Config{Issuer: testIssuer, Audiences: []string{testAudience}, JWKSURL: ks.srv.URL}, nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := v.Load(t.Context()); err != nil {
+		t.Fatalf("Load from the URL: %v", err)
+	}
+	n := now()
+	tok := mint(t, key, testKid, "ES256", claimsFor(n, nil))
+	if _, err := v.Verify(tok, n); err != nil {
+		t.Fatalf("the token under a key the URL served was refused: %v", err)
+	}
+	ks.set(http.StatusInternalServerError, []byte("oops"))
+	if err := v.Refresh(t.Context()); err == nil {
+		t.Fatal("a refresh the URL answered with 500 reported no error")
+	}
+	if _, err := v.Verify(tok, n); err != nil {
+		t.Fatalf("the set held before a refused poll no longer verifies: %v", err)
+	}
+}
+
+// Run polls the sources on its interval, not once.
+func TestTheSourcesArePolledOnTheInterval(t *testing.T) {
+	key := newKey(t)
+	raw, err := json.Marshal(delegation.Set{Keys: []delegation.JWK{delegation.FromPublic(&key.PublicKey, testKid)}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ks := newKeySetServer(t, raw)
+	v, err := New(Config{Issuer: testIssuer, Audiences: []string{testAudience}, JWKSURL: ks.srv.URL}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	go v.Run(ctx, 5*time.Millisecond, nil)
+	deadline := time.Now().Add(5 * time.Second)
+	for ks.count() < 3 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if ks.count() < 3 {
+		t.Fatalf("Run polled the URL %d times in five seconds, want it to poll on its interval", ks.count())
 	}
 }
