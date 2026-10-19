@@ -127,7 +127,10 @@ type Server struct {
 	agentTokens *agenttoken.Verifier
 	// approvers verifies the statement a console signs for a person's decision
 	// (invariant 43). Nil refuses every statement.
-	approvers             *approverstmt.Verifier
+	approvers *approverstmt.Verifier
+	// allowKeyApprovals accepts a key-kind decision while approvers is set
+	// (WARDRYX_ALLOW_KEY_APPROVALS=1; invariant 43).
+	allowKeyApprovals     bool
 	agentTokenIgnoredOnce sync.Once
 	// allow is compiled from keys once: whether they name one org, and each
 	// listed key's agent patterns. See speaksFor.
@@ -1126,6 +1129,12 @@ func (s *Server) handleApprovalDecide(w http.ResponseWriter, r *http.Request, pr
 		}
 		statement = v
 		approver, approverKind = "approver:"+v.Approver, "person"
+	} else if s.approvers != nil && !s.allowKeyApprovals {
+		// A console key set is configured, so a decision names a person through a
+		// statement. A bare key decision is refused and the hold stays pending,
+		// unless the operator allowed key-kind approvals (invariant 43).
+		writeError(w, http.StatusForbidden, "approver_statement_required")
+		return
 	}
 
 	decided, token, err := approval.DecideWith(r.Context(), s.store, s.approvals, id, dto.Decision, approver, dto.DecidedBy, s.approvalTTL)
@@ -1154,6 +1163,11 @@ func (s *Server) handleApprovalDecide(w http.ResponseWriter, r *http.Request, pr
 		"approver_kind": approverKind}
 	if decided.DecidedByLabel != "" {
 		data["decided_by_label"] = decided.DecidedByLabel
+	}
+	if approverKind == "key" && s.approvers != nil {
+		// Logged on every key-kind decision while the operator allows them, so the
+		// allowance cannot be used quietly (invariant 43).
+		log.Printf("wardryx: WARNING: approval %s was decided by key %s with no approver statement, because WARDRYX_ALLOW_KEY_APPROVALS=1", decided.ApprovalID, principal.KeyFP)
 	}
 	if approverKind == "person" {
 		data["approver_id"] = statement.Approver

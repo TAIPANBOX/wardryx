@@ -252,8 +252,11 @@ func runServe(args []string) error {
 	basePolicies := policies.Policies()
 	srv := api.New(engine, st, events, otelExporter, keys, []byte(cfg.ApprovalSecret), cfg.ApprovalSingleUse, basePolicies).WithApprovalKeys(approvalKeys)
 	if approvers != nil {
-		srv.WithApprovers(approvers)
+		srv.WithApprovers(approvers).WithAllowKeyApprovals(cfg.AllowKeyApprovals)
 		fmt.Fprintf(os.Stderr, "wardryx: approval statements are verified against the console keys in %s\n", cfg.ApproverJWKSFile)
+	}
+	for _, w := range approverStartWarnings(cfg) {
+		fmt.Fprintln(os.Stderr, "wardryx: WARNING: "+w)
 	}
 	// An agent's own token is verified here when WARDRYX_AGENT_TOKEN_ISSUER is set
 	// (invariant 13). Its key set is loaded before the server answers anything.

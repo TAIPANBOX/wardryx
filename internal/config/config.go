@@ -103,6 +103,9 @@ type Config struct {
 	// the console keys whose approval statements wardryx verifies (invariant 43).
 	// Unset, no statement is accepted.
 	ApproverJWKSFile string
+	// AllowKeyApprovals is WARDRYX_ALLOW_KEY_APPROVALS=1: an operator's explicit
+	// choice to accept a key-kind approval while a console key set is configured.
+	AllowKeyApprovals bool
 	// AgentTokenJWKSURL and AgentTokenJWKSFile are WARDRYX_AGENT_TOKEN_JWKS_URL
 	// and WARDRYX_AGENT_TOKEN_JWKS_FILE: where the key set comes from.
 	AgentTokenJWKSURL  string
@@ -148,6 +151,7 @@ func FromEnv() Config {
 		KeyryxCredentialFile:         os.Getenv("WARDRYX_KEYRYX_CREDENTIAL_FILE"),
 		AgentTokenIssuer:             os.Getenv("WARDRYX_AGENT_TOKEN_ISSUER"),
 		ApproverJWKSFile:             os.Getenv("WARDRYX_APPROVER_JWKS"),
+		AllowKeyApprovals:            os.Getenv("WARDRYX_ALLOW_KEY_APPROVALS") == "1",
 		AgentTokenJWKSURL:            os.Getenv("WARDRYX_AGENT_TOKEN_JWKS_URL"),
 		AgentTokenJWKSFile:           os.Getenv("WARDRYX_AGENT_TOKEN_JWKS_FILE"),
 		AgentTokenAudiences:          os.Getenv("WARDRYX_AGENT_TOKEN_AUDIENCES"),

@@ -9,3 +9,12 @@ func (s *Server) WithApprovers(v *approverstmt.Verifier) *Server {
 	s.approvers = v
 	return s
 }
+
+// WithAllowKeyApprovals sets whether a decision made by a bearer key, with no
+// approver statement, is accepted while a console key set is configured
+// (CLAUDE.md invariant 43). False, the default, refuses it with 403
+// approver_statement_required; with no key set it changes nothing.
+func (s *Server) WithAllowKeyApprovals(allow bool) *Server {
+	s.allowKeyApprovals = allow
+	return s
+}

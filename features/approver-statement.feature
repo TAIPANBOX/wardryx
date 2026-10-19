@@ -72,3 +72,41 @@ Feature: An approval names the person who gave it, when a verified statement say
     Then it is refused whole, and a valid set in the file verifies the console's statements
     # -> internal/approverstmt:TestAnUnreadableKeySetIsRefusedWhole
     # -> internal/approverstmt:TestTheKeyFileIsReadAsAJWKSet
+
+  Scenario: With a console key set, a key-kind decision is refused and the hold stays pending
+    Given WARDRYX_APPROVER_JWKS names a console key set, and WARDRYX_ALLOW_KEY_APPROVALS is unset
+    When a grant arrives with a bearer key and no approver statement
+    Then the answer is 403 approver_statement_required, nothing is granted, and the hold stays pending
+    # -> internal/api:TestAGrantWithNoStatementIsRefusedWhenAKeySetIsConfigured
+
+  Scenario: The operator's switch allows a key-kind decision, and each one is logged
+    Given a console key set, and WARDRYX_ALLOW_KEY_APPROVALS=1
+    When a grant or a deny arrives with a bearer key and no statement
+    Then the decision is recorded as the key with approver_kind key, and a warning names the approval and the key
+    # -> internal/api:TestAKeyApprovalIsAllowedOnlyWhenTheOperatorAllowsIt
+    # -> internal/api:TestAKeyApprovalIsWrittenToTheLogEveryTime
+
+  Scenario: A verified statement still decides when the switch is off
+    Given a console key set, and WARDRYX_ALLOW_KEY_APPROVALS unset
+    When a decision carries a statement the console signed
+    Then the decision is recorded as the person and is not refused
+    # -> internal/api:TestAStatementStillDecidesWhenKeyApprovalsAreNotAllowed
+
+  Scenario: With no console key set, the switch changes nothing
+    Given WARDRYX_APPROVER_JWKS is unset and WARDRYX_ALLOW_KEY_APPROVALS=1
+    When a grant arrives with a bearer key and no statement
+    Then it is decided as before, and no warning is logged
+    # -> internal/api:TestWithNoKeySetTheFlagChangesNothing
+
+  Scenario: The switch is on only when it reads exactly 1
+    Given WARDRYX_ALLOW_KEY_APPROVALS set to 1, 0, true, yes, an empty value, or 1 with a leading space
+    When the configuration is read
+    Then only the value 1 turns the switch on
+    # -> internal/config:TestAllowKeyApprovalsIsOnlyExactlyOne
+
+  Scenario: The start says when key-kind approvals are allowed, and when the switch has no effect
+    Given WARDRYX_ALLOW_KEY_APPROVALS=1, with and without a console key set
+    When serve starts
+    Then a warning names the switch, and with no key set the warning says it has no effect
+    # -> cmd/wardryx:TestTheStartWarnsWhenKeyApprovalsAreAllowed
+    # -> cmd/wardryx:TestTheSwitchWithNoKeySetSaysItHasNoEffect
