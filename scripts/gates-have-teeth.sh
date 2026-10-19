@@ -554,13 +554,21 @@ run_case "approval-verifier-trusts-its-keys: a comment naming a jwk header" pass
 # the shape the store had before the change.
 run_case "no-raw-secret-lookup: the store indexed by the presented bearer" fail \
 	'./scripts/no-raw-secret-lookup.sh' \
-	"$(py 'edit("internal/api/api.go", "p, ok := s.keys[digest]", "p, ok := s.keys[token]")')" \
+	"$(py 'edit("internal/api/api.go", "for stored, principal := range s.keys {", "if _, ok := s.keys[token]; ok {\n\t\t_ = ok\n\t}\n\tfor stored, principal := range s.keys {")')" \
 	"indexes a map by the presented bearer"
+
+# Invariant 42 as #121 left it: the presented digest is compared with every
+# configured digest, so an index of the store by the digest is the same lookup
+# under another name, and the gate refuses it too.
+run_case "no-raw-secret-lookup: the store indexed by the presented digest" fail \
+	'./scripts/no-raw-secret-lookup.sh' \
+	"$(py 'edit("internal/api/api.go", "for stored, principal := range s.keys {", "if _, ok := s.keys[digest]; ok {\n\t\t_ = ok\n\t}\n\tfor stored, principal := range s.keys {")')" \
+	"indexes the key store"
 
 # A comment that names the old lookup is prose, not a lookup.
 run_case "no-raw-secret-lookup: a comment naming the old lookup" pass \
 	'./scripts/no-raw-secret-lookup.sh' \
-	"$(py 'edit("internal/api/api.go", "\t// The presented bearer is looked up by its digest", "\t// s.keys[token] was the old lookup, see invariant 42.\n\t// The presented bearer is looked up by its digest")')"
+	"$(py 'edit("internal/api/api.go", "\t// The presented bearer is digested, and the digest is compared with every", "\t// s.keys[token] was the old lookup, see invariant 42.\n\t// The presented bearer is digested, and the digest is compared with every")')"
 
 # An index by the bearer's length is an index by a number, not by the bearer.
 run_case "no-raw-secret-lookup: an index by the bearer length" pass \

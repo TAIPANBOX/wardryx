@@ -44,6 +44,7 @@ package api
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -485,11 +486,23 @@ func (s *Server) authenticate(r *http.Request) (Principal, bool) {
 	if token == "" {
 		return Principal{}, false
 	}
-	// The presented bearer is looked up by its digest, the form the store is
-	// keyed by, never by its own value (invariant 42, finding F-023).
+	// The presented bearer is digested, and the digest is compared with every
+	// configured digest, never looked up in the store: a hash lookup by the
+	// presented digest is not a constant-time comparison (invariant 42, finding
+	// F-023). Every entry is visited and compared with subtle.ConstantTimeCompare,
+	// with no early exit, so the time taken does not say which entry matched.
 	digest := keyDigest(token)
-	p, ok := s.keys[digest]
-	if !ok {
+	var (
+		p     Principal
+		found bool
+	)
+	for stored, principal := range s.keys {
+		if subtle.ConstantTimeCompare([]byte(digest), []byte(stored)) == 1 {
+			p = principal
+			found = true
+		}
+	}
+	if !found {
 		return Principal{}, false
 	}
 	p.KeyFP = keyFingerprint(digest)
