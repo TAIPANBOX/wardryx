@@ -17,8 +17,9 @@
 #      s.allow.speaksFor(principal, dto.AgentID), before it asks the engine.
 #   2. Every pdp.DecideRequest and pdp.FilterRequest the API builds sets
 #      Org: principal.Org, so the org is the key's and not the body's.
-#   3. Every approval.Decide or approval.DecideWith call records approverID(principal) as who
-#      decided, with dto.DecidedBy only as the label after it.
+#   3. Every approval.Decide or approval.DecideWith call records as who decided
+#      approverID(principal), or the approver a verified approver statement
+#      names (invariant 43), with dto.DecidedBy only as the label after it.
 #
 # WHAT THIS CANNOT DO
 #
@@ -58,7 +59,7 @@ for f in $files; do
 				if (!bound) printf "PROBLEM %s: %s reads dto.AgentID and never checks the key may speak for it (s.allow.speaksFor(principal, dto.AgentID))\n", file, fn
 				else if (engine && engine < bound) printf "PROBLEM %s: %s asks the engine before it checks the key may speak for the agent\n", file, fn
 			}
-			fn = ""; reads = 0; bound = 0; engine = 0
+			fn = ""; reads = 0; bound = 0; engine = 0; defaulted = 0; verified = 0
 		}
 		/^[ \t]*\/\// { next }
 		/^func / { close_func(); fn = $0; sub(/\(w http.*/, "", fn) }
@@ -73,9 +74,16 @@ for f in $files; do
 			if (!litorg) printf "PROBLEM %s:%d: a pdp request built here does not set Org: principal.Org, so the org it is asked in is not the key'"'"'s\n", file, litline
 			inlit = 0
 		}
+		# Invariant 43: the approver is approverID(principal), or, when a statement
+		# the console signed verifies, the approver that statement names. The
+		# verified branch is the one that assigns approver from the verifier.
+		/approverID\(principal\)/ && $0 !~ /approval\.Decide/ && $0 ~ /:=|=/ { defaulted = 1 }
+		/\.Verify\(dto\.ApproverStatement/ { verified = 1 }
 		/approval\.Decide(With)?\(/ {
 			decides++
-			if ($0 !~ /, dto\.Decision, approverID\(principal\), dto\.DecidedBy, /) printf "PROBLEM %s:%d: approval.Decide(With) does not record approverID(principal) as the approver, with dto.DecidedBy as the label after it\n", file, FNR
+			ok = ($0 ~ /, dto\.Decision, approverID\(principal\), dto\.DecidedBy, /)
+			if (!ok && $0 ~ /, dto\.Decision, approver, dto\.DecidedBy, / && defaulted && verified) ok = 1
+			if (!ok) printf "PROBLEM %s:%d: approval.Decide(With) does not record the approver (approverID(principal), or the approver of a verified statement) with dto.DecidedBy as the label after it\n", file, FNR
 		}
 		END { close_func(); printf "COUNT %d %d %d\n", handlers, literals, decides }
 	' "$f")
@@ -102,4 +110,4 @@ if [ -n "$problems" ]; then
 	exit 1
 fi
 
-echo "OK: $handlers handler(s) bind the agent to the key, $literals pdp request(s) carry the key's org, $decides approval decision(s) record the key as the approver."
+echo "OK: $handlers handler(s) bind the agent to the key, $literals pdp request(s) carry the key's org, $decides approval decision(s) record the key, or a verified statement's person, as the approver."

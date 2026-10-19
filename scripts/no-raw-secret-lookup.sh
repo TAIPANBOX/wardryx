@@ -117,6 +117,19 @@ if [ "$readers" -eq 0 ]; then
 	exit 1
 fi
 
+# Invariant 42, as #121 left it open (finding F-023): the presented digest is
+# compared with every configured digest in constant time, so the key store is
+# walked, never indexed. Any index of s.keys in code under internal/api is the
+# lookup this gate exists to refuse, whatever name the index uses. Comment lines
+# are prose and are not read.
+keyhits=$(grep -nE 's\.keys\[' internal/api/*.go 2>/dev/null | grep -v '_test\.go:' | grep -vE '^[^:]+:[0-9]+:[[:space:]]*//' || true)
+if [ -n "$keyhits" ]; then
+	while IFS= read -r h; do
+		hits="$hits$h: indexes the key store (s.keys[...]); walk every configured digest with subtle.ConstantTimeCompare instead (invariant 42)
+"
+	done <<<"$keyhits"
+fi
+
 if [ -n "$hits" ]; then
 	printf '%s' "$hits"
 	echo

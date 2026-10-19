@@ -194,3 +194,15 @@ Feature: wardryx verifies the agent's own token before it trusts who the agent i
     Then the answer is 403 agent_token_proof_invalid, and the proof settings reach their fields
     # -> internal/api:TestAProofToAForeignDoorIsRefusedWith403
     # -> internal/config:TestAgentTokenProofSettingsAreReadFromTheEnvironment
+
+  Scenario: A proof is single use within its window, so a second presentation of the same proof is refused
+    Given a verified agent token and a DPoP proof for one decide call, made with the key the token is bound to
+    When the same proof is sent on a second decide request
+    Then the first is decided and the second is refused as 403 agent_token_proof_invalid
+    # -> internal/api:TestAReplayedProofIsRefusedWith403
+
+  Scenario: A proof presented once is forgotten when its window closes, and a fresh proof is accepted
+    Given a proof whose window has closed and a new proof made for a later call
+    When the new proof is checked
+    Then the new proof is accepted and the record holds only the proof still inside its window
+    # -> internal/agenttoken:TestAProofIsForgottenOnceItsWindowHasClosed

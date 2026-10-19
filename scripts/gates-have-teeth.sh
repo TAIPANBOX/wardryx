@@ -467,8 +467,8 @@ run_case "agent-is-bound-to-its-key: a filter request without the key's org" fai
 # F-012's approval half: the free text recorded as who decided.
 run_case "agent-is-bound-to-its-key: the request's text recorded as the approver" fail \
 	'./scripts/agent-is-bound-to-its-key.sh' \
-	"$(py 'edit("internal/api/api.go", "dto.Decision, approverID(principal), dto.DecidedBy,", "dto.Decision, dto.DecidedBy, dto.DecidedBy,")')" \
-	"does not record approverID(principal)"
+	"$(py 'edit("internal/api/api.go", "dto.Decision, approver, dto.DecidedBy,", "dto.Decision, dto.DecidedBy, dto.DecidedBy,")')" \
+	"does not record the approver"
 
 # A comment that names dto.AgentID is not code that reads it, and a gate
 # that flagged it would flag the explanation of the check it holds.
@@ -554,13 +554,21 @@ run_case "approval-verifier-trusts-its-keys: a comment naming a jwk header" pass
 # the shape the store had before the change.
 run_case "no-raw-secret-lookup: the store indexed by the presented bearer" fail \
 	'./scripts/no-raw-secret-lookup.sh' \
-	"$(py 'edit("internal/api/api.go", "p, ok := s.keys[digest]", "p, ok := s.keys[token]")')" \
+	"$(py 'edit("internal/api/api.go", "for stored, principal := range s.keys {", "if _, ok := s.keys[token]; ok {\n\t\t_ = ok\n\t}\n\tfor stored, principal := range s.keys {")')" \
 	"indexes a map by the presented bearer"
+
+# Invariant 42 as #121 left it: the presented digest is compared with every
+# configured digest, so an index of the store by the digest is the same lookup
+# under another name, and the gate refuses it too.
+run_case "no-raw-secret-lookup: the store indexed by the presented digest" fail \
+	'./scripts/no-raw-secret-lookup.sh' \
+	"$(py 'edit("internal/api/api.go", "for stored, principal := range s.keys {", "if _, ok := s.keys[digest]; ok {\n\t\t_ = ok\n\t}\n\tfor stored, principal := range s.keys {")')" \
+	"indexes the key store"
 
 # A comment that names the old lookup is prose, not a lookup.
 run_case "no-raw-secret-lookup: a comment naming the old lookup" pass \
 	'./scripts/no-raw-secret-lookup.sh' \
-	"$(py 'edit("internal/api/api.go", "\t// The presented bearer is looked up by its digest", "\t// s.keys[token] was the old lookup, see invariant 42.\n\t// The presented bearer is looked up by its digest")')"
+	"$(py 'edit("internal/api/api.go", "\t// The presented bearer is digested, and the digest is compared with every", "\t// s.keys[token] was the old lookup, see invariant 42.\n\t// The presented bearer is digested, and the digest is compared with every")')"
 
 # An index by the bearer's length is an index by a number, not by the bearer.
 run_case "no-raw-secret-lookup: an index by the bearer length" pass \

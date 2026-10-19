@@ -80,6 +80,12 @@
           "WARDRYX_APPROVAL_SIGNER": {
             "required": false
           },
+          "WARDRYX_APPROVER_JWKS": {
+            "required": false
+          },
+          "WARDRYX_ALLOW_KEY_APPROVALS": {
+            "required": false
+          },
           "WARDRYX_KEYRYX_URL": {
             "required": false
           },
