@@ -35,7 +35,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
-	"github.com/TAIPANBOX/agent-stack-go/chain"
+	"github.com/TAIPANBOX/agent-stack-go/v2/chain"
 	"github.com/TAIPANBOX/wardryx/internal/approval"
 	"github.com/TAIPANBOX/wardryx/internal/policy"
 )
