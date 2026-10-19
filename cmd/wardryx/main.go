@@ -247,6 +247,21 @@ func runServe(args []string) error {
 	engine := pdp.New(policies, []byte(cfg.ApprovalSecret))
 	basePolicies := policies.Policies()
 	srv := api.New(engine, st, events, otelExporter, keys, []byte(cfg.ApprovalSecret), cfg.ApprovalSingleUse, basePolicies).WithApprovalKeys(approvalKeys)
+	// An agent's own token is verified here when WARDRYX_AGENT_TOKEN_ISSUER is set
+	// (invariant 13). Its key set is loaded before the server answers anything.
+	agentTokens, agentTokenRun, err := buildAgentTokens(cfg)
+	if err != nil {
+		return fmt.Errorf("agent tokens: %w", err)
+	}
+	if agentTokens != nil {
+		srv.WithAgentTokens(agentTokens)
+		fmt.Fprintf(os.Stderr, "wardryx: agent tokens are verified: issuer %s, audiences %s\n", cfg.AgentTokenIssuer, cfg.AgentTokenAudiences)
+		actx, acancel := context.WithCancel(context.Background())
+		defer acancel()
+		go agentTokenRun(actx, func(err error) {
+			fmt.Fprintf(os.Stderr, "wardryx: agent-token sources not refreshed, keeping what they held: %v\n", err)
+		})
+	}
 	if keyryxRefresh != nil {
 		kctx, kcancel := context.WithCancel(context.Background())
 		defer kcancel()

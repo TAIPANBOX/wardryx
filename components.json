@@ -86,6 +86,21 @@
           "WARDRYX_KEYRYX_CREDENTIAL_FILE": {
             "required": false
           },
+          "WARDRYX_AGENT_TOKEN_ISSUER": {
+            "required": false
+          },
+          "WARDRYX_AGENT_TOKEN_JWKS_URL": {
+            "required": false
+          },
+          "WARDRYX_AGENT_TOKEN_JWKS_FILE": {
+            "required": false
+          },
+          "WARDRYX_AGENT_TOKEN_AUDIENCES": {
+            "required": false
+          },
+          "WARDRYX_AGENT_TOKEN_REVOCATION_URL": {
+            "required": false
+          },
           "WARDRYX_APPROVAL_V2_UNTIL": {
             "required": false
           }

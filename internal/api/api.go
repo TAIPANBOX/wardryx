@@ -122,7 +122,8 @@ type Server struct {
 	// keys is keyed by keyDigest of each bearer key, never by the key (invariant 42).
 	keys map[string]Principal
 	// agentTokens verifies an agent's own token when it is configured (invariant 13).
-	agentTokens *agenttoken.Verifier
+	agentTokens           *agenttoken.Verifier
+	agentTokenIgnoredOnce sync.Once
 	// allow is compiled from keys once: whether they name one org, and each
 	// listed key's agent patterns. See speaksFor.
 	allow             allowance
@@ -751,6 +752,12 @@ func (s *Server) handleDecide(w http.ResponseWriter, r *http.Request, principal 
 		s.refuseAgent(w, principal, "/v1/decide", dto.AgentID, dto.RunID)
 		return
 	}
+	// The identity source is wardryx's own check when an agent token is verified
+	// (invariant 13), and the request's claim otherwise.
+	identitySource, ok := s.identitySourceFor(w, principal, dto.AgentID, dto.RunID, dto.AgentToken, dto.IdentitySource)
+	if !ok {
+		return
+	}
 
 	signals, toolCall, refusal := decideSignalInputs(dto)
 	if refusal != "" {
@@ -770,7 +777,7 @@ func (s *Server) handleDecide(w http.ResponseWriter, r *http.Request, principal 
 		ModelAbsent:       dto.Model == nil,
 		EstCostUSD:        dto.EstCostUSD,
 		AttestationMethod: dto.AttestationMethod,
-		IdentitySource:    policy.IdentitySourceOf(dto.IdentitySource),
+		IdentitySource:    identitySource,
 		ChainProven:       dto.ChainProven,
 		ApprovalToken:     dto.ApprovalToken,
 		Signals:           signals,
