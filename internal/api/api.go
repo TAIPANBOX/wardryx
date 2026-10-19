@@ -58,6 +58,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/TAIPANBOX/agent-stack-go/v2/event"
+	"github.com/TAIPANBOX/wardryx/internal/agenttoken"
 	"github.com/TAIPANBOX/wardryx/internal/approval"
 	"github.com/TAIPANBOX/wardryx/internal/archive"
 	wotel "github.com/TAIPANBOX/wardryx/internal/otel"
@@ -120,6 +121,8 @@ type Server struct {
 	otel   *wotel.Exporter
 	// keys is keyed by keyDigest of each bearer key, never by the key (invariant 42).
 	keys map[string]Principal
+	// agentTokens verifies an agent's own token when it is configured (invariant 13).
+	agentTokens *agenttoken.Verifier
 	// allow is compiled from keys once: whether they name one org, and each
 	// listed key's agent patterns. See speaksFor.
 	allow             allowance
@@ -551,6 +554,9 @@ type decideRequestDTO struct {
 	// sends can earn more than it says. Set by the enforcement point from its door,
 	// never from the agent (CLAUDE.md invariant 39).
 	IdentitySource string `json:"identity_source,omitempty"`
+	// AgentToken is the agent's own access token, when the enforcement point sends
+	// one. wardryx verifies it only when WARDRYX_AGENT_TOKEN_ISSUER is set.
+	AgentToken string `json:"agent_token,omitempty"`
 	// ChainProven: the enforcement point VERIFIED this request's delegation
 	// proof (agent-passport SPEC 5.2) before calling. Absent means it did
 	// not, never "it did and forgot to say": a default of true would make

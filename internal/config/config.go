@@ -96,6 +96,17 @@ type Config struct {
 	// KeyryxCredentialFile is WARDRYX_KEYRYX_CREDENTIAL_FILE: a file holding the
 	// bearer key wardryx presents to Keyryx over http. A socket needs none.
 	KeyryxCredentialFile string
+	// AgentTokenIssuer is WARDRYX_AGENT_TOKEN_ISSUER: the exact iss of the agent
+	// tokens wardryx verifies. Empty means no agent token is verified.
+	AgentTokenIssuer string
+	// AgentTokenJWKSURL and AgentTokenJWKSFile are WARDRYX_AGENT_TOKEN_JWKS_URL
+	// and WARDRYX_AGENT_TOKEN_JWKS_FILE: where the key set comes from.
+	AgentTokenJWKSURL  string
+	AgentTokenJWKSFile string
+	// AgentTokenAudiences is WARDRYX_AGENT_TOKEN_AUDIENCES, a comma list.
+	AgentTokenAudiences string
+	// AgentTokenRevocationURL is WARDRYX_AGENT_TOKEN_REVOCATION_URL, optional.
+	AgentTokenRevocationURL string
 	// ApprovalV2Until is WARDRYX_APPROVAL_V2_UNTIL: an RFC 3339 instant after
 	// which v2 HMAC tokens are refused. Set, v2 verifies before it; unset, v2
 	// verifies forever without a signer and not at all with one.
