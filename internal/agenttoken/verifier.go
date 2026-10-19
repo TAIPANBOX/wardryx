@@ -17,6 +17,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -76,6 +78,13 @@ const (
 	maxCached = 4096
 	// fetchTimeout bounds one poll of a source.
 	fetchTimeout = 10 * time.Second
+	// DefaultProofAge and maxProofAge bound how far a DPoP proof's iat may sit
+	// from now. There is no replay cache for proofs: one agent call can cause
+	// several decides, so a proof is good for the window, as a token is for its life.
+	DefaultProofAge = 60 * time.Second
+	maxProofAge     = 300 * time.Second
+	// maxProofJTI is the longest proof jti accepted, as the library bounds it.
+	maxProofJTI = 256
 )
 
 // Verifier checks tokens against the sources it holds.
@@ -83,6 +92,7 @@ type Verifier struct {
 	cfg    Config
 	client *http.Client
 	revs   *delegation.Revocations // nil when no revocation list is configured
+	doors  map[string]bool         // the normalised door origins a proof may name
 
 	mu         sync.RWMutex
 	keys       delegation.Set
@@ -120,6 +130,23 @@ func New(cfg Config, client *http.Client) (*Verifier, error) {
 		return nil, errors.New("WARDRYX_AGENT_TOKEN_AUDIENCES names no audience: an agent token must name the resource it is for")
 	}
 	cfg.Audiences = auds
+	if len(cfg.DoorOrigins) == 0 {
+		return nil, errors.New("WARDRYX_AGENT_TOKEN_DOOR_ORIGINS names no origin: a DPoP proof is checked against the doors it may be sent to")
+	}
+	doors := map[string]bool{}
+	for _, d := range cfg.DoorOrigins {
+		o, err := normalizeOrigin(strings.TrimSpace(d))
+		if err != nil {
+			return nil, err
+		}
+		doors[o] = true
+	}
+	switch {
+	case cfg.ProofMaxAge < 0 || cfg.ProofMaxAge > maxProofAge:
+		return nil, errors.New("WARDRYX_AGENT_TOKEN_PROOF_MAX_AGE_SECONDS must be from 1 to 300")
+	case cfg.ProofMaxAge == 0:
+		cfg.ProofMaxAge = DefaultProofAge
+	}
 	if cfg.JWKSURL == "" && cfg.JWKSFile == "" {
 		return nil, errors.New("WARDRYX_AGENT_TOKEN_JWKS_URL or WARDRYX_AGENT_TOKEN_JWKS_FILE must name where the key set comes from")
 	}
@@ -140,7 +167,7 @@ func New(cfg Config, client *http.Client) (*Verifier, error) {
 			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 		}
 	}
-	v := &Verifier{cfg: cfg, client: client, cache: map[string]cacheEntry{}}
+	v := &Verifier{cfg: cfg, client: client, doors: doors, cache: map[string]cacheEntry{}}
 	if cfg.RevocationURL != "" {
 		v.revs = delegation.NewRevocations(delegation.DefaultRevocationMaxAge, delegation.FailClosed)
 	}
@@ -216,10 +243,154 @@ func (v *Verifier) Run(ctx context.Context, every time.Duration, report func(err
 	}
 }
 
-// CheckProof checks the DPoP proof that accompanies a verified token. Scaffold:
-// accepts every proof, which is what the decision did before proofs.
+// CheckProof checks the DPoP proof that accompanies a verified token. The proof
+// must be the holder's (its key's thumbprint is the token's cnf.jkt), must name
+// this token (ath), must be fresh within the proof window, and must be sent to a
+// configured door. With no proof: ErrProofRequired, unless proofs are optional.
+// It is the proof's own signature that the holder's key makes good, so a proof
+// for a key the token is not bound to is refused whatever it says about itself.
 func (v *Verifier) CheckProof(proof, token string, bound Verified, now time.Time) error {
+	if proof == "" {
+		if v.cfg.ProofOptional {
+			return nil
+		}
+		return ErrProofRequired
+	}
+	return v.verifyProof(proof, token, bound.JKT, now)
+}
+
+// verifyProof is every check on a presented proof. It reads the proof's header
+// and claims only after the signature under the key the proof carries has
+// verified, and the header's key is matched to the token before anything else is
+// trusted.
+func (v *Verifier) verifyProof(proof, token, boundJKT string, now time.Time) error {
+	refuse := func(reason string) error { return fmt.Errorf("%w: %s", ErrProof, reason) }
+	parts := strings.Split(proof, ".")
+	if len(parts) != 3 {
+		return refuse("not a compact JWS")
+	}
+	rawHeader, err := base64.RawURLEncoding.DecodeString(parts[0])
+	if err != nil {
+		return refuse("the header is not base64url")
+	}
+	var header struct {
+		Typ string          `json:"typ"`
+		Alg string          `json:"alg"`
+		JWK json.RawMessage `json:"jwk"`
+	}
+	if err := json.Unmarshal(rawHeader, &header); err != nil {
+		return refuse("the header is not JSON")
+	}
+	// typ is what stops a token being presented as a proof and a proof as a token.
+	if header.Typ != "dpop+jwt" {
+		return refuse("typ is not dpop+jwt")
+	}
+	if header.Alg != "ES256" {
+		return refuse("alg is not ES256")
+	}
+	if len(header.JWK) == 0 {
+		return refuse("the header carries no jwk")
+	}
+	var members map[string]json.RawMessage
+	if err := json.Unmarshal(header.JWK, &members); err != nil {
+		return refuse("the jwk is not an object")
+	}
+	if _, private := members["d"]; private {
+		return refuse("the jwk carries a private member")
+	}
+	var key delegation.JWK
+	if err := json.Unmarshal(header.JWK, &key); err != nil {
+		return refuse("the jwk does not read as a key")
+	}
+	if key.Kty != "EC" || key.Crv != "P-256" {
+		return refuse("the jwk is not an EC P-256 key")
+	}
+	// The library's thumbprint (RFC 7638) of the proof's own key, compared with
+	// the token's cnf.jkt: this is the check that makes the proof the holder's.
+	thumb, err := delegation.Thumbprint(key)
+	if err != nil {
+		return refuse("the jwk has no thumbprint")
+	}
+	if boundJKT == "" || thumb != boundJKT {
+		return refuse("the proof's key is not the token's cnf.jkt")
+	}
+	// The signature, made by the key the proof carries (the library's VerifyWith).
+	claims, err := delegation.VerifyWith(proof, key)
+	if err != nil {
+		return refuse("the signature does not verify under the proof's key")
+	}
+	if s, _ := claims["htm"].(string); s == "" {
+		return refuse("no htm")
+	}
+	htu, _ := claims["htu"].(string)
+	if htu == "" {
+		return refuse("no htu")
+	}
+	if jti, _ := claims["jti"].(string); jti == "" || len(jti) > maxProofJTI {
+		return refuse("no usable jti")
+	}
+	iat, ok := claims["iat"].(float64)
+	if !ok || iat != math.Trunc(iat) {
+		return refuse("no iat")
+	}
+	age := now.Unix() - int64(iat)
+	window := int64(v.cfg.ProofMaxAge / time.Second)
+	if age > window || -age > window {
+		return refuse("iat is outside the proof window")
+	}
+	// ath is the library's own hash of the token, which the proof must name.
+	if ath, _ := claims["ath"].(string); ath != delegation.AccessTokenHash(token) {
+		return refuse("ath does not name this token")
+	}
+	origin, err := htuOrigin(htu)
+	if err != nil {
+		return refuse(err.Error())
+	}
+	if !v.doors[origin] {
+		return refuse("htu is not a configured door origin")
+	}
 	return nil
+}
+
+// normalizeOrigin reads a door origin, written scheme://host[:port] with nothing
+// after the port, and returns it as scheme://host:port, with the default port
+// filled in and the host in lower case, so that two spellings of one origin
+// compare equal.
+func normalizeOrigin(raw string) (string, error) {
+	u, err := url.Parse(raw)
+	if err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" ||
+		u.User != nil || (u.Path != "" && u.Path != "/") || u.RawQuery != "" || u.Fragment != "" {
+		return "", fmt.Errorf("WARDRYX_AGENT_TOKEN_DOOR_ORIGINS: %q is not a door origin; write scheme://host:port with nothing after the port", raw)
+	}
+	return originOf(u)
+}
+
+// htuOrigin is the origin of a proof's htu: its scheme, host and port, normalised
+// as normalizeOrigin does. An htu that names a fragment or user information is
+// refused, as RFC 9449 does not allow them to be part of a request URI.
+func htuOrigin(htu string) (string, error) {
+	u, err := url.Parse(htu)
+	if err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" || u.User != nil || u.Fragment != "" {
+		return "", errors.New("htu is not an absolute http or https URL")
+	}
+	return originOf(u)
+}
+
+// originOf renders a parsed URL's origin, normalised.
+func originOf(u *url.URL) (string, error) {
+	scheme := strings.ToLower(u.Scheme)
+	host := strings.ToLower(u.Hostname())
+	port := u.Port()
+	if port == "" {
+		port = "80"
+		if scheme == "https" {
+			port = "443"
+		}
+	}
+	if host == "" {
+		return "", errors.New("the URL names no host")
+	}
+	return scheme + "://" + net.JoinHostPort(host, port), nil
 }
 
 // Verify checks a token at the given time. Every refusal is ErrInvalid, and the
@@ -258,7 +429,7 @@ func (v *Verifier) Verify(token string, now time.Time) (Verified, error) {
 			Revoked:  func(jti, subject string, iat int64) bool { return v.revoked(jti, subject, iat, now) },
 		})
 		if err == nil {
-			out = Verified{Subject: a.Subject, JTI: a.JTI, IssuedAt: a.IssuedAt, ExpiresAt: a.ExpiresAt}
+			out = Verified{Subject: a.Subject, JTI: a.JTI, IssuedAt: a.IssuedAt, ExpiresAt: a.ExpiresAt, JKT: a.JKT}
 			lastErr = nil
 			break
 		}

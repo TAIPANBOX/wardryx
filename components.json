@@ -101,6 +101,15 @@
           "WARDRYX_AGENT_TOKEN_REVOCATION_URL": {
             "required": false
           },
+          "WARDRYX_AGENT_TOKEN_DOOR_ORIGINS": {
+            "required": false
+          },
+          "WARDRYX_AGENT_TOKEN_REQUIRE_PROOF": {
+            "required": false
+          },
+          "WARDRYX_AGENT_TOKEN_PROOF_MAX_AGE_SECONDS": {
+            "required": false
+          },
           "WARDRYX_APPROVAL_V2_UNTIL": {
             "required": false
           }

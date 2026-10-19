@@ -1,6 +1,7 @@
 package api
 
 import (
+	"errors"
 	"log"
 	"net/http"
 	"time"
@@ -41,7 +42,7 @@ func (s *Server) WithAgentTokens(v *agenttoken.Verifier) *Server {
 //
 // The refusals echo nothing of the request and reach no rule. It returns false
 // when it has answered the request.
-func (s *Server) identitySourceFor(w http.ResponseWriter, principal Principal, agentID, runID, token, claim string) (string, bool) {
+func (s *Server) identitySourceFor(w http.ResponseWriter, principal Principal, agentID, runID, token, proof, claim string) (string, bool) {
 	claimed := policy.IdentitySourceOf(claim)
 	if s.agentTokens == nil {
 		if token != "" {
@@ -76,6 +77,17 @@ func (s *Server) identitySourceFor(w http.ResponseWriter, principal Principal, a
 			"key_fp":            principal.KeyFP,
 		})
 		writeError(w, http.StatusForbidden, "agent_contradicts_token")
+		return "", false
+	}
+	// The proof is the holder's, for this token and this door (invariant 13). A
+	// token with no proof is refused when proofs are required.
+	if err := s.agentTokens.CheckProof(proof, token, verified, time.Now()); err != nil {
+		if errors.Is(err, agenttoken.ErrProofRequired) {
+			writeError(w, http.StatusForbidden, "agent_token_proof_required")
+			return "", false
+		}
+		log.Printf("wardryx: agent token proof refused on /v1/decide for agent %q: %v", agentID, err)
+		writeError(w, http.StatusForbidden, "agent_token_proof_invalid")
 		return "", false
 	}
 	return policy.IdentitySourceAgentToken, true

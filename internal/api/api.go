@@ -757,7 +757,7 @@ func (s *Server) handleDecide(w http.ResponseWriter, r *http.Request, principal 
 	}
 	// The identity source is wardryx's own check when an agent token is verified
 	// (invariant 13), and the request's claim otherwise.
-	identitySource, ok := s.identitySourceFor(w, principal, dto.AgentID, dto.RunID, dto.AgentToken, dto.IdentitySource)
+	identitySource, ok := s.identitySourceFor(w, principal, dto.AgentID, dto.RunID, dto.AgentToken, dto.AgentDPoPProof, dto.IdentitySource)
 	if !ok {
 		return
 	}
