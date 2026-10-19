@@ -467,7 +467,7 @@ run_case "agent-is-bound-to-its-key: a filter request without the key's org" fai
 # F-012's approval half: the free text recorded as who decided.
 run_case "agent-is-bound-to-its-key: the request's text recorded as the approver" fail \
 	'./scripts/agent-is-bound-to-its-key.sh' \
-	"$(py 'edit("internal/api/api.go", "dto.Decision, approverID(principal), dto.DecidedBy,", "dto.Decision, dto.DecidedBy, dto.DecidedBy,")')" \
+	"$(py 'edit("internal/api/api.go", "dto.Decision, approver, dto.DecidedBy,", "dto.Decision, dto.DecidedBy, dto.DecidedBy,")')" \
 	"does not record the approver"
 
 # A comment that names dto.AgentID is not code that reads it, and a gate
