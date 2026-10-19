@@ -198,7 +198,7 @@ func TestAHostileApproverOrCredentialOrJTIIsRefused(t *testing.T) {
 	cases := map[string]map[string]any{
 		"empty subject":          {"sub": ""},
 		"subject with a newline": {"sub": "approver\n1842"},
-		"subject with bidi":      {"sub": "approver‮1842"},
+		"subject with bidi":      {"sub": "approver\u202e1842"},
 		"oversize subject":       {"sub": strings.Repeat("s", 257)},
 		"empty credential":       {"cred": ""},
 		"oversize credential":    {"cred": strings.Repeat("c", 513)},

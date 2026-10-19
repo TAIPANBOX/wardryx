@@ -4,7 +4,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
-	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -22,17 +22,29 @@ import (
 func authenticateBody(t *testing.T) *ast.BlockStmt {
 	t.Helper()
 	fset := token.NewFileSet()
-	pkgs, err := parser.ParseDir(fset, ".", func(fi os.FileInfo) bool {
-		return !strings.HasSuffix(fi.Name(), "_test.go")
-	}, 0)
+	// Each non-test file of the package is parsed on its own: parser.ParseDir is
+	// deprecated (it ignores build tags), and this test needs the files only.
+	names, err := filepath.Glob("*.go")
 	if err != nil {
-		t.Fatalf("parsing the package: %v", err)
+		t.Fatalf("listing the package: %v", err)
 	}
-	pkg, ok := pkgs["api"]
-	if !ok {
+	var files []*ast.File
+	for _, name := range names {
+		if strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		f, err := parser.ParseFile(fset, name, nil, 0)
+		if err != nil {
+			t.Fatalf("parsing %s: %v", name, err)
+		}
+		if f.Name.Name == "api" {
+			files = append(files, f)
+		}
+	}
+	if len(files) == 0 {
 		t.Fatal("package api not found: this measured nothing")
 	}
-	for _, f := range pkg.Files {
+	for _, f := range files {
 		for _, d := range f.Decls {
 			fd, ok := d.(*ast.FuncDecl)
 			if ok && fd.Recv != nil && fd.Name.Name == "authenticate" {
