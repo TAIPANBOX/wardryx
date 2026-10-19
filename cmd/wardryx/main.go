@@ -244,9 +244,17 @@ func runServe(args []string) error {
 	if err != nil {
 		return fmt.Errorf("approval tokens: %w", err)
 	}
+	approvers, err := buildApprovers(cfg)
+	if err != nil {
+		return fmt.Errorf("approver statements: %w", err)
+	}
 	engine := pdp.New(policies, []byte(cfg.ApprovalSecret))
 	basePolicies := policies.Policies()
 	srv := api.New(engine, st, events, otelExporter, keys, []byte(cfg.ApprovalSecret), cfg.ApprovalSingleUse, basePolicies).WithApprovalKeys(approvalKeys)
+	if approvers != nil {
+		srv.WithApprovers(approvers)
+		fmt.Fprintf(os.Stderr, "wardryx: approval statements are verified against the console keys in %s\n", cfg.ApproverJWKSFile)
+	}
 	// An agent's own token is verified here when WARDRYX_AGENT_TOKEN_ISSUER is set
 	// (invariant 13). Its key set is loaded before the server answers anything.
 	agentTokens, agentTokenRun, agentTokenWarnings, err := buildAgentTokens(cfg)

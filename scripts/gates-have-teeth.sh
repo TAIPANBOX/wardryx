@@ -468,7 +468,7 @@ run_case "agent-is-bound-to-its-key: a filter request without the key's org" fai
 run_case "agent-is-bound-to-its-key: the request's text recorded as the approver" fail \
 	'./scripts/agent-is-bound-to-its-key.sh' \
 	"$(py 'edit("internal/api/api.go", "dto.Decision, approverID(principal), dto.DecidedBy,", "dto.Decision, dto.DecidedBy, dto.DecidedBy,")')" \
-	"does not record approverID(principal)"
+	"does not record the approver"
 
 # A comment that names dto.AgentID is not code that reads it, and a gate
 # that flagged it would flag the explanation of the check it holds.

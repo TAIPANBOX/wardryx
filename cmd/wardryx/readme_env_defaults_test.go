@@ -75,6 +75,7 @@ func codeDefaults(t *testing.T) map[string]string {
 		"WARDRYX_AGENT_TOKEN_DOOR_ORIGINS":          cfg.AgentTokenDoorOrigins,
 		"WARDRYX_AGENT_TOKEN_REQUIRE_PROOF":         cfg.AgentTokenRequireProof,
 		"WARDRYX_AGENT_TOKEN_PROOF_MAX_AGE_SECONDS": orDefault(cfg.AgentTokenProofMaxAgeSeconds, strconv.Itoa(int(agenttoken.DefaultProofAge/time.Second))),
+		"WARDRYX_APPROVER_JWKS":                     cfg.ApproverJWKSFile,
 	}
 }
 

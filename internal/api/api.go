@@ -61,6 +61,7 @@ import (
 	"github.com/TAIPANBOX/agent-stack-go/v2/event"
 	"github.com/TAIPANBOX/wardryx/internal/agenttoken"
 	"github.com/TAIPANBOX/wardryx/internal/approval"
+	"github.com/TAIPANBOX/wardryx/internal/approverstmt"
 	"github.com/TAIPANBOX/wardryx/internal/archive"
 	wotel "github.com/TAIPANBOX/wardryx/internal/otel"
 	"github.com/TAIPANBOX/wardryx/internal/pdp"
@@ -123,7 +124,10 @@ type Server struct {
 	// keys is keyed by keyDigest of each bearer key, never by the key (invariant 42).
 	keys map[string]Principal
 	// agentTokens verifies an agent's own token when it is configured (invariant 13).
-	agentTokens           *agenttoken.Verifier
+	agentTokens *agenttoken.Verifier
+	// approvers verifies the statement a console signs for a person's decision
+	// (invariant 43). Nil refuses every statement.
+	approvers             *approverstmt.Verifier
 	agentTokenIgnoredOnce sync.Once
 	// allow is compiled from keys once: whether they name one org, and each
 	// listed key's agent patterns. See speaksFor.
@@ -995,6 +999,9 @@ func (s *Server) handleFilterTools(w http.ResponseWriter, r *http.Request, princ
 
 type approvalDecideRequestDTO struct {
 	Decision string `json:"decision"`
+	// ApproverStatement is the compact JWS the console signed after the person's
+	// passkey assertion. Optional; when present it must verify (invariant 43).
+	ApproverStatement string `json:"approver_statement,omitempty"`
 	// DecidedBy is display text, what a console calls the person who decided.
 	// It is recorded as the approval's decided_by_label and never as who
 	// decided: that is the key that authenticated the request. Optional.
@@ -1041,6 +1048,19 @@ func isBidiControl(r rune) bool {
 // authenticated the decision, by fingerprint, the form policy_updated's key_fp
 // already uses. The text a request sends is the label beside it.
 func approverID(p Principal) string { return "key:" + p.KeyFP }
+
+// approverKindOf reads the kind of approver a decided_by names: "person" for a
+// verified statement's approver, "key" for a bearer key, and "" while pending or
+// for a row decided before the kinds existed (invariant 43).
+func approverKindOf(decidedBy string) string {
+	switch {
+	case strings.HasPrefix(decidedBy, "approver:"):
+		return "person"
+	case strings.HasPrefix(decidedBy, "key:"):
+		return "key"
+	}
+	return ""
+}
 
 type approvalDecideResponseDTO struct {
 	ApprovalID    string `json:"approval_id"`
@@ -1092,7 +1112,23 @@ func (s *Server) handleApprovalDecide(w http.ResponseWriter, r *http.Request, pr
 		return
 	}
 
-	decided, token, err := approval.DecideWith(r.Context(), s.store, s.approvals, id, dto.Decision, approverID(principal), dto.DecidedBy, s.approvalTTL)
+	// The approver is the key that sent the request unless a statement names a
+	// person (invariant 43). A statement that does not verify for this approval
+	// and this decision is refused before anything is decided, and its text is
+	// never echoed.
+	approver, approverKind := approverID(principal), "key"
+	var statement approverstmt.Statement
+	if dto.ApproverStatement != "" {
+		v, err := s.approvers.Verify(dto.ApproverStatement, id, dto.Decision, time.Now())
+		if err != nil {
+			writeError(w, http.StatusForbidden, "approver_statement_invalid")
+			return
+		}
+		statement = v
+		approver, approverKind = "approver:"+v.Approver, "person"
+	}
+
+	decided, token, err := approval.DecideWith(r.Context(), s.store, s.approvals, id, dto.Decision, approver, dto.DecidedBy, s.approvalTTL)
 	switch {
 	case errors.Is(err, store.ErrNotFound):
 		writeError(w, http.StatusNotFound, "approval not found")
@@ -1114,9 +1150,15 @@ func (s *Server) handleApprovalDecide(w http.ResponseWriter, r *http.Request, pr
 	// decided_by names the key that decided; key_fp is the same fingerprint
 	// on its own, the field policy_updated carries; the label is the text the
 	// request sent, only when it sent one.
-	data := map[string]any{"approval_id": decided.ApprovalID, "decided_by": decided.DecidedBy, "key_fp": principal.KeyFP}
+	data := map[string]any{"approval_id": decided.ApprovalID, "decided_by": decided.DecidedBy, "key_fp": principal.KeyFP,
+		"approver_kind": approverKind}
 	if decided.DecidedByLabel != "" {
 		data["decided_by_label"] = decided.DecidedByLabel
+	}
+	if approverKind == "person" {
+		data["approver_id"] = statement.Approver
+		data["credential_id"] = statement.CredentialID
+		data["statement_jti"] = statement.JTI
 	}
 	if dto.Decision == "grant" {
 		s.emit(evApprovalGranted, event.SeverityInfo, decided.AgentID, decided.RunID, nil, data)
@@ -1140,6 +1182,9 @@ type approvalDTO struct {
 	RequestedAt string `json:"requested_at"`
 	DecidedAt   string `json:"decided_at,omitempty"`
 	DecidedBy   string `json:"decided_by,omitempty"`
+	// ApproverKind is "person" when a verified statement named the approver,
+	// "key" when the decision was made by a bearer key (invariant 43).
+	ApproverKind string `json:"approver_kind,omitempty"`
 	// DecidedByLabel is the display text the decision was sent with. Who
 	// decided is DecidedBy.
 	DecidedByLabel string         `json:"decided_by_label,omitempty"`
@@ -1172,6 +1217,7 @@ func (s *Server) handleListApprovals(w http.ResponseWriter, r *http.Request, pri
 			RunID:          a.RunID,
 			RequestedAt:    a.RequestedAt.UTC().Format(time.RFC3339),
 			DecidedBy:      a.DecidedBy,
+			ApproverKind:   approverKindOf(a.DecidedBy),
 			DecidedByLabel: a.DecidedByLabel,
 			Decision:       a.Decision,
 			Pending:        a.Pending(),
