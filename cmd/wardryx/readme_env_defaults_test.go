@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/TAIPANBOX/wardryx/internal/agenttoken"
 	"github.com/TAIPANBOX/wardryx/internal/api"
 	"github.com/TAIPANBOX/wardryx/internal/config"
 )
@@ -50,22 +51,30 @@ func codeDefaults(t *testing.T) map[string]string {
 		unanswered = api.DefaultUnansweredAfter
 	}
 	return map[string]string{
-		"WARDRYX_ADDR":                      orDefault(cfg.Addr, serveAddrFallback(t)),
-		"WARDRYX_KEYS":                      cfg.Keys,
-		"WARDRYX_ALLOW_DEVKEY":              strconv.FormatBool(cfg.AllowDevkey),
-		"WARDRYX_DB":                        cfg.DB,
-		"WARDRYX_POLICY":                    cfg.Policy,
-		"WARDRYX_EVENTS_PATH":               cfg.EventsPath,
-		"WARDRYX_POLICY_ARCHIVE":            cfg.PolicyArchive,
-		"WARDRYX_APPROVAL_SECRET":           cfg.ApprovalSecret,
-		"WARDRYX_APPROVAL_SINGLE_USE":       strconv.FormatBool(cfg.ApprovalSingleUse),
-		"WARDRYX_APPROVAL_UNANSWERED_AFTER": unanswered.String(),
-		"WARDRYX_OTLP_ENDPOINT":             cfg.OTLPEndpoint,
-		"WARDRYX_RECORD_FAILMODE":           cfg.RecordFailMode,
-		"WARDRYX_APPROVAL_SIGNER":           cfg.ApprovalSigner,
-		"WARDRYX_KEYRYX_URL":                cfg.KeyryxURL,
-		"WARDRYX_KEYRYX_CREDENTIAL_FILE":    cfg.KeyryxCredentialFile,
-		"WARDRYX_APPROVAL_V2_UNTIL":         cfg.ApprovalV2Until,
+		"WARDRYX_ADDR":                              orDefault(cfg.Addr, serveAddrFallback(t)),
+		"WARDRYX_KEYS":                              cfg.Keys,
+		"WARDRYX_ALLOW_DEVKEY":                      strconv.FormatBool(cfg.AllowDevkey),
+		"WARDRYX_DB":                                cfg.DB,
+		"WARDRYX_POLICY":                            cfg.Policy,
+		"WARDRYX_EVENTS_PATH":                       cfg.EventsPath,
+		"WARDRYX_POLICY_ARCHIVE":                    cfg.PolicyArchive,
+		"WARDRYX_APPROVAL_SECRET":                   cfg.ApprovalSecret,
+		"WARDRYX_APPROVAL_SINGLE_USE":               strconv.FormatBool(cfg.ApprovalSingleUse),
+		"WARDRYX_APPROVAL_UNANSWERED_AFTER":         unanswered.String(),
+		"WARDRYX_OTLP_ENDPOINT":                     cfg.OTLPEndpoint,
+		"WARDRYX_RECORD_FAILMODE":                   cfg.RecordFailMode,
+		"WARDRYX_APPROVAL_SIGNER":                   cfg.ApprovalSigner,
+		"WARDRYX_KEYRYX_URL":                        cfg.KeyryxURL,
+		"WARDRYX_KEYRYX_CREDENTIAL_FILE":            cfg.KeyryxCredentialFile,
+		"WARDRYX_APPROVAL_V2_UNTIL":                 cfg.ApprovalV2Until,
+		"WARDRYX_AGENT_TOKEN_ISSUER":                cfg.AgentTokenIssuer,
+		"WARDRYX_AGENT_TOKEN_JWKS_URL":              cfg.AgentTokenJWKSURL,
+		"WARDRYX_AGENT_TOKEN_JWKS_FILE":             cfg.AgentTokenJWKSFile,
+		"WARDRYX_AGENT_TOKEN_AUDIENCES":             cfg.AgentTokenAudiences,
+		"WARDRYX_AGENT_TOKEN_REVOCATION_URL":        cfg.AgentTokenRevocationURL,
+		"WARDRYX_AGENT_TOKEN_DOOR_ORIGINS":          cfg.AgentTokenDoorOrigins,
+		"WARDRYX_AGENT_TOKEN_REQUIRE_PROOF":         cfg.AgentTokenRequireProof,
+		"WARDRYX_AGENT_TOKEN_PROOF_MAX_AGE_SECONDS": orDefault(cfg.AgentTokenProofMaxAgeSeconds, strconv.Itoa(int(agenttoken.DefaultProofAge/time.Second))),
 	}
 }
 

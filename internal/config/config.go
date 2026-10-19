@@ -96,6 +96,26 @@ type Config struct {
 	// KeyryxCredentialFile is WARDRYX_KEYRYX_CREDENTIAL_FILE: a file holding the
 	// bearer key wardryx presents to Keyryx over http. A socket needs none.
 	KeyryxCredentialFile string
+	// AgentTokenIssuer is WARDRYX_AGENT_TOKEN_ISSUER: the exact iss of the agent
+	// tokens wardryx verifies. Empty means no agent token is verified.
+	AgentTokenIssuer string
+	// AgentTokenJWKSURL and AgentTokenJWKSFile are WARDRYX_AGENT_TOKEN_JWKS_URL
+	// and WARDRYX_AGENT_TOKEN_JWKS_FILE: where the key set comes from.
+	AgentTokenJWKSURL  string
+	AgentTokenJWKSFile string
+	// AgentTokenAudiences is WARDRYX_AGENT_TOKEN_AUDIENCES, a comma list.
+	AgentTokenAudiences string
+	// AgentTokenRevocationURL is WARDRYX_AGENT_TOKEN_REVOCATION_URL, optional.
+	AgentTokenRevocationURL string
+	// AgentTokenDoorOrigins is WARDRYX_AGENT_TOKEN_DOOR_ORIGINS, a comma list of the
+	// scheme://host:port origins whose DPoP proofs are accepted. Required with the issuer.
+	AgentTokenDoorOrigins string
+	// AgentTokenRequireProof is WARDRYX_AGENT_TOKEN_REQUIRE_PROOF. Unset requires a proof
+	// with every agent token; "0" turns that off, with a warning at startup.
+	AgentTokenRequireProof string
+	// AgentTokenProofMaxAgeSeconds is WARDRYX_AGENT_TOKEN_PROOF_MAX_AGE_SECONDS: how far a
+	// proof's iat may sit from now. Unset is 60; the largest allowed is 300.
+	AgentTokenProofMaxAgeSeconds string
 	// ApprovalV2Until is WARDRYX_APPROVAL_V2_UNTIL: an RFC 3339 instant after
 	// which v2 HMAC tokens are refused. Set, v2 verifies before it; unset, v2
 	// verifies forever without a signer and not at all with one.
@@ -107,22 +127,30 @@ type Config struct {
 // result through as a value.
 func FromEnv() Config {
 	return Config{
-		Addr:                 os.Getenv("WARDRYX_ADDR"),
-		Keys:                 os.Getenv("WARDRYX_KEYS"),
-		AllowDevkey:          parseBool(os.Getenv("WARDRYX_ALLOW_DEVKEY")),
-		DB:                   os.Getenv("WARDRYX_DB"),
-		Policy:               os.Getenv("WARDRYX_POLICY"),
-		EventsPath:           os.Getenv("WARDRYX_EVENTS_PATH"),
-		PolicyArchive:        os.Getenv("WARDRYX_POLICY_ARCHIVE"),
-		ApprovalSecret:       os.Getenv("WARDRYX_APPROVAL_SECRET"),
-		ApprovalSingleUse:    parseBoolClosed(os.Getenv("WARDRYX_APPROVAL_SINGLE_USE")),
-		ApprovalUnanswered:   parseDuration(os.Getenv("WARDRYX_APPROVAL_UNANSWERED_AFTER")),
-		OTLPEndpoint:         os.Getenv("WARDRYX_OTLP_ENDPOINT"),
-		RecordFailMode:       recordFailMode(os.Getenv("WARDRYX_RECORD_FAILMODE")),
-		ApprovalSigner:       os.Getenv("WARDRYX_APPROVAL_SIGNER"),
-		KeyryxURL:            os.Getenv("WARDRYX_KEYRYX_URL"),
-		KeyryxCredentialFile: os.Getenv("WARDRYX_KEYRYX_CREDENTIAL_FILE"),
-		ApprovalV2Until:      os.Getenv("WARDRYX_APPROVAL_V2_UNTIL"),
+		Addr:                         os.Getenv("WARDRYX_ADDR"),
+		Keys:                         os.Getenv("WARDRYX_KEYS"),
+		AllowDevkey:                  parseBool(os.Getenv("WARDRYX_ALLOW_DEVKEY")),
+		DB:                           os.Getenv("WARDRYX_DB"),
+		Policy:                       os.Getenv("WARDRYX_POLICY"),
+		EventsPath:                   os.Getenv("WARDRYX_EVENTS_PATH"),
+		PolicyArchive:                os.Getenv("WARDRYX_POLICY_ARCHIVE"),
+		ApprovalSecret:               os.Getenv("WARDRYX_APPROVAL_SECRET"),
+		ApprovalSingleUse:            parseBoolClosed(os.Getenv("WARDRYX_APPROVAL_SINGLE_USE")),
+		ApprovalUnanswered:           parseDuration(os.Getenv("WARDRYX_APPROVAL_UNANSWERED_AFTER")),
+		OTLPEndpoint:                 os.Getenv("WARDRYX_OTLP_ENDPOINT"),
+		RecordFailMode:               recordFailMode(os.Getenv("WARDRYX_RECORD_FAILMODE")),
+		ApprovalSigner:               os.Getenv("WARDRYX_APPROVAL_SIGNER"),
+		KeyryxURL:                    os.Getenv("WARDRYX_KEYRYX_URL"),
+		KeyryxCredentialFile:         os.Getenv("WARDRYX_KEYRYX_CREDENTIAL_FILE"),
+		AgentTokenIssuer:             os.Getenv("WARDRYX_AGENT_TOKEN_ISSUER"),
+		AgentTokenJWKSURL:            os.Getenv("WARDRYX_AGENT_TOKEN_JWKS_URL"),
+		AgentTokenJWKSFile:           os.Getenv("WARDRYX_AGENT_TOKEN_JWKS_FILE"),
+		AgentTokenAudiences:          os.Getenv("WARDRYX_AGENT_TOKEN_AUDIENCES"),
+		AgentTokenRevocationURL:      os.Getenv("WARDRYX_AGENT_TOKEN_REVOCATION_URL"),
+		AgentTokenDoorOrigins:        os.Getenv("WARDRYX_AGENT_TOKEN_DOOR_ORIGINS"),
+		AgentTokenRequireProof:       os.Getenv("WARDRYX_AGENT_TOKEN_REQUIRE_PROOF"),
+		AgentTokenProofMaxAgeSeconds: os.Getenv("WARDRYX_AGENT_TOKEN_PROOF_MAX_AGE_SECONDS"),
+		ApprovalV2Until:              os.Getenv("WARDRYX_APPROVAL_V2_UNTIL"),
 	}
 }
 
