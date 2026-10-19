@@ -110,7 +110,7 @@ func agentTokenServer(t *testing.T, pols []policy.Policy, k tokenKeySet, configu
 	if err != nil {
 		t.Fatalf("policy.Compile: %v", err)
 	}
-	keys := map[string]Principal{adminKey: {Org: "acme", Role: RoleAdmin, Agents: "agent://*"}}
+	keys := map[string]Principal{keyDigest(adminKey): {Org: "acme", Role: RoleAdmin, Agents: "agent://*"}}
 	var ew *event.ChainedWriter
 	if eventsPath != "" {
 		if ew, err = event.NewChainedWriter(eventsPath); err != nil {
