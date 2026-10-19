@@ -27,6 +27,7 @@ import (
 const (
 	testIssuer   = "https://vouchryx.example"
 	testAudience = "https://wardryx.example"
+	testDoor     = "https://pep.example"
 	testKid      = "k-agent-1"
 	testSubject  = "agent://acme.example/support/bot1"
 )
@@ -59,13 +60,13 @@ func writeJWKS(t *testing.T, keys map[string]*ecdsa.PrivateKey) string {
 	return path
 }
 
-// mint signs a compact JWS: the header names alg, typ at+jwt and kid; the
-// payload is claims. ES256 is signed for real; any other alg gets a signature
-// of zeros, which no verifier may accept.
-func mint(t *testing.T, key *ecdsa.PrivateKey, kid, alg string, claims map[string]any) string {
+// signJWS signs a compact JWS with header and claims. ES256 is signed for real
+// with key; any other alg, or a nil key, gets a signature of zeros, which no
+// verifier may accept.
+func signJWS(t *testing.T, key *ecdsa.PrivateKey, header, claims map[string]any) string {
 	t.Helper()
 	enc := base64.RawURLEncoding
-	hdr, err := json.Marshal(map[string]any{"alg": alg, "typ": "at+jwt", "kid": kid})
+	hdr, err := json.Marshal(header)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -75,7 +76,7 @@ func mint(t *testing.T, key *ecdsa.PrivateKey, kid, alg string, claims map[strin
 	}
 	signingInput := enc.EncodeToString(hdr) + "." + enc.EncodeToString(body)
 	sig := make([]byte, 64)
-	if alg == "ES256" && key != nil {
+	if header["alg"] == "ES256" && key != nil {
 		sum := sha256.Sum256([]byte(signingInput))
 		r, s, err := ecdsa.Sign(rand.Reader, key, sum[:])
 		if err != nil {
@@ -85,6 +86,12 @@ func mint(t *testing.T, key *ecdsa.PrivateKey, kid, alg string, claims map[strin
 		s.FillBytes(sig[32:])
 	}
 	return signingInput + "." + enc.EncodeToString(sig)
+}
+
+// mint signs an agent token: a header naming alg, typ at+jwt and kid.
+func mint(t *testing.T, key *ecdsa.PrivateKey, kid, alg string, claims map[string]any) string {
+	t.Helper()
+	return signJWS(t, key, map[string]any{"alg": alg, "typ": "at+jwt", "kid": kid}, claims)
 }
 
 // claimsFor is a valid agent token's claims at now, with the overrides applied.
@@ -116,6 +123,7 @@ func newVerifier(t *testing.T, keys map[string]*ecdsa.PrivateKey, revocationURL 
 		Audiences:     []string{testAudience},
 		JWKSFile:      writeJWKS(t, keys),
 		RevocationURL: revocationURL,
+		DoorOrigins:   []string{testDoor},
 	}
 	v, err := New(cfg, http.DefaultClient)
 	if err != nil {
@@ -276,7 +284,7 @@ func TestTheCacheIsKeyedByTheTokenNotItsJTI(t *testing.T) {
 
 func TestAFailedKeySetRefreshKeepsTheSetItHeld(t *testing.T) {
 	key := newKey(t)
-	cfg := Config{Issuer: testIssuer, Audiences: []string{testAudience}, JWKSFile: writeJWKS(t, map[string]*ecdsa.PrivateKey{testKid: key})}
+	cfg := Config{Issuer: testIssuer, Audiences: []string{testAudience}, JWKSFile: writeJWKS(t, map[string]*ecdsa.PrivateKey{testKid: key}), DoorOrigins: []string{testDoor}}
 	v, err := New(cfg, http.DefaultClient)
 	if err != nil {
 		t.Fatal(err)
@@ -359,7 +367,7 @@ func TestTheKeySetIsFetchedFromItsURLAndAFailedRefreshKeepsIt(t *testing.T) {
 		t.Fatal(err)
 	}
 	ks := newKeySetServer(t, raw)
-	v, err := New(Config{Issuer: testIssuer, Audiences: []string{testAudience}, JWKSURL: ks.srv.URL}, nil)
+	v, err := New(Config{Issuer: testIssuer, Audiences: []string{testAudience}, JWKSURL: ks.srv.URL, DoorOrigins: []string{testDoor}}, nil)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -388,7 +396,7 @@ func TestTheSourcesArePolledOnTheInterval(t *testing.T) {
 		t.Fatal(err)
 	}
 	ks := newKeySetServer(t, raw)
-	v, err := New(Config{Issuer: testIssuer, Audiences: []string{testAudience}, JWKSURL: ks.srv.URL}, nil)
+	v, err := New(Config{Issuer: testIssuer, Audiences: []string{testAudience}, JWKSURL: ks.srv.URL, DoorOrigins: []string{testDoor}}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

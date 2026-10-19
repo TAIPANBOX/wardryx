@@ -35,6 +35,15 @@ type Config struct {
 	JWKSURL       string
 	JWKSFile      string
 	RevocationURL string
+	// DoorOrigins are the scheme://host:port origins of the doors whose DPoP
+	// proofs are accepted. Required with the issuer.
+	DoorOrigins []string
+	// ProofOptional lets a token without a proof verify. The zero value requires
+	// the proof.
+	ProofOptional bool
+	// ProofMaxAge is how far a proof's iat may sit from now, either way. Zero
+	// takes the default of 60 seconds; the largest allowed is 300.
+	ProofMaxAge time.Duration
 }
 
 // ErrInvalid is what every refusal of a token is, to a caller. The check that
@@ -48,7 +57,16 @@ type Verified struct {
 	JTI       string
 	IssuedAt  int64
 	ExpiresAt int64
+	// JKT is the thumbprint the token is bound to (cnf.jkt).
+	JKT string
 }
+
+// ErrProofRequired is a token presented with no DPoP proof, when proofs are
+// required.
+var ErrProofRequired = errors.New("agenttoken: the token was presented with no DPoP proof")
+
+// ErrProof is a DPoP proof that did not verify for the token it accompanies.
+var ErrProof = errors.New("agenttoken: the DPoP proof did not verify")
 
 const (
 	// maxKeySetBytes bounds a key set body. A vouchryx set is a few hundred bytes.
@@ -196,6 +214,12 @@ func (v *Verifier) Run(ctx context.Context, every time.Duration, report func(err
 			}
 		}
 	}
+}
+
+// CheckProof checks the DPoP proof that accompanies a verified token. Scaffold:
+// accepts every proof, which is what the decision did before proofs.
+func (v *Verifier) CheckProof(proof, token string, bound Verified, now time.Time) error {
+	return nil
 }
 
 // Verify checks a token at the given time. Every refusal is ErrInvalid, and the

@@ -558,6 +558,9 @@ type decideRequestDTO struct {
 	// AgentToken is the agent's own access token, when the enforcement point sends
 	// one. wardryx verifies it only when WARDRYX_AGENT_TOKEN_ISSUER is set.
 	AgentToken string `json:"agent_token,omitempty"`
+	// AgentDPoPProof is the DPoP proof the agent sent with the token, to the door. Required
+	// with the token unless WARDRYX_AGENT_TOKEN_REQUIRE_PROOF=0.
+	AgentDPoPProof string `json:"agent_dpop_proof,omitempty"`
 	// ChainProven: the enforcement point VERIFIED this request's delegation
 	// proof (agent-passport SPEC 5.2) before calling. Absent means it did
 	// not, never "it did and forgot to say": a default of true would make

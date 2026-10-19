@@ -27,3 +27,20 @@ func TestAgentTokenSettingsAreReadFromTheEnvironment(t *testing.T) {
 		t.Errorf("AgentTokenRevocationURL = %q", cfg.AgentTokenRevocationURL)
 	}
 }
+
+// The proof settings are read here, with the rest of the agent-token settings.
+func TestAgentTokenProofSettingsAreReadFromTheEnvironment(t *testing.T) {
+	t.Setenv("WARDRYX_AGENT_TOKEN_DOOR_ORIGINS", "https://pep.example:8443,https://pep-b.example")
+	t.Setenv("WARDRYX_AGENT_TOKEN_REQUIRE_PROOF", "0")
+	t.Setenv("WARDRYX_AGENT_TOKEN_PROOF_MAX_AGE_SECONDS", "120")
+	cfg := FromEnv()
+	if cfg.AgentTokenDoorOrigins != "https://pep.example:8443,https://pep-b.example" {
+		t.Errorf("AgentTokenDoorOrigins = %q", cfg.AgentTokenDoorOrigins)
+	}
+	if cfg.AgentTokenRequireProof != "0" {
+		t.Errorf("AgentTokenRequireProof = %q", cfg.AgentTokenRequireProof)
+	}
+	if cfg.AgentTokenProofMaxAgeSeconds != "120" {
+		t.Errorf("AgentTokenProofMaxAgeSeconds = %q", cfg.AgentTokenProofMaxAgeSeconds)
+	}
+}

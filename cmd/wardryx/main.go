@@ -249,9 +249,12 @@ func runServe(args []string) error {
 	srv := api.New(engine, st, events, otelExporter, keys, []byte(cfg.ApprovalSecret), cfg.ApprovalSingleUse, basePolicies).WithApprovalKeys(approvalKeys)
 	// An agent's own token is verified here when WARDRYX_AGENT_TOKEN_ISSUER is set
 	// (invariant 13). Its key set is loaded before the server answers anything.
-	agentTokens, agentTokenRun, err := buildAgentTokens(cfg)
+	agentTokens, agentTokenRun, agentTokenWarnings, err := buildAgentTokens(cfg)
 	if err != nil {
 		return fmt.Errorf("agent tokens: %w", err)
+	}
+	for _, w := range agentTokenWarnings {
+		fmt.Fprintln(os.Stderr, "wardryx: WARNING: "+w)
 	}
 	if agentTokens != nil {
 		srv.WithAgentTokens(agentTokens)

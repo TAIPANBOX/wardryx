@@ -33,12 +33,16 @@ const (
 	tokKid      = "k-agent-api"
 	tokSubject  = "agent://acme.example/support/bot1"
 	tokOther    = "agent://acme.example/support/bot2"
+	tokDoor     = "https://pep.example"
+	tokHTU      = "https://pep.example/v1/tools/call"
 )
 
-// tokenKeySet is one signing key and the key set file that publishes it.
+// tokenKeySet is one signing key and the key set file that publishes it, and
+// the holder key an agent's token is bound to and its proofs are signed with.
 type tokenKeySet struct {
-	key  *ecdsa.PrivateKey
-	file string
+	key    *ecdsa.PrivateKey
+	file   string
+	holder *ecdsa.PrivateKey
 }
 
 func newTokenKeySet(t *testing.T) tokenKeySet {
@@ -55,7 +59,11 @@ func newTokenKeySet(t *testing.T) tokenKeySet {
 	if err := os.WriteFile(file, raw, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	return tokenKeySet{key: key, file: file}
+	holder, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return tokenKeySet{key: key, file: file, holder: holder}
 }
 
 // mintAgentToken signs a compact at+jwt for sub, valid now, with the overrides
@@ -66,7 +74,7 @@ func mintAgentToken(t *testing.T, k tokenKeySet, sub string, over map[string]any
 	now := time.Now().Unix()
 	claims := map[string]any{
 		"iss": tokIssuer, "sub": sub, "client_id": sub, "aud": tokAudience,
-		"iat": now, "exp": now + 300, "jti": "jti-" + sub, "cnf": map[string]any{"jkt": "holder-thumbprint"},
+		"iat": now, "exp": now + 300, "jti": "jti-" + sub, "cnf": map[string]any{"jkt": holderThumbprint(t, k)},
 	}
 	for name, v := range over {
 		if v == nil {
@@ -121,9 +129,10 @@ func agentTokenServer(t *testing.T, pols []policy.Policy, k tokenKeySet, configu
 		keys, []byte(testHMAC), false, set.Policies())
 	if configured {
 		v, err := agenttoken.New(agenttoken.Config{
-			Issuer:    tokIssuer,
-			Audiences: []string{tokAudience},
-			JWKSFile:  k.file,
+			Issuer:      tokIssuer,
+			Audiences:   []string{tokAudience},
+			JWKSFile:    k.file,
+			DoorOrigins: []string{tokDoor},
 		}, nil)
 		if err != nil {
 			t.Fatalf("agenttoken.New: %v", err)
@@ -139,7 +148,9 @@ func agentTokenServer(t *testing.T, pols []policy.Policy, k tokenKeySet, configu
 func TestAVerifiedAgentTokenSetsTheIdentitySource(t *testing.T) {
 	k := newTokenKeySet(t)
 	srv := agentTokenServer(t, requireAgentToken(), k, true, "")
-	dto := decideRequestDTO{AgentID: tokSubject, RunID: "r1", AgentToken: mintAgentToken(t, k, tokSubject, nil)}
+	tok := mintAgentToken(t, k, tokSubject, nil)
+	dto := decideRequestDTO{AgentID: tokSubject, RunID: "r1", AgentToken: tok,
+		AgentDPoPProof: mintDPoPProof(t, k, tok, tokHTU, time.Now().Unix(), "p-verified")}
 	if got := decisionFor(t, srv, dto); got.Decision != "allow" {
 		t.Fatalf("a verified agent token did not set the source the policy requires: decision %q, reason %q",
 			got.Decision, got.Reason)
@@ -227,5 +238,84 @@ func TestTheDecideBodyIgnoresAnUnknownFieldAsBefore(t *testing.T) {
 	rec := doRequest(t, srv.Handler(), http.MethodPost, "/v1/decide", adminKey, body)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("a decide body with an unknown field: status %d, body %s, want 200 as before", rec.Code, rec.Body)
+	}
+}
+
+// holderThumbprint is the RFC 7638 thumbprint of the holder key, the value a
+// token's cnf.jkt carries.
+func holderThumbprint(t *testing.T, k tokenKeySet) string {
+	t.Helper()
+	tp, err := delegation.Thumbprint(delegation.FromPublic(&k.holder.PublicKey, ""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return tp
+}
+
+// mintDPoPProof signs a proof with the holder key, for token, sent to htu at iat.
+func mintDPoPProof(t *testing.T, k tokenKeySet, token, htu string, iat int64, jti string) string {
+	t.Helper()
+	enc := base64.RawURLEncoding
+	raw, err := json.Marshal(delegation.FromPublic(&k.holder.PublicKey, ""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var jwk map[string]any
+	if err := json.Unmarshal(raw, &jwk); err != nil {
+		t.Fatal(err)
+	}
+	hdr, _ := json.Marshal(map[string]any{"typ": "dpop+jwt", "alg": "ES256", "jwk": jwk})
+	body, _ := json.Marshal(map[string]any{
+		"htm": "POST", "htu": htu, "iat": iat, "jti": jti,
+		"ath": delegation.AccessTokenHash(token),
+	})
+	input := enc.EncodeToString(hdr) + "." + enc.EncodeToString(body)
+	digest := sha256.Sum256([]byte(input))
+	r, s, err := ecdsa.Sign(rand.Reader, k.holder, digest[:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	sig := make([]byte, 64)
+	r.FillBytes(sig[:32])
+	s.FillBytes(sig[32:])
+	return input + "." + enc.EncodeToString(sig)
+}
+
+// With proofs required, a token alone is refused. The proof is what makes the
+// token the holder's, and without it the token is usable by anyone who has it.
+func TestAnAgentTokenWithNoProofIsRefusedWith403(t *testing.T) {
+	k := newTokenKeySet(t)
+	srv := agentTokenServer(t, nil, k, true, "")
+	dto := decideRequestDTO{AgentID: tokSubject, RunID: "r1", AgentToken: mintAgentToken(t, k, tokSubject, nil)}
+	rec := doRequest(t, srv.Handler(), http.MethodPost, "/v1/decide", adminKey, dto)
+	if rec.Code != http.StatusForbidden || !strings.Contains(rec.Body.String(), "agent_token_proof_required") {
+		t.Fatalf("a token with no proof: status %d, body %s, want 403 agent_token_proof_required", rec.Code, rec.Body)
+	}
+}
+
+// A proof made for another token does not verify this one (the ath differs).
+func TestAProofThatDoesNotVerifyIsRefusedWith403(t *testing.T) {
+	k := newTokenKeySet(t)
+	srv := agentTokenServer(t, nil, k, true, "")
+	tok := mintAgentToken(t, k, tokSubject, nil)
+	other := mintAgentToken(t, k, tokSubject, map[string]any{"jti": "another"})
+	dto := decideRequestDTO{AgentID: tokSubject, RunID: "r1", AgentToken: tok,
+		AgentDPoPProof: mintDPoPProof(t, k, other, tokHTU, time.Now().Unix(), "p-other")}
+	rec := doRequest(t, srv.Handler(), http.MethodPost, "/v1/decide", adminKey, dto)
+	if rec.Code != http.StatusForbidden || !strings.Contains(rec.Body.String(), "agent_token_proof_invalid") {
+		t.Fatalf("a proof for another token: status %d, body %s, want 403 agent_token_proof_invalid", rec.Code, rec.Body)
+	}
+}
+
+// A proof sent to a door wardryx was not configured to accept is refused.
+func TestAProofToAForeignDoorIsRefusedWith403(t *testing.T) {
+	k := newTokenKeySet(t)
+	srv := agentTokenServer(t, nil, k, true, "")
+	tok := mintAgentToken(t, k, tokSubject, nil)
+	dto := decideRequestDTO{AgentID: tokSubject, RunID: "r1", AgentToken: tok,
+		AgentDPoPProof: mintDPoPProof(t, k, tok, "https://elsewhere.example/v1/tools/call", time.Now().Unix(), "p-foreign")}
+	rec := doRequest(t, srv.Handler(), http.MethodPost, "/v1/decide", adminKey, dto)
+	if rec.Code != http.StatusForbidden || !strings.Contains(rec.Body.String(), "agent_token_proof_invalid") {
+		t.Fatalf("a proof to a foreign door: status %d, body %s, want 403 agent_token_proof_invalid", rec.Code, rec.Body)
 	}
 }

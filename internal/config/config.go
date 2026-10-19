@@ -107,6 +107,15 @@ type Config struct {
 	AgentTokenAudiences string
 	// AgentTokenRevocationURL is WARDRYX_AGENT_TOKEN_REVOCATION_URL, optional.
 	AgentTokenRevocationURL string
+	// AgentTokenDoorOrigins is WARDRYX_AGENT_TOKEN_DOOR_ORIGINS, a comma list of the
+	// scheme://host:port origins whose DPoP proofs are accepted. Required with the issuer.
+	AgentTokenDoorOrigins string
+	// AgentTokenRequireProof is WARDRYX_AGENT_TOKEN_REQUIRE_PROOF. Unset requires a proof
+	// with every agent token; "0" turns that off, with a warning at startup.
+	AgentTokenRequireProof string
+	// AgentTokenProofMaxAgeSeconds is WARDRYX_AGENT_TOKEN_PROOF_MAX_AGE_SECONDS: how far a
+	// proof's iat may sit from now. Unset is 60; the largest allowed is 300.
+	AgentTokenProofMaxAgeSeconds string
 	// ApprovalV2Until is WARDRYX_APPROVAL_V2_UNTIL: an RFC 3339 instant after
 	// which v2 HMAC tokens are refused. Set, v2 verifies before it; unset, v2
 	// verifies forever without a signer and not at all with one.
