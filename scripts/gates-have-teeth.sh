@@ -582,6 +582,104 @@ run_case "no-raw-secret-lookup: no code reads the Authorization header" fail \
 	"$(py 'edit("internal/api/api.go", "r.Header.Get(\"Authorization\")", "r.Header.Get(\"X-Authz\")")')" \
 	"measured nothing"
 
+# Invariant 44, G3.10. Each fault below keeps a healthy suite green and answers
+# 200 with a correct-looking decision.
+run_case "proof-record-is-shared: serve keeps the database from the verifier" fail \
+	'./scripts/proof-record-is-shared.sh' \
+	"$(py 'edit("cmd/wardryx/main.go", "\t\tproofRecord = pg\n", "")')" \
+	"does not hand the database to the verifier"
+
+run_case "proof-record-is-shared: the claim loses its ON CONFLICT" fail \
+	'./scripts/proof-record-is-shared.sh' \
+	"$(py 'edit("internal/store/pgstore.go", "\n\t\t ON CONFLICT (proof_key) DO NOTHING`,\n\t\tkey, until)", "`,\n\t\tkey, until)")')" \
+	"not an atomic INSERT"
+
+run_case "proof-record-is-shared: the claim reads before it writes" fail \
+	'./scripts/proof-record-is-shared.sh' \
+	"$(py 'edit("internal/store/pgstore.go", "\tres, err := p.db.ExecContext(ctx,\n\t\t`INSERT INTO agent_proof_replays", "\t_ = p.db.QueryRowContext(ctx, `SELECT 1 FROM agent_proof_replays`)\n\tres, err := p.db.ExecContext(ctx,\n\t\t`INSERT INTO agent_proof_replays")')" \
+	"reads before it writes"
+
+run_case "proof-record-is-shared: every claim reports success" fail \
+	'./scripts/proof-record-is-shared.sh' \
+	"$(py 'edit("internal/store/pgstore.go", "return n == 1, nil\n}\n\n// PurgeProofs", "return true, nil\n}\n\n// PurgeProofs")')" \
+	"from the row it inserted"
+
+run_case "proof-record-is-shared: a failed record passes the proof" fail \
+	'./scripts/proof-record-is-shared.sh' \
+	"$(py 'edit("internal/agenttoken/verifier.go", "return fmt.Errorf(\"%w: %w\", ErrProofRecord, err)", "return nil")')" \
+	"a failed record passes the proof"
+
+run_case "proof-record-is-shared: the process stands in for the shared record" fail \
+	'./scripts/proof-record-is-shared.sh' \
+	"$(py 'edit("internal/agenttoken/verifier.go", "within its window\", ErrProof)\n\t\t}\n\t\treturn nil\n\t}\n\tv.proofMu.Lock()", "within its window\", ErrProof)\n\t\t}\n\t}\n\tv.proofMu.Lock()")')" \
+	"falls through"
+
+run_case "proof-record-is-shared: a held proof is accepted" fail \
+	'./scripts/proof-record-is-shared.sh' \
+	"$(py 'edit("internal/agenttoken/verifier.go", "\t\tif !claimed {\n\t\t\treturn fmt.Errorf(\"%w: the proof'"'"'s jti was already used within its window\", ErrProof)\n\t\t}\n\t\treturn nil\n\t}\n\tv.proofMu.Lock()", "\t\t_ = claimed\n\t\treturn nil\n\t}\n\tv.proofMu.Lock()")')" \
+	"already holds"
+
+run_case "proof-record-is-shared: the record is not the last check" fail \
+	'./scripts/proof-record-is-shared.sh' \
+	"$(py 'edit("internal/agenttoken/verifier.go", "\treturn v.recordProof(ctx, thumb, jti, int64(iat), now)\n", "\t_ = v.recordProof(ctx, thumb, jti, int64(iat), now)\n\treturn nil\n")')" \
+	"does not end with the record"
+
+run_case "proof-record-is-shared: the check has no store deadline" fail \
+	'./scripts/proof-record-is-shared.sh' \
+	"$(py 'edit("internal/api/agent_token.go", "context.WithTimeout(context.WithoutCancel(ctx), s.storeTimeout)", "context.WithCancel(ctx)")')" \
+	"store deadline"
+
+run_case "proof-record-is-shared: the deadline is made and not handed on" fail \
+	'./scripts/proof-record-is-shared.sh' \
+	"$(py 'edit("internal/api/agent_token.go", "s.agentTokens.CheckProof(proofCtx, proof", "s.agentTokens.CheckProof(ctx, proof")')" \
+	"store deadline"
+
+run_case "proof-record-is-shared: the claim ends with the caller" fail \
+	'./scripts/proof-record-is-shared.sh' \
+	"$(py 'edit("internal/api/agent_token.go", "context.WithTimeout(context.WithoutCancel(ctx), s.storeTimeout)", "context.WithTimeout(ctx, s.storeTimeout)")')" \
+	"store deadline"
+
+run_case "proof-record-is-shared: the record is asked outside the caller's context" fail \
+	'./scripts/proof-record-is-shared.sh' \
+	"$(py 'edit("internal/agenttoken/verifier.go", "v.cfg.ProofRecord.TryRecordProof(ctx, key,", "v.cfg.ProofRecord.TryRecordProof(context.Background(), key,")')" \
+	"under the context it was given"
+
+run_case "proof-record-is-shared: the API lets an unrecorded proof through" fail \
+	'./scripts/proof-record-is-shared.sh' \
+	"$(py 'edit("internal/api/agent_token.go", "\t\t\ts.writeProofUnrecorded(w, err)\n\t\t\treturn \"\", false\n", "\t\t\treturn policy.IdentitySourceAgentToken, true\n")')" \
+	"does not refuse on ErrProofRecord"
+
+run_case "proof-record-is-shared: nothing purges the record" fail \
+	'./scripts/proof-record-is-shared.sh' \
+	"$(py 'edit("cmd/wardryx/agent_tokens.go", "go v.RunProofPurge(ctx, proofPurgeEvery, func(err error) {", "_ = (func(err error) {")')" \
+	"nothing purges"
+
+run_case "proof-record-is-shared: the start stops naming the limit" fail \
+	'./scripts/proof-record-is-shared.sh' \
+	"$(py 'edit("cmd/wardryx/main.go", "proofRecordWarning(cfg.AgentTokenIssuer, *dbDSN)", "\"\"")')" \
+	"per process with no database"
+
+run_case "proof-record-is-shared: CI stops running the binary on a database" fail \
+	'./scripts/proof-record-is-shared.sh' \
+	"$(py 'edit(".github/workflows/ci.yml", " ./internal/agenttoken/ ./internal/manifest/", " ./internal/agenttoken/")')" \
+	"does not carry ./internal/manifest/"
+
+# A line in the workflow that is commented out runs nothing, whatever it names.
+run_case "proof-record-is-shared: CI's real line is reduced under a full comment" fail \
+	'./scripts/proof-record-is-shared.sh' \
+	"$(py 'edit(".github/workflows/ci.yml", "        run: go test -count=1 -p 1 -tags integration ./internal/store/ ./internal/agenttoken/ ./internal/manifest/", "        # run: go test -count=1 -p 1 -tags integration ./internal/store/ ./internal/agenttoken/ ./internal/manifest/\n        run: go test -count=1 -tags integration ./internal/store/")')" \
+	"does not carry"
+
+# A comment that spells the fail-open shape is prose, and so is one naming SELECT.
+run_case "proof-record-is-shared: a comment naming the shapes it refuses" pass \
+	'./scripts/proof-record-is-shared.sh' \
+	"$(py 'edit("internal/agenttoken/verifier.go", "\t\t\treturn fmt.Errorf(\"%w: %w\", ErrProofRecord, err)", "\t\t\t// return nil here would pass a proof nobody checked.\n\t\t\treturn fmt.Errorf(\"%w: %w\", ErrProofRecord, err)"); edit("internal/store/pgstore.go", "\tres, err := p.db.ExecContext(ctx,\n\t\t`INSERT INTO agent_proof_replays", "\t// A SELECT first would race.\n\tres, err := p.db.ExecContext(ctx,\n\t\t`INSERT INTO agent_proof_replays")')"
+
+run_case "proof-record-is-shared: the claim is gone" fail \
+	'./scripts/proof-record-is-shared.sh' \
+	"$(py 'edit("internal/store/pgstore.go", "func (p *Postgres) TryRecordProof(", "func (p *Postgres) ClaimProof(")')" \
+	"measured nothing"
+
 echo
 if [ -n "$(git status --porcelain)" ]; then
 	printf 'FAIL: this script left the tree dirty, so it cannot be trusted about anything above\n'

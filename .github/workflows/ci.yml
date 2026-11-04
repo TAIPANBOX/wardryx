@@ -63,6 +63,12 @@ jobs:
       - name: the agent, the org and the approver come from the key
         run: ./scripts/agent-is-bound-to-its-key.sh
 
+      # G3.10: serve not handing the database to the verifier leaves a working
+      # per-process record, and a failed record that passes a proof shows only
+      # during an outage. Neither turns a healthy suite red.
+      - name: the proof record is shared, and refuses when it cannot be asked
+        run: ./scripts/proof-record-is-shared.sh
+
       # Last, because it mutates tracked files and restores them. It needs a
       # clean tree and says so plainly, so it also reports any earlier step
       # that starts writing into the checkout.
@@ -111,4 +117,6 @@ jobs:
       - name: integration tests
         env:
           DATABASE_URL: postgres://wardryx:wardryx@localhost:5432/wardryx_test?sslmode=disable
-        run: go test -tags integration ./internal/store/
+        # One package at a time, because they share one database, and uncached,
+        # because internal/manifest starts a binary go test cannot see change.
+        run: go test -count=1 -p 1 -tags integration ./internal/store/ ./internal/agenttoken/ ./internal/manifest/

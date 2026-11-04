@@ -23,8 +23,12 @@ import (
 	"context"
 	"database/sql/driver"
 	"errors"
+	"io"
 	"net"
+	"strings"
 	"time"
+
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/TAIPANBOX/wardryx/internal/policy"
 )
@@ -170,6 +174,11 @@ type Store interface {
 // kind and 500 for the second, and logs the first once per outage rather
 // than once per request.
 //
+// A connection that died during the call reads as an EOF, which is not a net
+// error: the driver had a socket and the socket ended. And a database that is
+// stopping, starting, full or read-only answers, and what it says is that it is
+// not there for this call (serverGone).
+//
 // A cancelled context is deliberately not an outage: in the API the only
 // cancellation a store call can see comes from the client going away, and a
 // client that hung up did not find the store down.
@@ -177,9 +186,23 @@ func IsUnavailable(err error) bool {
 	if err == nil {
 		return false
 	}
-	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, driver.ErrBadConn) {
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, driver.ErrBadConn) ||
+		errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
 		return true
 	}
 	var netErr net.Error
-	return errors.As(err, &netErr)
+	if errors.As(err, &netErr) {
+		return true
+	}
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && serverGone(pgErr.Code)
+}
+
+// serverGone reads a Postgres SQLSTATE: class 08 is a connection failure, 53 a
+// server out of connections, memory or disk, 57P its shutdown, start or crash, and
+// 25006 a read-only server, which is a replica mid-failover. Anything else is the
+// store answering with a failure of its own.
+func serverGone(code string) bool {
+	return strings.HasPrefix(code, "08") || strings.HasPrefix(code, "53") ||
+		strings.HasPrefix(code, "57P") || code == "25006"
 }

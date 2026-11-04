@@ -189,7 +189,7 @@ func (o *storeOutage) failed(op string, err error) {
 		return
 	}
 	o.down = true
-	log.Printf("wardryx: policy store unreachable while %s: %v; policy writes and /readyz answer 503 until it is back", op, err)
+	log.Printf("wardryx: policy store unreachable while %s: %v; policy writes, /readyz and a decide carrying a shared-record DPoP proof answer 503 until it is back", op, err)
 }
 
 // recovered records a store call that succeeded, and logs it only if an
@@ -777,7 +777,7 @@ func (s *Server) handleDecide(w http.ResponseWriter, r *http.Request, principal 
 	}
 	// The identity source is wardryx's own check when an agent token is verified
 	// (invariant 13), and the request's claim otherwise.
-	identitySource, ok := s.identitySourceFor(w, principal, dto.AgentID, dto.RunID, dto.AgentToken, dto.AgentDPoPProof, dto.IdentitySource)
+	identitySource, ok := s.identitySourceFor(r.Context(), w, principal, dto.AgentID, dto.RunID, dto.AgentToken, dto.AgentDPoPProof, dto.IdentitySource)
 	if !ok {
 		return
 	}

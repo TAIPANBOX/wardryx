@@ -115,7 +115,7 @@ func TestAProofBoundToTheTokenVerifies(t *testing.T) {
 	tok := boundToken(t, issuer, holder, testSubject, nil)
 	bound := verifiedBound(t, v, tok, n)
 	proof := mintProof(t, holder, tok, testHTM, testHTU, n.Unix(), "p-1")
-	if err := v.CheckProof(proof, tok, bound, n); err != nil {
+	if err := v.CheckProof(t.Context(), proof, tok, bound, n); err != nil {
 		t.Fatalf("the proof made by the holder of the bound key was refused: %v", err)
 	}
 }
@@ -130,7 +130,7 @@ func TestAProofMadeWithAnotherKeyIsRefused(t *testing.T) {
 	// thumbprint, which must be the token's cnf.jkt, refuses it.
 	stranger := newKey(t)
 	proof := mintProof(t, stranger, tok, testHTM, testHTU, n.Unix(), "p-2")
-	if err := v.CheckProof(proof, tok, bound, n); !errors.Is(err, ErrProof) {
+	if err := v.CheckProof(t.Context(), proof, tok, bound, n); !errors.Is(err, ErrProof) {
 		t.Fatalf("a proof made with a key other than the token's cnf.jkt: err %v, want ErrProof", err)
 	}
 }
@@ -144,7 +144,7 @@ func TestAProofNamingAnotherTokenIsRefused(t *testing.T) {
 	bound := verifiedBound(t, v, tok, n)
 	// The proof is the holder's and is fresh, but its ath names the other token.
 	proof := mintProof(t, holder, other, testHTM, testHTU, n.Unix(), "p-3")
-	if err := v.CheckProof(proof, tok, bound, n); !errors.Is(err, ErrProof) {
+	if err := v.CheckProof(t.Context(), proof, tok, bound, n); !errors.Is(err, ErrProof) {
 		t.Fatalf("a proof whose ath names another token: err %v, want ErrProof", err)
 	}
 }
@@ -155,15 +155,15 @@ func TestAStaleProofIsRefusedAndAFreshOneAccepted(t *testing.T) {
 	n := now()
 	tok := boundToken(t, issuer, holder, testSubject, nil)
 	bound := verifiedBound(t, v, tok, n)
-	if err := v.CheckProof(mintProof(t, holder, tok, testHTM, testHTU, n.Unix()-30, "p-fresh"), tok, bound, n); err != nil {
+	if err := v.CheckProof(t.Context(), mintProof(t, holder, tok, testHTM, testHTU, n.Unix()-30, "p-fresh"), tok, bound, n); err != nil {
 		t.Fatalf("a proof 30 seconds old, inside the 60-second window, was refused: %v", err)
 	}
 	stale := mintProof(t, holder, tok, testHTM, testHTU, n.Unix()-120, "p-stale")
-	if err := v.CheckProof(stale, tok, bound, n); !errors.Is(err, ErrProof) {
+	if err := v.CheckProof(t.Context(), stale, tok, bound, n); !errors.Is(err, ErrProof) {
 		t.Fatalf("a proof 120 seconds old was accepted: err %v, want ErrProof", err)
 	}
 	future := mintProof(t, holder, tok, testHTM, testHTU, n.Unix()+120, "p-future")
-	if err := v.CheckProof(future, tok, bound, n); !errors.Is(err, ErrProof) {
+	if err := v.CheckProof(t.Context(), future, tok, bound, n); !errors.Is(err, ErrProof) {
 		t.Fatalf("a proof 120 seconds in the future was accepted: err %v, want ErrProof", err)
 	}
 }
@@ -177,7 +177,7 @@ func TestAProofToAForeignDoorIsRefused(t *testing.T) {
 	// The origin is compared as scheme, host and port, with the default port
 	// filled in and the host case-folded: this one is the configured door.
 	same := mintProof(t, holder, tok, testHTM, "https://PEP.example:443/v1/tools/call", n.Unix(), "p-same")
-	if err := v.CheckProof(same, tok, bound, n); err != nil {
+	if err := v.CheckProof(t.Context(), same, tok, bound, n); err != nil {
 		t.Fatalf("a proof to the configured door, default port and host case differing, was refused: %v", err)
 	}
 	for _, htu := range []string{
@@ -186,7 +186,7 @@ func TestAProofToAForeignDoorIsRefused(t *testing.T) {
 		"https://pep.example:8443/v1/tools/call",
 	} {
 		proof := mintProof(t, holder, tok, testHTM, htu, n.Unix(), "p-"+htu)
-		if err := v.CheckProof(proof, tok, bound, n); !errors.Is(err, ErrProof) {
+		if err := v.CheckProof(t.Context(), proof, tok, bound, n); !errors.Is(err, ErrProof) {
 			t.Fatalf("a proof to %s, which is not a configured door origin, was accepted: err %v", htu, err)
 		}
 	}
@@ -200,11 +200,11 @@ func TestAProofWithTheWrongTypOrAlgIsRefused(t *testing.T) {
 	bound := verifiedBound(t, v, tok, n)
 	claims := map[string]any{"htm": testHTM, "htu": testHTU, "iat": n.Unix(), "jti": "p-typ", "ath": delegation.AccessTokenHash(tok)}
 	asToken := signJWS(t, holder, map[string]any{"typ": "at+jwt", "alg": "ES256", "jwk": publicJWK(t, holder)}, claims)
-	if err := v.CheckProof(asToken, tok, bound, n); !errors.Is(err, ErrProof) {
+	if err := v.CheckProof(t.Context(), asToken, tok, bound, n); !errors.Is(err, ErrProof) {
 		t.Fatalf("a proof with typ at+jwt, which is a token and not a proof: err %v, want ErrProof", err)
 	}
 	asHMAC := signJWS(t, holder, map[string]any{"typ": "dpop+jwt", "alg": "HS256", "jwk": publicJWK(t, holder)}, claims)
-	if err := v.CheckProof(asHMAC, tok, bound, n); !errors.Is(err, ErrProof) {
+	if err := v.CheckProof(t.Context(), asHMAC, tok, bound, n); !errors.Is(err, ErrProof) {
 		t.Fatalf("a proof with alg HS256: err %v, want ErrProof", err)
 	}
 }
@@ -219,16 +219,16 @@ func TestAProofWithAPrivateMemberOrNoHTMOrNoJTIIsRefused(t *testing.T) {
 	withPrivate["d"] = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
 	priv := signJWS(t, holder, map[string]any{"typ": "dpop+jwt", "alg": "ES256", "jwk": withPrivate},
 		map[string]any{"htm": testHTM, "htu": testHTU, "iat": n.Unix(), "jti": "p-d", "ath": delegation.AccessTokenHash(tok)})
-	if err := v.CheckProof(priv, tok, bound, n); !errors.Is(err, ErrProof) {
+	if err := v.CheckProof(t.Context(), priv, tok, bound, n); !errors.Is(err, ErrProof) {
 		t.Fatalf("a proof whose jwk carries a private member: err %v, want ErrProof", err)
 	}
 	header := map[string]any{"typ": "dpop+jwt", "alg": "ES256", "jwk": publicJWK(t, holder)}
 	noHTM := signJWS(t, holder, header, map[string]any{"htu": testHTU, "iat": n.Unix(), "jti": "p-h", "ath": delegation.AccessTokenHash(tok)})
-	if err := v.CheckProof(noHTM, tok, bound, n); !errors.Is(err, ErrProof) {
+	if err := v.CheckProof(t.Context(), noHTM, tok, bound, n); !errors.Is(err, ErrProof) {
 		t.Fatalf("a proof with no htm: err %v, want ErrProof", err)
 	}
 	noJTI := signJWS(t, holder, header, map[string]any{"htm": testHTM, "htu": testHTU, "iat": n.Unix(), "ath": delegation.AccessTokenHash(tok)})
-	if err := v.CheckProof(noJTI, tok, bound, n); !errors.Is(err, ErrProof) {
+	if err := v.CheckProof(t.Context(), noJTI, tok, bound, n); !errors.Is(err, ErrProof) {
 		t.Fatalf("a proof with no jti: err %v, want ErrProof", err)
 	}
 }
@@ -239,11 +239,11 @@ func TestAProofIsRequiredUnlessProofsAreOptional(t *testing.T) {
 	v := newProofVerifier(t, issuer, nil)
 	tok := boundToken(t, issuer, holder, testSubject, nil)
 	bound := verifiedBound(t, v, tok, n)
-	if err := v.CheckProof("", tok, bound, n); !errors.Is(err, ErrProofRequired) {
+	if err := v.CheckProof(t.Context(), "", tok, bound, n); !errors.Is(err, ErrProofRequired) {
 		t.Fatalf("a token with no proof, proofs required: err %v, want ErrProofRequired", err)
 	}
 	optional := newProofVerifier(t, issuer, func(c *Config) { c.ProofOptional = true })
-	if err := optional.CheckProof("", tok, bound, n); err != nil {
+	if err := optional.CheckProof(t.Context(), "", tok, bound, n); err != nil {
 		t.Fatalf("a token with no proof, proofs optional: err %v, want nil", err)
 	}
 }
@@ -254,11 +254,11 @@ func TestTheProofWindowIsConfigurableUpTo300Seconds(t *testing.T) {
 	wide := newProofVerifier(t, issuer, func(c *Config) { c.ProofMaxAge = 300 * time.Second })
 	tok := boundToken(t, issuer, holder, testSubject, nil)
 	bound := verifiedBound(t, wide, tok, n)
-	if err := wide.CheckProof(mintProof(t, holder, tok, testHTM, testHTU, n.Unix()-200, "p-wide"), tok, bound, n); err != nil {
+	if err := wide.CheckProof(t.Context(), mintProof(t, holder, tok, testHTM, testHTU, n.Unix()-200, "p-wide"), tok, bound, n); err != nil {
 		t.Fatalf("a 200-second-old proof, inside a 300-second window, was refused: %v", err)
 	}
 	def := newProofVerifier(t, issuer, nil)
-	if err := def.CheckProof(mintProof(t, holder, tok, testHTM, testHTU, n.Unix()-200, "p-def"), tok, bound, n); !errors.Is(err, ErrProof) {
+	if err := def.CheckProof(t.Context(), mintProof(t, holder, tok, testHTM, testHTU, n.Unix()-200, "p-def"), tok, bound, n); !errors.Is(err, ErrProof) {
 		t.Fatalf("a 200-second-old proof under the default 60-second window: err %v, want ErrProof", err)
 	}
 	if _, err := New(Config{Issuer: testIssuer, Audiences: []string{testAudience}, JWKSURL: "https://vouchryx.example/jwks",

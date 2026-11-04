@@ -5,7 +5,9 @@
 // against them with the library's own relayed-token verifier, which is every
 // agent-token check except the proof: the proof belongs to the enforcement
 // point that sees it. Nothing is fetched at decision time. Sources are polled
-// by Run, and a request reads only what was last installed.
+// by Run, and a request reads only what was last installed. The one call a
+// request can make is to a shared proof record (ProofRecord), and it is made
+// last, for a proof that has passed every other check.
 package agenttoken
 
 import (
@@ -47,6 +49,23 @@ type Config struct {
 	// ProofMaxAge is how far a proof's iat may sit from now, either way. Zero
 	// takes the default of 60 seconds; the largest allowed is 300.
 	ProofMaxAge time.Duration
+	// ProofRecord is the record of accepted proofs that every instance on one
+	// database shares. Nil keeps the record in this process, so a restart forgets
+	// it and a second instance never sees it.
+	ProofRecord ProofRecord
+}
+
+// ProofRecord is a record of accepted proofs kept outside this process, so every
+// instance on it, and a process started after a restart, reads the same record.
+// internal/store's Postgres is the one that exists.
+type ProofRecord interface {
+	// TryRecordProof claims key, to be kept at least until the given time, and
+	// reports whether this call is the one that claimed it. While the key is held,
+	// exactly one caller, on any instance, sees true for it.
+	TryRecordProof(ctx context.Context, key string, until time.Time) (bool, error)
+	// PurgeProofs removes the rows whose time passed more than grace ago, by the
+	// record's own clock, and reports how many went.
+	PurgeProofs(ctx context.Context, grace time.Duration) (int64, error)
 }
 
 // ErrInvalid is what every refusal of a token is, to a caller. The check that
@@ -71,6 +90,12 @@ var ErrProofRequired = errors.New("agenttoken: the token was presented with no D
 // ErrProof is a DPoP proof that did not verify for the token it accompanies.
 var ErrProof = errors.New("agenttoken: the DPoP proof did not verify")
 
+// ErrProofRecord is a proof the shared record could not be asked about. Whether
+// the proof is a replay is not known, so it is refused; it says nothing against
+// the proof, and the record's own error is wrapped beside it for the caller to
+// tell an outage from a failure.
+var ErrProofRecord = errors.New("agenttoken: the proof record could not be asked")
+
 const (
 	// maxKeySetBytes bounds a key set body. A vouchryx set is a few hundred bytes.
 	maxKeySetBytes = 64 << 10
@@ -88,9 +113,14 @@ const (
 	maxProofAge     = 300 * time.Second
 	// maxProofJTI is the longest proof jti accepted, as the library bounds it.
 	maxProofJTI = 256
-	// maxProofReplays bounds the record of accepted proofs. A full record refuses
-	// a new proof (fail closed) until the window of an entry closes.
+	// maxProofReplays bounds the record of accepted proofs in this process. A full
+	// record refuses a new proof (fail closed) until the window of an entry closes.
 	maxProofReplays = 1 << 18
+	// proofPurgeGrace is how long past the longest window a row of a shared record
+	// is kept, for an instance whose clock is behind the record's. A row already
+	// lasts for the longest window whatever the writer's own, so the two together
+	// cover a window set differently and a clock that differs.
+	proofPurgeGrace = maxProofAge
 )
 
 // Verifier checks tokens against the sources it holds.
@@ -100,8 +130,9 @@ type Verifier struct {
 	revs   *delegation.Revocations // nil when no revocation list is configured
 	doors  map[string]bool         // the normalised door origins a proof may name
 
-	// proofs is the record of accepted proofs, jti to the unix second its window
-	// closes; proofCap bounds it. Both are read and written under proofMu.
+	// proofs is the record of accepted proofs in this process, proofKey to the
+	// unix second its window closes; proofCap bounds it. Both are read and written
+	// under proofMu. With cfg.ProofRecord set, neither is used.
 	proofMu  sync.Mutex
 	proofs   map[string]int64
 	proofQ   proofQueue
@@ -116,11 +147,11 @@ type Verifier struct {
 	fromFile   []delegation.JWK // the last set the file held
 }
 
-// proofEntry is one accepted proof: its jti, and the unix second its window
+// proofEntry is one accepted proof: its key, and the unix second its window
 // closes. A proof is refused for its age once that second has passed, so the
 // entry can be forgotten then and not before.
 type proofEntry struct {
-	jti   string
+	key   string
 	until int64
 }
 
@@ -286,21 +317,23 @@ func (v *Verifier) Run(ctx context.Context, every time.Duration, report func(err
 // configured door. With no proof: ErrProofRequired, unless proofs are optional.
 // It is the proof's own signature that the holder's key makes good, so a proof
 // for a key the token is not bound to is refused whatever it says about itself.
-func (v *Verifier) CheckProof(proof, token string, bound Verified, now time.Time) error {
+// ctx bounds the shared record, when there is one: a record that cannot be asked
+// in time is ErrProofRecord, and the proof is refused.
+func (v *Verifier) CheckProof(ctx context.Context, proof, token string, bound Verified, now time.Time) error {
 	if proof == "" {
 		if v.cfg.ProofOptional {
 			return nil
 		}
 		return ErrProofRequired
 	}
-	return v.verifyProof(proof, token, bound.JKT, now)
+	return v.verifyProof(ctx, proof, token, bound.JKT, now)
 }
 
 // verifyProof is every check on a presented proof. It reads the proof's header
 // and claims only after the signature under the key the proof carries has
 // verified, and the header's key is matched to the token before anything else is
 // trusted.
-func (v *Verifier) verifyProof(proof, token, boundJKT string, now time.Time) error {
+func (v *Verifier) verifyProof(ctx context.Context, proof, token, boundJKT string, now time.Time) error {
 	refuse := func(reason string) error { return fmt.Errorf("%w: %s", ErrProof, reason) }
 	parts := strings.Split(proof, ".")
 	if len(parts) != 3 {
@@ -389,15 +422,31 @@ func (v *Verifier) verifyProof(proof, token, boundJKT string, now time.Time) err
 	}
 	// Last of all: a proof refused for anything else records nothing, and a
 	// proof that passes every check is single use within its window.
-	return v.recordProof(jti, int64(iat), now)
+	return v.recordProof(ctx, thumb, jti, int64(iat), now)
 }
 
-// recordProof remembers an accepted proof's jti until its window closes, and
-// refuses a jti that is already remembered (a replay) or a new one when the
-// record is full (fail closed, since the replay cannot then be ruled out). The
-// check and the insert are one step under proofMu, so a proof presented twice at
-// once is accepted once.
-func (v *Verifier) recordProof(jti string, iat int64, now time.Time) error {
+// recordProof remembers an accepted proof until its window closes, and refuses
+// one that is already remembered (a replay). With a shared record, the record
+// answers, and a record that cannot be asked refuses the proof: it may be a
+// replay, and this process does not stand in for the record, since what it alone
+// remembers is what a restart forgets. In this process the record is bounded, a
+// new proof is refused when it is full (fail closed, since the replay cannot then
+// be ruled out), and the check and the insert are one step under proofMu, so a
+// proof presented twice at once is accepted once.
+func (v *Verifier) recordProof(ctx context.Context, jkt, jti string, iat int64, now time.Time) error {
+	key := proofKey(jkt, jti)
+	if v.cfg.ProofRecord != nil {
+		// Until the longest window closes, not this instance's own: another
+		// instance on the record may have a longer one set.
+		claimed, err := v.cfg.ProofRecord.TryRecordProof(ctx, key, time.Unix(iat, 0).Add(maxProofAge))
+		if err != nil {
+			return fmt.Errorf("%w: %w", ErrProofRecord, err)
+		}
+		if !claimed {
+			return fmt.Errorf("%w: the proof's jti was already used within its window", ErrProof)
+		}
+		return nil
+	}
 	v.proofMu.Lock()
 	defer v.proofMu.Unlock()
 	nowS := now.Unix()
@@ -405,18 +454,58 @@ func (v *Verifier) recordProof(jti string, iat int64, now time.Time) error {
 	// older than the window is refused by the window check, whatever the record says.
 	for len(v.proofQ) > 0 && v.proofQ[0].until < nowS {
 		e := heap.Pop(&v.proofQ).(proofEntry)
-		delete(v.proofs, e.jti)
+		delete(v.proofs, e.key)
 	}
-	if _, seen := v.proofs[jti]; seen {
+	if _, seen := v.proofs[key]; seen {
 		return fmt.Errorf("%w: the proof's jti was already used within its window", ErrProof)
 	}
 	if len(v.proofs) >= v.proofCap {
 		return fmt.Errorf("%w: the proof record is full, so this proof cannot be checked for replay", ErrProof)
 	}
 	until := iat + int64(v.cfg.ProofMaxAge/time.Second)
-	v.proofs[jti] = until
-	heap.Push(&v.proofQ, proofEntry{jti: jti, until: until})
+	v.proofs[key] = until
+	heap.Push(&v.proofQ, proofEntry{key: key, until: until})
 	return nil
+}
+
+// proofKey is what a proof is remembered by: a digest of the key that made it and
+// the jti it carries. The jti is whatever the holder wrote, so what reaches a
+// record is fixed in size and holds none of its bytes (a database refuses a NUL
+// in text), and the key that made it is in the digest because two holders are two
+// contexts, on a record every org of a deployment shares. jkt is base64url, so the
+// separator cannot appear in it.
+func proofKey(jkt, jti string) string {
+	digest := sha256.Sum256([]byte("wardryx-proof-record\x00" + jkt + "\x00" + jti))
+	return hex.EncodeToString(digest[:])
+}
+
+// RunProofPurge removes the rows of a shared record past their time and the
+// grace, at start and then every interval until ctx ends, and reports each purge
+// that fails. A purge has its whole interval to finish. With no shared record it
+// returns at once. A failed purge costs rows and nothing else: the next one removes
+// them, and no proof is refused for it.
+func (v *Verifier) RunProofPurge(ctx context.Context, every time.Duration, report func(error)) {
+	if v.cfg.ProofRecord == nil {
+		return
+	}
+	purge := func() {
+		pctx, cancel := context.WithTimeout(ctx, every)
+		defer cancel()
+		if _, err := v.cfg.ProofRecord.PurgeProofs(pctx, proofPurgeGrace); err != nil && report != nil {
+			report(err)
+		}
+	}
+	purge()
+	t := time.NewTicker(every)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			purge()
+		}
+	}
 }
 
 // normalizeOrigin reads a door origin, written scheme://host[:port] with nothing

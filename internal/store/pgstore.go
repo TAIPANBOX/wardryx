@@ -17,6 +17,14 @@ import (
 //go:embed schema.sql
 var schema string
 
+// maxPoolConns is how many connections one wardryx holds to Postgres, open and
+// idle alike. The pool is on the decide path once a shared proof record is in
+// use (invariant 44): at database/sql's defaults every burst closes all but two
+// connections and opens the rest again, without limit, so a burst past the
+// server's max_connections reads as a store failure. Past this limit a caller
+// waits for a connection until its own deadline.
+const maxPoolConns = 16
+
 // Postgres is a pgx/v5-backed Store, mirroring Idryx's internal/graph.PgStore:
 // database/sql over the pgx stdlib driver, with the schema embedded and
 // applied idempotently on open.
@@ -31,6 +39,8 @@ func OpenPostgres(ctx context.Context, dsn string) (*Postgres, error) {
 	if err != nil {
 		return nil, fmt.Errorf("store: open postgres: %w", err)
 	}
+	db.SetMaxOpenConns(maxPoolConns)
+	db.SetMaxIdleConns(maxPoolConns)
 	if err := db.PingContext(ctx); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("store: ping postgres: %w", err)
@@ -56,8 +66,9 @@ func (p *Postgres) Close() error { return p.db.Close() }
 // Ping is one round trip to the database, on a pooled connection when the
 // pool has one and on a fresh dial when it does not, which is the case that
 // matters: once the database has gone, the pool's dead connections are
-// dropped on their first failure and every later call dials again. The dial
-// and the wait for the server's first bytes both stop at ctx's deadline.
+// dropped on their first failure and every later call dials again. The dial,
+// the wait for a free connection when the pool is at maxPoolConns, and the wait
+// for the server's first bytes all stop at ctx's deadline.
 func (p *Postgres) Ping(ctx context.Context) error {
 	if err := p.db.PingContext(ctx); err != nil {
 		return fmt.Errorf("store: ping postgres: %w", err)
@@ -160,6 +171,45 @@ func (p *Postgres) TryRedeem(ctx context.Context, key string) (bool, error) {
 		return false, fmt.Errorf("store: try redeem %q: %w", key, err)
 	}
 	return n == 1, nil
+}
+
+// TryRecordProof claims key in the record of accepted DPoP proofs, the way
+// TryRedeem claims a redemption: an INSERT .. ON CONFLICT DO NOTHING, so the
+// table's own primary key makes the check-and-set atomic across every wardryx on
+// this database and across a restart of any of them. A key whose row is past
+// until and not yet purged stays claimed, which refuses a holder that used one
+// jti twice minutes apart and nobody else.
+func (p *Postgres) TryRecordProof(ctx context.Context, key string, until time.Time) (bool, error) {
+	res, err := p.db.ExecContext(ctx,
+		`INSERT INTO agent_proof_replays (proof_key, expires_at) VALUES ($1, $2)
+		 ON CONFLICT (proof_key) DO NOTHING`,
+		key, until)
+	if err != nil {
+		return false, fmt.Errorf("store: record proof: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("store: record proof: %w", err)
+	}
+	return n == 1, nil
+}
+
+// PurgeProofs removes the rows whose time passed more than grace ago and reports
+// how many went. The cutoff is the database's clock, so every instance
+// purging at once reads one clock, and one that runs fast cannot remove a row
+// another instance would still need.
+func (p *Postgres) PurgeProofs(ctx context.Context, grace time.Duration) (int64, error) {
+	res, err := p.db.ExecContext(ctx,
+		`DELETE FROM agent_proof_replays WHERE expires_at < now() - make_interval(secs => $1)`,
+		grace.Seconds())
+	if err != nil {
+		return 0, fmt.Errorf("store: purge proofs: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("store: purge proofs: %w", err)
+	}
+	return n, nil
 }
 
 func (p *Postgres) PutPolicy(ctx context.Context, id string, pol policy.Policy, updatedAt time.Time) error {

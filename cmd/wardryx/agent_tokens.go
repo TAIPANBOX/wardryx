@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -17,13 +18,17 @@ import (
 // every 30 seconds keeps a fetched list inside it.
 const agentTokenPollEvery = 30 * time.Second
 
+// proofPurgeEvery is how often the shared proof record is purged. A row lives ten
+// minutes or more, so a minute leaves the table within a tenth of its size.
+const proofPurgeEvery = time.Minute
+
 // buildAgentTokens turns WARDRYX_AGENT_TOKEN_* into a verifier, and the warnings
 // the operator must read at startup. With no issuer and no other setting,
 // verification is off and nothing is returned. A partial configuration is
 // refused: a verifier missing a setting would verify less than the operator asked
 // for, or nothing. The key set is loaded here, so a process whose key set cannot
-// be read does not start.
-func buildAgentTokens(cfg config.Config) (*agenttoken.Verifier, func(context.Context, func(error)), []string, error) {
+// be read does not start. record is the shared proof record, nil with no database.
+func buildAgentTokens(cfg config.Config, record agenttoken.ProofRecord) (*agenttoken.Verifier, func(context.Context, func(error)), []string, error) {
 	others := cfg.AgentTokenJWKSURL != "" || cfg.AgentTokenJWKSFile != "" ||
 		cfg.AgentTokenAudiences != "" || cfg.AgentTokenRevocationURL != "" ||
 		cfg.AgentTokenDoorOrigins != "" || cfg.AgentTokenRequireProof != "" ||
@@ -65,6 +70,7 @@ func buildAgentTokens(cfg config.Config) (*agenttoken.Verifier, func(context.Con
 		DoorOrigins:   strings.Split(cfg.AgentTokenDoorOrigins, ","),
 		ProofOptional: proofOptional,
 		ProofMaxAge:   maxAge,
+		ProofRecord:   record,
 	}, nil)
 	if err != nil {
 		return nil, nil, nil, err
@@ -73,7 +79,21 @@ func buildAgentTokens(cfg config.Config) (*agenttoken.Verifier, func(context.Con
 		return nil, nil, nil, err
 	}
 	run := func(ctx context.Context, report func(error)) {
+		go v.RunProofPurge(ctx, proofPurgeEvery, func(err error) {
+			fmt.Fprintf(os.Stderr, "wardryx: the shared DPoP proof record was not purged, so its old rows wait for the next purge: %v\n", err)
+		})
 		v.Run(ctx, agentTokenPollEvery, report)
 	}
 	return v, run, warnings, nil
+}
+
+// proofRecordWarning says at start what a record of accepted proofs held in this
+// process costs (invariant 44): with no -db/WARDRYX_DB a restart forgets it and
+// another instance never had it. Nothing to say with a database, or with no
+// tokens to verify.
+func proofRecordWarning(issuer, dbDSN string) string {
+	if strings.TrimSpace(issuer) == "" || dbDSN != "" {
+		return ""
+	}
+	return "the record of accepted DPoP proofs is in this process, because no -db/WARDRYX_DB is set: a restart forgets it, and each other instance accepts a proof once more, within its window (at most 300 seconds). Set WARDRYX_DB to share it across instances and restarts"
 }

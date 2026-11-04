@@ -6,10 +6,13 @@ import (
 	"database/sql/driver"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/TAIPANBOX/wardryx/internal/policy"
 )
@@ -105,6 +108,11 @@ func TestPostgresCallsReturnWithinTheDeadlineAgainstAListenerThatNeverAnswers(t 
 	}{
 		{"Ping", p.Ping},
 		{"ListPolicies", func(ctx context.Context) error { _, err := p.ListPolicies(ctx); return err }},
+		{"TryRecordProof", func(ctx context.Context) error {
+			_, err := p.TryRecordProof(ctx, "probe-proof", time.Now())
+			return err
+		}},
+		{"PurgeProofs", func(ctx context.Context) error { _, err := p.PurgeProofs(ctx, time.Minute); return err }},
 		{"PutPolicy", func(ctx context.Context) error {
 			return p.PutPolicy(ctx, "probe-f4", policy.Policy{Name: "probe-f4", Target: "agent://acme.example/*"}, time.Now())
 		}},
@@ -178,6 +186,9 @@ func TestAnOrdinaryStoreErrorIsNotUnavailable(t *testing.T) {
 		{"already decided", ErrAlreadyDecided},
 		{"a cancel, which comes from the client's side and not from the store", context.Canceled},
 		{"a marshal failure the store composed", fmt.Errorf("store: marshal policy %q: %w", "p1", errors.New("json: unsupported value"))},
+		{"a table that is not there", fmt.Errorf("store: record proof: %w", &pgconn.PgError{Code: "42P01"})},
+		{"a constraint", fmt.Errorf("store: put policy: %w", &pgconn.PgError{Code: "23505"})},
+		{"a NUL in text", fmt.Errorf("store: record proof: %w", &pgconn.PgError{Code: "22021"})},
 	}
 	for _, c := range notOutages {
 		if IsUnavailable(c.err) {
@@ -196,6 +207,19 @@ func TestAnOrdinaryStoreErrorIsNotUnavailable(t *testing.T) {
 		// paused postgres:16 container, "store: ping postgres: driver: bad
 		// connection".
 		{"a bad connection from the pool, wrapped", fmt.Errorf("store: ping postgres: %w", driver.ErrBadConn)},
+		// What pgx reports when the database goes away during a call on a pooled
+		// connection: measured 2026-11-04 on the built binary with its connection
+		// to a real Postgres cut, "store: record proof: unexpected EOF".
+		{"a connection that died during the call, wrapped", fmt.Errorf("store: record proof: %w", io.ErrUnexpectedEOF)},
+		{"a connection closed between messages, wrapped", fmt.Errorf("store: record proof: %w", io.EOF)},
+		// What a database that is stopping, starting or full answers: the server
+		// spoke, and what it said is that it is not there for this call.
+		{"the database shutting down", fmt.Errorf("store: record proof: %w", &pgconn.PgError{Code: "57P01"})},
+		{"the database starting up", fmt.Errorf("store: record proof: %w", &pgconn.PgError{Code: "57P03"})},
+		{"too many connections", fmt.Errorf("store: record proof: %w", &pgconn.PgError{Code: "53300"})},
+		{"a disk that is full", fmt.Errorf("store: record proof: %w", &pgconn.PgError{Code: "53100"})},
+		{"a connection failure the server reported", fmt.Errorf("store: record proof: %w", &pgconn.PgError{Code: "08006"})},
+		{"a replica that cannot take the write", fmt.Errorf("store: record proof: %w", &pgconn.PgError{Code: "25006"})},
 	}
 	for _, c := range outages {
 		if !IsUnavailable(c.err) {

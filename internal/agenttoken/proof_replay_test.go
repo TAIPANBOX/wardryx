@@ -23,10 +23,10 @@ func TestAProofIsRefusedTheSecondTimeItIsPresentedInItsWindow(t *testing.T) {
 	tok := boundToken(t, issuer, holder, testSubject, nil)
 	bound := verifiedBound(t, v, tok, n)
 	proof := mintProof(t, holder, tok, testHTM, testHTU, n.Unix(), "p-once")
-	if err := v.CheckProof(proof, tok, bound, n); err != nil {
+	if err := v.CheckProof(t.Context(), proof, tok, bound, n); err != nil {
 		t.Fatalf("the first presentation of a fresh proof was refused: %v", err)
 	}
-	err := v.CheckProof(proof, tok, bound, n)
+	err := v.CheckProof(t.Context(), proof, tok, bound, n)
 	if !errors.Is(err, ErrProof) {
 		t.Fatalf("a second presentation of the same proof in its window was accepted: err %v", err)
 	}
@@ -42,15 +42,15 @@ func TestAFreshProofIsAcceptedWhenAnotherWasReplayed(t *testing.T) {
 	tok := boundToken(t, issuer, holder, testSubject, nil)
 	bound := verifiedBound(t, v, tok, n)
 	first := mintProof(t, holder, tok, testHTM, testHTU, n.Unix(), "p-a")
-	if err := v.CheckProof(first, tok, bound, n); err != nil {
+	if err := v.CheckProof(t.Context(), first, tok, bound, n); err != nil {
 		t.Fatalf("first: %v", err)
 	}
-	if err := v.CheckProof(first, tok, bound, n); !errors.Is(err, ErrProof) {
+	if err := v.CheckProof(t.Context(), first, tok, bound, n); !errors.Is(err, ErrProof) {
 		t.Fatalf("replay of the first proof was accepted: %v", err)
 	}
 	// One agent call makes one decide with one new proof: a new jti is a new proof.
 	second := mintProof(t, holder, tok, testHTM, testHTU, n.Unix(), "p-b")
-	if err := v.CheckProof(second, tok, bound, n); err != nil {
+	if err := v.CheckProof(t.Context(), second, tok, bound, n); err != nil {
 		t.Fatalf("a new proof with a new jti was refused after a replay: %v", err)
 	}
 }
@@ -61,7 +61,7 @@ func TestAProofIsForgottenOnceItsWindowHasClosed(t *testing.T) {
 	n := now()
 	tok := boundToken(t, issuer, holder, testSubject, nil)
 	bound := verifiedBound(t, v, tok, n)
-	if err := v.CheckProof(mintProof(t, holder, tok, testHTM, testHTU, n.Unix(), "p-old"), tok, bound, n); err != nil {
+	if err := v.CheckProof(t.Context(), mintProof(t, holder, tok, testHTM, testHTU, n.Unix(), "p-old"), tok, bound, n); err != nil {
 		t.Fatalf("p-old: %v", err)
 	}
 	if got := len(v.proofs); got != 1 {
@@ -70,13 +70,13 @@ func TestAProofIsForgottenOnceItsWindowHasClosed(t *testing.T) {
 	// Past the window the old proof is stale whatever the record says, and a
 	// proof made now is accepted and makes the old record unnecessary.
 	later := n.Add(DefaultProofAge + 1e9)
-	if err := v.CheckProof(mintProof(t, holder, tok, testHTM, testHTU, later.Unix(), "p-new"), tok, bound, later); err != nil {
+	if err := v.CheckProof(t.Context(), mintProof(t, holder, tok, testHTM, testHTU, later.Unix(), "p-new"), tok, bound, later); err != nil {
 		t.Fatalf("a fresh proof a window later was refused: %v", err)
 	}
 	if got := len(v.proofs); got != 1 {
 		t.Fatalf("the record holds %d proofs a window later, want 1: the closed window was not forgotten", got)
 	}
-	if _, kept := v.proofs["p-old"]; kept {
+	if _, kept := v.proofs[proofKey(bound.JKT, "p-old")]; kept {
 		t.Fatal("the record still holds the jti of a proof whose window has closed")
 	}
 }
@@ -89,11 +89,11 @@ func TestTheProofRecordIsBoundedAndFailsClosed(t *testing.T) {
 	tok := boundToken(t, issuer, holder, testSubject, nil)
 	bound := verifiedBound(t, v, tok, n)
 	for _, jti := range []string{"p-1", "p-2"} {
-		if err := v.CheckProof(mintProof(t, holder, tok, testHTM, testHTU, n.Unix(), jti), tok, bound, n); err != nil {
+		if err := v.CheckProof(t.Context(), mintProof(t, holder, tok, testHTM, testHTU, n.Unix(), jti), tok, bound, n); err != nil {
 			t.Fatalf("%s within the cap was refused: %v", jti, err)
 		}
 	}
-	err := v.CheckProof(mintProof(t, holder, tok, testHTM, testHTU, n.Unix(), "p-3"), tok, bound, n)
+	err := v.CheckProof(t.Context(), mintProof(t, holder, tok, testHTM, testHTU, n.Unix(), "p-3"), tok, bound, n)
 	if !errors.Is(err, ErrProof) || !strings.Contains(err.Error(), "full") {
 		t.Fatalf("a proof past the record's cap was not refused as a full record: err %v", err)
 	}
@@ -102,7 +102,7 @@ func TestTheProofRecordIsBoundedAndFailsClosed(t *testing.T) {
 	}
 	// The window closes, the record empties, and the same cap accepts again.
 	later := n.Add(DefaultProofAge + 1e9)
-	if err := v.CheckProof(mintProof(t, holder, tok, testHTM, testHTU, later.Unix(), "p-3"), tok, bound, later); err != nil {
+	if err := v.CheckProof(t.Context(), mintProof(t, holder, tok, testHTM, testHTU, later.Unix(), "p-3"), tok, bound, later); err != nil {
 		t.Fatalf("a proof after the window closed was refused by a full record: %v", err)
 	}
 }
@@ -120,7 +120,7 @@ func TestOneProofIsAcceptedOnceUnderConcurrentPresentation(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if v.CheckProof(proof, tok, bound, n) == nil {
+			if v.CheckProof(t.Context(), proof, tok, bound, n) == nil {
 				accepted.Add(1)
 			}
 		}()

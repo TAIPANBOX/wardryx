@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/TAIPANBOX/agent-stack-go/v2/event"
+	"github.com/TAIPANBOX/wardryx/internal/agenttoken"
 	"github.com/TAIPANBOX/wardryx/internal/api"
 	"github.com/TAIPANBOX/wardryx/internal/approval"
 	"github.com/TAIPANBOX/wardryx/internal/archive"
@@ -183,6 +184,8 @@ func runServe(args []string) error {
 	}
 
 	var st store.Store
+	// Set only with a database: an interface holding a nil *Postgres is not nil.
+	var proofRecord agenttoken.ProofRecord
 	if *dbDSN != "" {
 		pg, err := store.OpenPostgres(context.Background(), *dbDSN)
 		if err != nil {
@@ -190,6 +193,7 @@ func runServe(args []string) error {
 		}
 		defer pg.Close()
 		st = pg
+		proofRecord = pg
 	} else {
 		fmt.Fprintln(os.Stderr, "wardryx: no -db given; using an in-memory approval store (state is lost on restart)")
 		st = store.NewMemory()
@@ -260,12 +264,15 @@ func runServe(args []string) error {
 	}
 	// An agent's own token is verified here when WARDRYX_AGENT_TOKEN_ISSUER is set
 	// (invariant 13). Its key set is loaded before the server answers anything.
-	agentTokens, agentTokenRun, agentTokenWarnings, err := buildAgentTokens(cfg)
+	agentTokens, agentTokenRun, agentTokenWarnings, err := buildAgentTokens(cfg, proofRecord)
 	if err != nil {
 		return fmt.Errorf("agent tokens: %w", err)
 	}
 	for _, w := range agentTokenWarnings {
 		fmt.Fprintln(os.Stderr, "wardryx: WARNING: "+w)
+	}
+	if warn := proofRecordWarning(cfg.AgentTokenIssuer, *dbDSN); warn != "" {
+		fmt.Fprintln(os.Stderr, "wardryx: WARNING: "+warn)
 	}
 	if agentTokens != nil {
 		srv.WithAgentTokens(agentTokens)
