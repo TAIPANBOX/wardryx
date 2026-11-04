@@ -346,6 +346,11 @@ func TestAFileWhoseChainDoesNotHoldIsBroken(t *testing.T) {
 			lines := bytes.SplitAfter(raw, []byte("\n"))
 			return bytes.Join([][]byte{lines[0], []byte("{not json\n"), lines[1], lines[2]}, nil)
 		},
+		"a malformed last line": func(raw []byte) []byte {
+			// Nothing follows it to be left unverifiable, so only the count of
+			// malformed lines can see it.
+			return append(append([]byte{}, raw...), []byte("{not json\n")...)
+		},
 		"a chain restart": func(raw []byte) []byte {
 			// A complete event with no prev_hash after the first line: legal in the
 			// spec, and the history before it is no longer bound to what follows.

@@ -152,8 +152,11 @@ run_case() {
 	# Exit code first, then wording. Checking the needle before the expectation
 	# turns "it did not fail at all" into "it failed for the wrong reason",
 	# which sends the reader to look at prose when the gate is toothless.
+	# A here-string and not a pipe: under pipefail, grep -q closing the pipe at its
+	# first match can make the writer die of SIGPIPE, and a needle that was found
+	# then reads as missing (seen on a loaded machine, 2026-11-04).
 	if [ "$expect" = fail ] && [ "$rc" -ne 0 ] && [ -n "$needle" ] &&
-		! printf '%s' "$out" | grep -qF -- "$needle"; then
+		! grep -qF -- "$needle" <<<"$out"; then
 		printf 'WRONG REASON  %s\n              it failed, but not saying: %s\n' "$name" "$needle"
 		failures=$((failures + 1))
 		return
@@ -737,7 +740,7 @@ run_case "slo-signal: the reader keeps its file by size and time" fail \
 # Comments that name the shapes the gate refuses are prose, not code.
 run_case "slo-signal: comments naming the shapes it refuses" pass \
 	'./scripts/slo-signal-stays-outside-the-decision.sh' \
-	"$(py 'edit("internal/pdp/pdp.go", "import (", "// sloburn and WARDRYX_SIGNAL_EVENTS are outside this package.\nimport (")); edit("internal/sloburn/sloburn.go", "import (", "// os.WriteFile and net/http are refused here.\nimport (")')"
+	"$(py 'edit("internal/pdp/pdp.go", "import (", "// sloburn and WARDRYX_SIGNAL_EVENTS are outside this package.\nimport ("); edit("internal/sloburn/sloburn.go", "import (", "// os.WriteFile and net/http are refused here.\nimport (")')"
 
 run_case "slo-signal: the reader is gone" fail \
 	'./scripts/slo-signal-stays-outside-the-decision.sh' \
