@@ -53,7 +53,13 @@ say() {
 }
 
 # Code with its comment lines removed, for the text checks.
-code() { grep -v '^[[:space:]]*//' "$1"; }
+code() { grep -v '^[[:space:]]*//' "$1" || true; }
+
+# has <file> <extended regex>: whether the file's code, comments removed, matches.
+# The code goes through a here-string and not a pipe: under pipefail, grep -q
+# closing the pipe at its first match makes the writer die of SIGPIPE, and the
+# pipeline then reports failure for a match that was found.
+has() { grep -Eq -- "$2" <<<"$(code "$1")"; }
 
 # 1. The closure of the decision and its replay.
 checked=0
@@ -63,7 +69,7 @@ for pkg in internal/pdp internal/policy internal/replay internal/approval intern
 		exit 2
 	}
 	checked=$((checked + $(printf '%s\n' "$deps" | grep -c "^$module/")))
-	if printf '%s\n' "$deps" | grep -qx "$module/$reader_dir"; then
+	if grep -qx "$module/$reader_dir" <<<"$deps"; then
 		say "$pkg depends on $reader_dir: the decision path would then know of the file"
 	fi
 done
@@ -74,7 +80,7 @@ fi
 for pkg in internal/pdp internal/policy; do
 	for f in "$pkg"/*.go; do
 		case "$f" in *_test.go) continue ;; esac
-		if code "$f" | grep -Eq 'sloburn|WARDRYX_SIGNAL_EVENTS'; then
+		if has "$f" 'sloburn|WARDRYX_SIGNAL_EVENTS'; then
 			say "$f names the signal file or its setting: the decision path must not know of it"
 		fi
 	done
@@ -98,7 +104,7 @@ while IFS= read -r dep; do
 done <<<"$rdeps"
 for f in "$reader_dir"/*.go; do
 	case "$f" in *_test.go) continue ;; esac
-	if code "$f" | grep -Eq 'os\.(Create|OpenFile|WriteFile|Remove|RemoveAll|Rename|Truncate|Chmod|Mkdir)|O_WRONLY|O_RDWR|O_APPEND|O_CREATE'; then
+	if has "$f" 'os\.(Create|OpenFile|WriteFile|Remove|RemoveAll|Rename|Truncate|Chmod|Mkdir)|O_WRONLY|O_RDWR|O_APPEND|O_CREATE'; then
 		say "$f writes, removes or changes a file: the reader may only read"
 	fi
 done
@@ -115,12 +121,12 @@ if ! awk '
 fi
 
 # 4. A caller's own slo_burn is dropped under the rule's own comparison.
-if ! code "$standing_file" | grep -Eq 'EqualFold\(strings\.TrimSpace\([a-z]+\.Name\), *sloburn\.SignalName\)'; then
+if ! has "$standing_file" 'EqualFold\(strings\.TrimSpace\([a-z]+\.Name\), *sloburn\.SignalName\)'; then
 	say "withStandingSignal does not compare a caller's signal name to slo_burn with EqualFold: a spelling the rule reads could get past it"
 fi
 
 # 5. The reader tells one version of its file from another by the bytes.
-if ! code "$reader_dir/sloburn.go" | grep -q 'sha256\.Sum256('; then
+if ! has "$reader_dir/sloburn.go" 'sha256\.Sum256\('; then
 	say "the reader does not tell its file's versions apart by a digest of the bytes: an edit of the same length inside one clock tick would be missed"
 fi
 
