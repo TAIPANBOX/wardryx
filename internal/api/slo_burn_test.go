@@ -248,7 +248,7 @@ func TestACallerCannotRemoveTheSignalByDeclaringItsOwn(t *testing.T) {
 	// The caller's own signals of other names still count, and the record holds
 	// the one standing slo_burn signal and not the caller's.
 	ask := h.askAs(budgetAgent)
-	ask.Signals = []signalDTO{callerSignal("benign", 0.9), {Name: "slo_burn", Value: "none", Probability: usd(1), Source: "caller", AnswerID: "forged"}}
+	ask.Signals = []signalDTO{callerSignal("benign", 0.9), {Name: " SLO_burn ", Value: "none", Probability: usd(1), Source: "caller", AnswerID: "forged"}}
 	h.decision(t, ask)
 	var recorded []any
 	for _, e := range h.read(t) {
@@ -282,11 +282,16 @@ func TestACallerCannotHideTheMissingSignalByDeclaringItsOwn(t *testing.T) {
 	if bare.Decision != pdp.Hold || !strings.Contains(bare.Reason, "when_absent") {
 		t.Fatalf("with the file missing the call is %s (%s), want the absent-signal hold", bare.Decision, bare.Reason)
 	}
-	ask := h.askAs(budgetAgent)
-	p := 1.0
-	ask.Signals = []signalDTO{{Name: "slo_burn", Value: "none", Probability: &p, Source: "caller"}}
-	if got := h.decision(t, ask); got.Decision != pdp.Hold || !strings.Contains(got.Reason, "when_absent") {
-		t.Fatalf("a caller's own slo_burn none made the call %s (%s), want the absent-signal hold to stand", got.Decision, got.Reason)
+	// A rule reads a signal's name with case and surrounding space folded, so any
+	// such spelling of the name is "a signal of its name" to it, and would end the
+	// absence if it were kept.
+	for _, name := range []string{"slo_burn", "SLO_BURN", "  slo_burn ", "Slo_Burn", " SLO_burn"} {
+		ask := h.askAs(budgetAgent)
+		p := 1.0
+		ask.Signals = []signalDTO{{Name: name, Value: "none", Probability: &p, Source: "caller"}}
+		if got := h.decision(t, ask); got.Decision != pdp.Hold || !strings.Contains(got.Reason, "when_absent") {
+			t.Errorf("a caller's own %q none made the call %s (%s), want the absent-signal hold to stand", name, got.Decision, got.Reason)
+		}
 	}
 }
 
