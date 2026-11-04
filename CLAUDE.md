@@ -455,6 +455,24 @@ decision outcome and every exported signature identical.
     process made effective, not that a directory carried across a migration
     still holds what an older process did.)*
 
+    **Who can read it (since 2.5.1).** `@decided 2026-11-04`: the archive is
+    readable by the group of the account that writes it and by no other
+    account, and writable by the owner alone. Measured on the forge, a console
+    under another uid got "permission denied" on every owner-only file and
+    `wardryx replay` counted each decision as not archived. A directory this
+    process creates is `0750` and a kept file is `0640`; the directory's mode
+    is set after it is made, so the process umask cannot turn it back into
+    `0700`. Anything that already exists is left as the operator has it, an
+    archive an earlier release wrote at `0700` and `0600` included, and widening
+    it is the operator's act. Never widen to write for the group: a policy set a
+    second account could rewrite is not evidence.
+    *(tests: `TestANewArchiveIsReadableByItsGroupAndNoOneElse`,
+    `TestAnOwnerOnlyArchiveFromAnEarlierReleaseKeepsWorking`,
+    `TestTheModesDoNotFollowTheProcessUmask` in `internal/archive`, each run
+    red on the 2.5.0 code first; scenarios in `features/policy-replay.feature`.
+    Its limit: it holds the modes, not that the reading account is in the
+    group, which is the operator's deployment.)*
+
 18. **A counterfactual is offered only for a decision that reproduced, and
     everything else is counted by name.** `wardryx replay` exists to answer
     what a candidate policy would have done to decisions already taken, and

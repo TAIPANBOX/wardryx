@@ -6,7 +6,7 @@
 
 [![CI](https://github.com/TAIPANBOX/wardryx/actions/workflows/ci.yml/badge.svg)](https://github.com/TAIPANBOX/wardryx/actions/workflows/ci.yml)
 ![Go](https://img.shields.io/badge/go-1.27-00ADD8.svg)
-![tests](https://img.shields.io/badge/tests-716-brightgreen.svg)
+![tests](https://img.shields.io/badge/tests-719-brightgreen.svg)
 ![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)
 ![Status](https://img.shields.io/badge/status-deterministic%20PDP-2dd4bf.svg)
 
@@ -607,6 +607,26 @@ an allowance, everything the agent would have done next is a world nothing
 recorded. The honest question is aggregate: over this history, which decisions
 would the candidate have taken differently.
 
+### The archive's permissions
+
+Replay is often run by a different account than the one the service runs as,
+for example a console that shares a volume with it. The archive is written so
+that account can read it: since 2.5.1 a directory this process creates is mode
+`0750` and each file it keeps is `0640`. The group of the account the service
+runs as can enter and read, no other account can, and only the owner can write.
+The account that runs `wardryx replay` has to be in that group.
+
+Anything that already exists is left as it is. An archive written by 2.5.0 or
+earlier is `0700` and `0600`, is read exactly as before, and stays readable
+only by its owner until the operator widens it:
+
+```sh
+chmod 0750 ./policy-archive && chmod 0640 ./policy-archive/*.json
+```
+
+A replay that cannot read a file counts the decision under `not archived`, with
+the operating system's reason in the row's note.
+
 ## The record of a decision
 
 When `WARDRYX_EVENTS_PATH` is set, every allow, deny and hold is written to the event file, and an allow or a hold is written before it is returned. `WARDRYX_RECORD_FAILMODE` says what happens when that write fails (invariant 40, decided 2026-10-18 for finding F-011 of the 2026-10-17 review):
@@ -630,7 +650,7 @@ Every `WARDRYX_*` variable is read once at process startup (`internal/config`), 
 | `WARDRYX_DB` | `-db` | (empty) | Postgres DSN; empty uses the in-memory store, and then approval state and the record of accepted DPoP proofs live in this process only, so a restart forgets them and a second instance does not share them |
 | `WARDRYX_POLICY` | `-policy` | (empty) | Policy file or directory (YAML/JSON); empty allows every request |
 | `WARDRYX_EVENTS_PATH` | `-events` | (empty) | NDJSON agent-event output path; empty disables events |
-| `WARDRYX_POLICY_ARCHIVE` | - | (empty) | Directory keeping every policy set this process makes effective, named by its `policy_version`; empty disables it, and a decision recorded without it names a version nothing can produce later |
+| `WARDRYX_POLICY_ARCHIVE` | - | (empty) | Directory keeping every policy set this process makes effective, named by its `policy_version`; empty disables it, and a decision recorded without it names a version nothing can produce later. A directory this process creates is mode `0750` and each file `0640`: its group can read it, which is what lets `wardryx replay` run under another account of the same group, and nobody else can. A directory or file that already exists is left as it is (see [the archive's permissions](#the-archives-permissions)) |
 | `WARDRYX_APPROVAL_SECRET` | (none) | (empty) | HMAC key for v2 approval tokens; unset, a grant with no Keyryx signer fails closed and no v2 token verifies |
 | `WARDRYX_APPROVAL_SINGLE_USE` | (none) | `true` | `true`, or any value that does not parse as a bool, makes each granted token allow exactly one `/v1/decide` call; only an explicit `false` keeps a token reusable for its full TTL (see [Stateless human-in-the-loop](#stateless-human-in-the-loop)) |
 | `WARDRYX_APPROVAL_UNANSWERED_AFTER` | (none) | `15m` | How long a hold may sit undecided before one `approval_unanswered` event is raised for it; a Go duration; `0` turns the sweep off (see [The hold nobody decided](#the-hold-nobody-decided)) |

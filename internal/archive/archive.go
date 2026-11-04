@@ -68,10 +68,17 @@ var validVersion = regexp.MustCompile(`^[0-9a-f]{8,64}$`)
 // makes the set effective on that nil error. Tests swap it; nothing else does.
 var renameFile = os.Rename
 
+// The modes are the owner's to write and the owner's group to read, and
+// nobody else's. Up to 2.5.0 they were 0700 and 0600, which kept out the
+// account a replay is usually run by: a console under another uid than the
+// service got "permission denied" on every file, and `wardryx replay` counted
+// each recorded decision as not archived. The group is the only widening and
+// it is read-only: a file the group could write is a policy set the group
+// could rewrite after a decision was taken under it.
 const (
 	ext      = ".json"
-	dirPerm  = 0o700
-	filePerm = 0o600
+	dirPerm  = 0o750
+	filePerm = 0o640
 )
 
 // Archive is an append-only, content-addressed directory of policy sets. A
@@ -85,12 +92,29 @@ type Archive struct {
 // New opens (and creates) the archive directory. An empty dir returns a nil
 // *Archive and no error: archiving is off, the PDP works, and what is lost
 // is the ability to replay, which the docs state rather than a crash.
+//
+// A directory New creates is given dirPerm after it is made, because mkdir(2)
+// takes the process umask off the mode and a umask of 027 or 077 would turn
+// 0750 back into 0700 with nothing logged. A directory that already exists is
+// left exactly as the operator has it, and so is every file in it: an archive
+// an earlier release wrote at 0700 and 0600 is read as it stands, and widening
+// it is the operator's act (see docs/releases/v2.5.1.md), not something a
+// start-up does to evidence on its own.
 func New(dir string) (*Archive, error) {
 	if dir == "" {
 		return nil, nil
 	}
+	_, statErr := os.Stat(dir)
+	created := errors.Is(statErr, os.ErrNotExist)
 	if err := os.MkdirAll(dir, dirPerm); err != nil {
 		return nil, fmt.Errorf("archive: create %s: %w", dir, err)
+	}
+	if created {
+		// Only the last element: parents MkdirAll made on the way are the
+		// operator's path to the archive, not the archive.
+		if err := os.Chmod(dir, dirPerm); err != nil {
+			return nil, fmt.Errorf("archive: set mode of %s: %w", dir, err)
+		}
 	}
 	return &Archive{dir: dir}, nil
 }

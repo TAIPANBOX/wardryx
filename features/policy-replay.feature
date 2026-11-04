@@ -127,3 +127,26 @@ Feature: A recorded decision carries the question it answered
     When a token nobody minted is presented and the file is replayed
     Then the deny is counted as an approval refused by the phrase the handler wrote
     # -> internal/api:TestARefusedTokenDenyReplaysAsApprovalRefused
+
+  # @decided 2026-11-04: the fix released as 2.5.1. Measured on the forge: the
+  # archive's files were owner-only, a console running as another account got
+  # "permission denied" on every one, and replay counted each decision as not
+  # archived. Reading is opened to the group and to nobody else.
+  Scenario: another account of the same group can read the archive and no one else can
+    Given an archive directory the policy point created and a policy set it kept in it
+    Then the directory is open to its group to enter and read, and the file to read
+    And neither is open to any other account, and the group can write neither
+    # -> internal/archive:TestANewArchiveIsReadableByItsGroupAndNoOneElse
+
+  Scenario: an archive an earlier release wrote keeps working and is not changed
+    Given an archive directory and file the earlier release wrote, readable by their owner alone
+    When the policy point opens it, keeps the same set again, and keeps another
+    Then the earlier file is read as before and neither its mode nor the directory's has changed
+    And the newly kept set has the group-readable mode
+    # -> internal/archive:TestAnOwnerOnlyArchiveFromAnEarlierReleaseKeepsWorking
+
+  Scenario: the modes do not depend on the account's umask
+    Given a process whose umask would shut the group out
+    When the policy point creates an archive and keeps a set
+    Then the directory and the file still have the group-readable modes
+    # -> internal/archive:TestTheModesDoNotFollowTheProcessUmask
