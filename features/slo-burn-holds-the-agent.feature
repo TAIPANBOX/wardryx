@@ -133,6 +133,13 @@ Feature: An agent whose error budget is spent has its actions put to a person
     Then the first poll does not parse it again and the second does, and the new line is seen
     # -> internal/sloburn:TestAnUnchangedFileIsNotParsedAgainAndAChangedOneIs
 
+  Scenario: The file is watched while the service runs, and a change of state is said once
+    Given the service is running with the option on
+    When a line is appended, and when the file breaks and then comes back
+    Then the line is seen without a restart, the log says each change of state once, naming the file and the line, and says when it is readable again
+    # -> internal/sloburn:TestRunPollsTheFileUntilTheContextEnds
+    # -> internal/sloburn:TestAChangeOfStateIsLoggedOnceAndTheDetailNamesTheLine
+
   Scenario: The signal names the event it stands on
     Given an exhausted event on the file
     When the signal is read

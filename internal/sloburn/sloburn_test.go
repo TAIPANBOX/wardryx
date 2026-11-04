@@ -2,6 +2,8 @@ package sloburn
 
 import (
 	"bytes"
+	"context"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -586,5 +588,72 @@ func TestParseMaxAgeAcceptsOnlyAUsableAge(t *testing.T) {
 		if _, err := ParseMaxAge(edge); err != nil {
 			t.Errorf("%q is a limit and was refused: %v", edge, err)
 		}
+	}
+}
+
+func TestRunPollsTheFileUntilTheContextEnds(t *testing.T) {
+	b := newBus(t)
+	r := New(b.path, DefaultMaxAge).WithClock((&clock{now: t0}).at).WithPoll(5 * time.Millisecond)
+	r.Refresh()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { r.Run(ctx); close(done) }()
+
+	b.burn(botA, "task_success", "exhausted", 40, t0.Add(-time.Hour))
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if sig, ok := r.For(botA); ok && sig.Value == ValueExhausted {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("a line appended to the file was never seen: Run does not poll")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run did not return when its context ended")
+	}
+}
+
+func TestAChangeOfStateIsLoggedOnceAndTheDetailNamesTheLine(t *testing.T) {
+	var logged bytes.Buffer
+	log.SetOutput(&logged)
+	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+	lines := func(substr string) int { return strings.Count(logged.String(), substr) }
+
+	b := newBus(t)
+	b.burn(botA, "task_success", "exhausted", 40, t0.Add(-3*time.Hour))
+	b.burn(botB, "task_success", "exhausted", 40, t0.Add(-2*time.Hour))
+	r, _ := reader(t, b, DefaultMaxAge)
+	if logged.Len() != 0 {
+		t.Fatalf("a good file logged: %q", logged.String())
+	}
+
+	good := b.bytes()
+	b.replace(bytes.Replace(good, []byte(`"observed":0.8`), []byte(`"observed":0.1`), 1))
+	for i := 0; i < 4; i++ {
+		r.Refresh()
+	}
+	if n := lines("are broken"); n != 1 {
+		t.Fatalf("four polls of one broken file logged %d broken lines, want 1:\n%s", n, logged.String())
+	}
+	if d := r.Detail(); !strings.Contains(d, "line 2") {
+		t.Errorf("the detail %q does not name the line the chain broke at", d)
+	}
+	if !strings.Contains(logged.String(), b.path) {
+		t.Errorf("the log does not name the file: %s", logged.String())
+	}
+
+	b.replace(good)
+	r.Refresh()
+	r.Refresh()
+	if n := lines("readable again"); n != 1 || r.State() != StateOK {
+		t.Fatalf("the file came back: state %q, %d recovery lines, want ok and 1", r.State(), n)
+	}
+	if r.Detail() != "" {
+		t.Errorf("a good file has the detail %q", r.Detail())
 	}
 }

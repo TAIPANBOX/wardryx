@@ -126,6 +126,7 @@ type Reader struct {
 	maxAge   time.Duration
 	maxBytes int64
 	now      func() time.Time
+	poll     time.Duration
 
 	mu     sync.Mutex // serialises Refresh and guards the fields below
 	last   *parsed
@@ -162,7 +163,7 @@ type parsed struct {
 // New returns a Reader for the file at path whose signals live for maxAge after
 // their event. It reads nothing until Refresh.
 func New(path string, maxAge time.Duration) *Reader {
-	return &Reader{path: path, maxAge: maxAge, maxBytes: MaxFileBytes, now: time.Now}
+	return &Reader{path: path, maxAge: maxAge, maxBytes: MaxFileBytes, now: time.Now, poll: PollEvery}
 }
 
 // ParseMaxAge reads WARDRYX_SIGNAL_EVENTS_MAX_AGE: empty is DefaultMaxAge, else a
@@ -190,6 +191,12 @@ func (r *Reader) WithClock(now func() time.Time) *Reader {
 // WithMaxBytes replaces the size cap. It is for tests.
 func (r *Reader) WithMaxBytes(n int64) *Reader {
 	r.maxBytes = n
+	return r
+}
+
+// WithPoll replaces the interval Run polls at. It is for tests.
+func (r *Reader) WithPoll(d time.Duration) *Reader {
+	r.poll = d
 	return r
 }
 
@@ -444,7 +451,7 @@ func (r *Reader) For(agentID string) (Signal, bool) {
 
 // Run refreshes every PollEvery until ctx ends.
 func (r *Reader) Run(ctx context.Context) {
-	t := time.NewTicker(PollEvery)
+	t := time.NewTicker(r.poll)
 	defer t.Stop()
 	for {
 		select {
