@@ -123,7 +123,9 @@ func TestEveryBinaryThisRepositoryBuildsIsDeclaredAndTheReverse(t *testing.T) {
 	// means this package alone. It then finds no main package, and the test
 	// passes while measuring nothing.
 	list.Dir = r
-	out, err := list.CombinedOutput()
+	// Standard output alone: on a cold module cache go writes "go: downloading
+	// ..." to standard error, and that line is not a package this repository builds.
+	out, err := list.Output()
 	if err != nil {
 		t.Fatalf("go list: %v\n%s", err, out)
 	}
