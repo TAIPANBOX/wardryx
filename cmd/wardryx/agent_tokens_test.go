@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -9,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/TAIPANBOX/agent-stack-go/v2/delegation"
 	"github.com/TAIPANBOX/wardryx/internal/config"
@@ -41,11 +43,11 @@ func TestAPartialAgentTokenConfigurationRefusesToStart(t *testing.T) {
 		AgentTokenAudiences: "https://wardryx.example",
 		AgentTokenJWKSFile:  filepath.Join(t.TempDir(), "jwks.json"),
 	}
-	if v, _, _, err := buildAgentTokens(partial); err == nil || v != nil {
+	if v, _, _, err := buildAgentTokens(partial, nil); err == nil || v != nil {
 		t.Fatalf("audiences and a key file without an issuer: err %v, verifier %v; want a refusal naming WARDRYX_AGENT_TOKEN_ISSUER", err, v)
 	}
 	// Nothing configured is not a partial configuration: no verifier, no error.
-	if v, _, _, err := buildAgentTokens(config.Config{}); err != nil || v != nil {
+	if v, _, _, err := buildAgentTokens(config.Config{}, nil); err != nil || v != nil {
 		t.Fatalf("nothing configured: err %v, verifier %v; want neither", err, v)
 	}
 }
@@ -57,7 +59,7 @@ func TestAnIssuerWithoutDoorOriginsRefusesToStart(t *testing.T) {
 		AgentTokenAudiences: "https://wardryx.example",
 		AgentTokenJWKSFile:  writeKeyFile(t),
 	}
-	if _, _, _, err := buildAgentTokens(cfg); err == nil || !strings.Contains(err.Error(), "WARDRYX_AGENT_TOKEN_DOOR_ORIGINS") {
+	if _, _, _, err := buildAgentTokens(cfg, nil); err == nil || !strings.Contains(err.Error(), "WARDRYX_AGENT_TOKEN_DOOR_ORIGINS") {
 		t.Fatalf("an issuer with no door origins: err %v, want a refusal naming WARDRYX_AGENT_TOKEN_DOOR_ORIGINS", err)
 	}
 }
@@ -71,7 +73,7 @@ func TestTurningOffTheProofRequirementWarnsAtStartup(t *testing.T) {
 		AgentTokenDoorOrigins:  "https://pep.example",
 		AgentTokenRequireProof: "0",
 	}
-	v, _, warnings, err := buildAgentTokens(cfg)
+	v, _, warnings, err := buildAgentTokens(cfg, nil)
 	if err != nil || v == nil {
 		t.Fatalf("a configuration with the proof requirement off: err %v, verifier %v; want a verifier", err, v)
 	}
@@ -91,8 +93,66 @@ func TestAProofWindowOutsideOneToThreeHundredSecondsRefusesToStart(t *testing.T)
 			AgentTokenDoorOrigins:        "https://pep.example",
 			AgentTokenProofMaxAgeSeconds: raw,
 		}
-		if _, _, _, err := buildAgentTokens(cfg); err == nil {
+		if _, _, _, err := buildAgentTokens(cfg, nil); err == nil {
 			t.Errorf("WARDRYX_AGENT_TOKEN_PROOF_MAX_AGE_SECONDS=%q was accepted, want a refusal", raw)
 		}
+	}
+}
+
+// With no database the record of accepted proofs lives in this process, and the
+// start says what that costs. With a database, or with no tokens to verify,
+// there is nothing to say.
+func TestThePerProcessProofRecordIsWarnedAtStartup(t *testing.T) {
+	warn := proofRecordWarning("https://vouchryx.example", "")
+	for _, want := range []string{"WARDRYX_DB", "restart", "instance"} {
+		if !strings.Contains(warn, want) {
+			t.Fatalf("the warning %q does not name %q", warn, want)
+		}
+	}
+	if got := proofRecordWarning("https://vouchryx.example", "postgres://db/wardryx"); got != "" {
+		t.Fatalf("a warning with a database configured: %q", got)
+	}
+	if got := proofRecordWarning("", ""); got != "" {
+		t.Fatalf("a warning with no token verification configured: %q", got)
+	}
+}
+
+// proofRecordStub counts purges; a purge is how a record given to
+// buildAgentTokens shows it reached the verifier.
+type proofRecordStub struct{ purged chan struct{} }
+
+func (proofRecordStub) TryRecordProof(context.Context, string, time.Time) (bool, error) {
+	return true, nil
+}
+
+func (s proofRecordStub) PurgeProofs(context.Context, time.Duration) (int64, error) {
+	select {
+	case s.purged <- struct{}{}:
+	default:
+	}
+	return 0, nil
+}
+
+// What serve hands buildAgentTokens is what the verifier uses, and the run
+// function it returns keeps the table purged.
+func TestTheRecordGivenToBuildAgentTokensReachesTheVerifierAndIsPurged(t *testing.T) {
+	cfg := config.Config{
+		AgentTokenIssuer:      "https://vouchryx.example",
+		AgentTokenAudiences:   "https://wardryx.example",
+		AgentTokenJWKSFile:    writeKeyFile(t),
+		AgentTokenDoorOrigins: "https://pep.example",
+	}
+	record := proofRecordStub{purged: make(chan struct{}, 1)}
+	_, run, _, err := buildAgentTokens(cfg, record)
+	if err != nil {
+		t.Fatalf("buildAgentTokens: %v", err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	go run(ctx, nil)
+	select {
+	case <-record.purged:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the record was never purged: it did not reach the verifier, or the purge loop was not started")
 	}
 }

@@ -159,6 +159,61 @@ Detail behind every point above is in
 [estate-gates/PROVEN.md](https://github.com/TAIPANBOX/estate-gates/blob/main/PROVEN.md), the 16-case
 failure matrix and the rows dated 2026-09-17.
 
+## A DPoP proof, once, across instances and a restart (2026-11-04)
+
+The built binary on a real Postgres 16, on one 4-core Intel N150 box. `@measured` 2026-11-04, the two runs below by hand on that box, and
+the same steps as `TestTheBuiltBinaryRefusesAProofAcrossTwoInstancesAndARestart`,
+`TestTheBuiltBinaryRefusesAProofWhileItsDatabaseIsGone` and
+`TestTheBuiltBinaryRefusesAProofOnAHangingDatabaseWithinTheDeadline` in CI's integration job.
+
+One proof, two instances on one database, one of them killed and started again:
+
+| Presentation of the same proof | Record in the process (`7462673`) | Shared record |
+|---|---|---|
+| Instance A | `200` allow | `200` allow |
+| Instance B | `200` allow | `403 agent_token_proof_invalid` |
+| A, after `kill` and a fresh start | `200` allow | `403 agent_token_proof_invalid` |
+
+With the database taken away from a running instance:
+
+- `docker stop` of Postgres: a decide with a fresh proof answered `503 agent_token_proof_unrecorded` in
+  1 ms, a decide with no proof answered `200` allow from memory, `/healthz` answered `200` and `/readyz`
+  answered `503`.
+- `docker pause` of Postgres: a decide with a fresh proof answered `503 agent_token_proof_unrecorded` in
+  3.003 s, the store deadline.
+
+After `docker start` the proof the outage refused was accepted once and the proof accepted before the
+outage stayed refused, and the log carried one line for the outage and one for its end.
+
+What a proof costs on `/v1/decide`. `@measured` `go test -tags 'integration latency' -run
+TestDecideLatency -v ./internal/manifest/`, 2026-11-04, three rounds of 3000 decides for each row,
+client, wardryx and Postgres on that one box at load average 3 to 4, `synchronous_commit` on:
+
+| Callers | Decide | p50 | p95 | p99 | Over 50 ms |
+|---|---|---|---|---|---|
+| 1 | no token, memory store | 0.10 ms | 0.19 ms | 0.24 ms | 0 of 9000 |
+| 1 | no token, Postgres store | 0.10 ms | 0.20 ms | 0.30 ms | 0 of 9000 |
+| 1 | proof, record in the process | 0.42 ms | 0.56 ms | 0.91 ms | 0 of 9000 |
+| 1 | proof, shared record | 2.3 ms | 2.8 ms | 5.1 ms | 0 of 9000 |
+| 8 | no token, Postgres store | 0.29 ms | 0.85 ms | 1.7 ms | 0 of 9000 |
+| 8 | proof, record in the process | 0.99 ms | 2.7 ms | 4.2 ms | 0 of 9000 |
+| 8 | proof, shared record | 3.1 ms | 4.7 ms | 6.7 ms | 0 of 9000 |
+| 32 | no token, Postgres store | 1.0 ms | 4.0 ms | 6.6 ms | 0 of 8928 |
+| 32 | proof, record in the process | 3.1 ms | 9.8 ms | 14.9 ms | 0 of 8928 |
+| 32 | proof, shared record | 6.9 ms | 13.8 ms | 29.9 ms | 63 of 8928 |
+
+The shared record adds about 2 ms at the median to a decide with a proof for 1 or 8 callers and about
+4 ms for 32, and a decide with no proof pays nothing. 50 ms is the enforcement point's default wait on a
+model call, past which its fail mode applies: 0.7% of decides passed it at 32 callers and none below
+that. The same run with the box at load average 15, other work taking the cores, put the shared record
+at p50 2.4 ms and p99 11.9 ms for one caller and p50 24.3 ms and p99 88.8 ms for 32, where 7.6% passed
+50 ms against 5.2% with the record in the process. The write is about 420 bytes of WAL per proof, and
+27,386 rows held 6.6 MB, index included.
+
+Before the pool was bounded, the same run at 32 callers opened 2241 sessions for 5952 decides and put
+the p99 at 358 ms: database/sql keeps two idle connections, so every burst reconnected. `maxPoolConns`
+brought that to 42 sessions for 8928 decides.
+
 ## Method
 
 Disposable Hetzner VPS boxes (deleted after each run), Wardryx running as a PEP in front of a real

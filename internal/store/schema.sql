@@ -39,6 +39,17 @@ CREATE TABLE IF NOT EXISTS approval_redemptions (
     redeemed_at    TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+-- The record of accepted DPoP proofs, one row per proof, shared by every
+-- wardryx on this database (CLAUDE.md invariant 44). proof_key is the digest
+-- internal/agenttoken computes, never what the client wrote. expires_at is when
+-- the longest proof window from the proof's iat closes. No index on it: a row is
+-- written once per proof on the decide path and read back by a purge a minute
+-- apart, and an index would cost every write to save that one scan.
+CREATE TABLE IF NOT EXISTS agent_proof_replays (
+    proof_key  TEXT PRIMARY KEY,
+    expires_at TIMESTAMPTZ NOT NULL
+);
+
 -- Policy-as-code documents written through the admin policy API
 -- (internal/api's POST/PUT/DELETE /v1/policies), so an API-managed policy
 -- survives a restart the way -policy's file-based rules always did.

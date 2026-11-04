@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"errors"
 	"log"
 	"net/http"
@@ -9,6 +10,7 @@ import (
 	"github.com/TAIPANBOX/agent-stack-go/v2/event"
 	"github.com/TAIPANBOX/wardryx/internal/agenttoken"
 	"github.com/TAIPANBOX/wardryx/internal/policy"
+	"github.com/TAIPANBOX/wardryx/internal/store"
 )
 
 // evIdentityMismatch is the event for a request whose verified agent token names
@@ -42,7 +44,7 @@ func (s *Server) WithAgentTokens(v *agenttoken.Verifier) *Server {
 //
 // The refusals echo nothing of the request and reach no rule. It returns false
 // when it has answered the request.
-func (s *Server) identitySourceFor(w http.ResponseWriter, principal Principal, agentID, runID, token, proof, claim string) (string, bool) {
+func (s *Server) identitySourceFor(ctx context.Context, w http.ResponseWriter, principal Principal, agentID, runID, token, proof, claim string) (string, bool) {
 	claimed := policy.IdentitySourceOf(claim)
 	if s.agentTokens == nil {
 		if token != "" {
@@ -80,15 +82,43 @@ func (s *Server) identitySourceFor(w http.ResponseWriter, principal Principal, a
 		return "", false
 	}
 	// The proof is the holder's, for this token and this door (invariant 13). A
-	// token with no proof is refused when proofs are required.
-	if err := s.agentTokens.CheckProof(proof, token, verified, time.Now()); err != nil {
+	// token with no proof is refused when proofs are required. Its last step asks
+	// the shared proof record, a store call, so it has a store call's deadline
+	// (invariant 44). It does not end with the caller: the enforcement point gives
+	// up in 50 ms on a model call, and a claim cut mid-statement costs a session and
+	// hides a hanging store behind a cancel.
+	proofCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), s.storeTimeout)
+	defer cancel()
+	if err := s.agentTokens.CheckProof(proofCtx, proof, token, verified, time.Now()); err != nil {
 		if errors.Is(err, agenttoken.ErrProofRequired) {
 			writeError(w, http.StatusForbidden, "agent_token_proof_required")
+			return "", false
+		}
+		if errors.Is(err, agenttoken.ErrProofRecord) {
+			s.writeProofUnrecorded(w, err)
 			return "", false
 		}
 		log.Printf("wardryx: agent token proof refused on /v1/decide for agent %q: %v", agentID, err)
 		writeError(w, http.StatusForbidden, "agent_token_proof_invalid")
 		return "", false
 	}
+	if proof != "" {
+		s.outage.recovered()
+	}
 	return policy.IdentitySourceAgentToken, true
+}
+
+// writeProofUnrecorded refuses a proof the shared record could not be asked
+// about. It may be a replay, so it does not pass (invariant 44). A store that is
+// gone is a 503 and one line per outage, since a caller's next proof may be
+// answered; a store that answered with a failure of its own is the 500 of
+// invariant 10. Either way the cause is in the log and not in the body.
+func (s *Server) writeProofUnrecorded(w http.ResponseWriter, err error) {
+	const op = "recording an agent token proof"
+	if !store.IsUnavailable(err) {
+		writeInternalError(w, op, err)
+		return
+	}
+	s.outage.failed(op, err)
+	writeError(w, http.StatusServiceUnavailable, "agent_token_proof_unrecorded")
 }

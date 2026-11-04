@@ -9,9 +9,11 @@ package store
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"reflect"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -33,7 +35,7 @@ func testDB(t *testing.T) *Postgres {
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
-	if _, err := p.db.Exec(`TRUNCATE approvals, approval_redemptions, policies`); err != nil {
+	if _, err := p.db.Exec(`TRUNCATE approvals, approval_redemptions, policies, agent_proof_replays`); err != nil {
 		t.Fatalf("truncate: %v", err)
 	}
 	t.Cleanup(func() { p.Close() })
@@ -391,5 +393,169 @@ func TestPgPolicyRoundTripsFullPolicyShape(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got.Policy, full) {
 		t.Errorf("round-tripped policy = %+v, want %+v", got.Policy, full)
+	}
+}
+
+func TestPgTryRecordProofClaimsAKeyOnce(t *testing.T) {
+	p := testDB(t)
+	ctx := context.Background()
+	until := time.Now().Add(time.Minute)
+
+	first, err := p.TryRecordProof(ctx, "proof-a", until)
+	if err != nil || !first {
+		t.Fatalf("the first claim: claimed %v, err %v; want true", first, err)
+	}
+	second, err := p.TryRecordProof(ctx, "proof-a", until)
+	if err != nil || second {
+		t.Fatalf("the second claim: claimed %v, err %v; want false and no error", second, err)
+	}
+	other, err := p.TryRecordProof(ctx, "proof-b", until)
+	if err != nil || !other {
+		t.Fatalf("another key: claimed %v, err %v; want true", other, err)
+	}
+}
+
+// Two handles on one database are two wardryx instances. Exactly one caller may
+// see true, however many ask at once, and that is the database's doing: no lock
+// in this process spans the two handles.
+func TestPgTryRecordProofIsAtomicAcrossConnections(t *testing.T) {
+	first := testDB(t)
+	second, err := OpenPostgres(context.Background(), os.Getenv("DATABASE_URL"))
+	if err != nil {
+		t.Fatalf("open the second handle: %v", err)
+	}
+	t.Cleanup(func() { second.Close() })
+	handles := []*Postgres{first, second}
+	until := time.Now().Add(time.Minute)
+
+	var claimed atomic.Int32
+	var wg sync.WaitGroup
+	for i := range 64 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			ok, err := handles[i%2].TryRecordProof(context.Background(), "proof-race", until)
+			if err != nil {
+				t.Errorf("TryRecordProof: %v", err)
+			}
+			if ok {
+				claimed.Add(1)
+			}
+		}()
+	}
+	wg.Wait()
+	if got := claimed.Load(); got != 1 {
+		t.Fatalf("%d callers claimed one key, want exactly 1", got)
+	}
+}
+
+// A restart is a new pool on the same table.
+func TestPgAProofRecordSurvivesReopeningTheStore(t *testing.T) {
+	p := testDB(t)
+	ctx := context.Background()
+	if ok, err := p.TryRecordProof(ctx, "proof-restart", time.Now().Add(time.Minute)); err != nil || !ok {
+		t.Fatalf("the claim: claimed %v, err %v", ok, err)
+	}
+	reopened, err := OpenPostgres(ctx, os.Getenv("DATABASE_URL"))
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer reopened.Close()
+	if ok, err := reopened.TryRecordProof(ctx, "proof-restart", time.Now().Add(time.Minute)); err != nil || ok {
+		t.Fatalf("the claim after reopening: claimed %v, err %v; want false, the row is in the table", ok, err)
+	}
+}
+
+func TestPgPurgeProofsRemovesOnlyRowsPastTheirWindowAndTheGrace(t *testing.T) {
+	p := testDB(t)
+	ctx := context.Background()
+	const grace = 5 * time.Minute
+	rows := []struct {
+		key  string
+		age  time.Duration // how long ago the window closed; negative is still open
+		gone bool
+	}{
+		{"window-still-open", -time.Minute, false},
+		{"closed-inside-the-grace", grace - time.Minute, false},
+		{"closed-past-the-grace", grace + time.Minute, true},
+		{"closed-long-ago", 24 * time.Hour, true},
+	}
+	for _, r := range rows {
+		if ok, err := p.TryRecordProof(ctx, r.key, time.Now().Add(-r.age)); err != nil || !ok {
+			t.Fatalf("%s: claimed %v, err %v", r.key, ok, err)
+		}
+	}
+	removed, err := p.PurgeProofs(ctx, grace)
+	if err != nil {
+		t.Fatalf("PurgeProofs: %v", err)
+	}
+	if removed != 2 {
+		t.Fatalf("PurgeProofs removed %d rows, want 2", removed)
+	}
+	for _, r := range rows {
+		claimed, err := p.TryRecordProof(ctx, r.key, time.Now().Add(time.Minute))
+		if err != nil {
+			t.Fatalf("%s: %v", r.key, err)
+		}
+		if claimed != r.gone {
+			t.Errorf("%s: claimable again is %v, want %v", r.key, claimed, r.gone)
+		}
+	}
+}
+
+// The record is on the decide path, so a burst must not cost a new connection per
+// call. Measured 2026-11-04 on the built binary at 32 callers: database/sql's
+// default of two idle connections opened 2241 sessions for 5952 decides, and the
+// p99 went from tens of milliseconds to hundreds.
+func TestPgABurstOfProofsReusesItsConnections(t *testing.T) {
+	p := testDB(t)
+	ctx := context.Background()
+	sessions := func() int64 {
+		var n int64
+		if err := p.db.QueryRowContext(ctx,
+			`SELECT sessions FROM pg_stat_database WHERE datname = current_database()`).Scan(&n); err != nil {
+			t.Fatalf("read the session count: %v", err)
+		}
+		return n
+	}
+	burst := func(round int) {
+		var wg sync.WaitGroup
+		for i := range maxPoolConns {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				key := fmt.Sprintf("burst-%d-%d", round, i)
+				if _, err := p.TryRecordProof(ctx, key, time.Now().Add(time.Minute)); err != nil {
+					t.Errorf("TryRecordProof: %v", err)
+				}
+			}()
+		}
+		wg.Wait()
+	}
+	burst(0) // the pool fills
+	before := sessions()
+	for round := 1; round <= 5; round++ {
+		burst(round)
+	}
+	// pg_stat_database counts a session when it ends, so this reads the sessions
+	// the pool closed. Reopening them per burst is the churn under test.
+	time.Sleep(600 * time.Millisecond)
+	if got := sessions() - before; got > int64(maxPoolConns) {
+		t.Fatalf("five bursts on a warm pool closed %d sessions, want none beyond the pool's own %d", got, maxPoolConns)
+	}
+}
+
+func TestPgThePoolIsBounded(t *testing.T) {
+	p := testDB(t)
+	if got := p.db.Stats().MaxOpenConnections; got != maxPoolConns {
+		t.Fatalf("the pool's limit is %d, want %d: with no limit a burst past max_connections reads as a store failure", got, maxPoolConns)
+	}
+}
+
+// A second run of the schema is what every start does.
+func TestPgTheProofRecordSchemaAppliesTwice(t *testing.T) {
+	p := testDB(t)
+	if err := p.migrate(context.Background()); err != nil {
+		t.Fatalf("a second migrate: %v", err)
 	}
 }

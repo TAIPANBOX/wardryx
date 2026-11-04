@@ -15,7 +15,7 @@ test-race:
 
 # Requires a running Postgres; set DATABASE_URL.
 test-integration:
-	go test -tags integration ./internal/store/
+	go test -count=1 -p 1 -tags integration ./internal/store/ ./internal/agenttoken/ ./internal/manifest/
 
 vet:
 	go vet ./...
