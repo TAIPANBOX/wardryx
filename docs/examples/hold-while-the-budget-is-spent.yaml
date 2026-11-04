@@ -6,7 +6,11 @@
 # signal changes nothing: the decision is the one it was.
 #
 # The rule can add a hold and nothing else. A granted approval lets that one
-# call through, and the agent stays on hold until its budget is no longer spent.
+# call through. The agent stays on hold until its last event is older than
+# WARDRYX_SIGNAL_EVENTS_MAX_AGE (48 hours unless set): the quality plane writes
+# no event when a budget recovers, so a recovered agent is let off by the age.
+# Keep the file writable by the quality plane alone: its hash chain does not say
+# who wrote it and cannot see lines cut from its end.
 name: hold-while-the-budget-is-spent
 target: "agent://acme.example/support/*"
 hold_if_signal:
