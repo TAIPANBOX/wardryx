@@ -214,6 +214,38 @@ Before the pool was bounded, the same run at 32 callers opened 2241 sessions for
 the p99 at 358 ms: database/sql keeps two idle connections, so every burst reconnected. `maxPoolConns`
 brought that to 42 sessions for 8928 decides.
 
+## An agent whose error budget is spent, held for a person (2026-11-04)
+
+The built binary reading a file the quality plane (verdryx, `452ac7c`, rfc8785 0.1.4) wrote itself, on one 4-core
+Intel N150 box. `@measured` 2026-11-04, by hand on that box with the documentation's own example policy
+(`docs/examples/hold-while-the-budget-is-spent.yaml`), `WARDRYX_SIGNAL_EVENTS_MAX_AGE=4m`, and the same
+steps as `TestTheBuiltBinaryReadsTheBudgetFileAndSaysSoOnReadyz`, which is in CI.
+
+A trace of four agents (400, 540, 400 and 300 runs) went through `verdryx slo --input ... --events ...`. It
+reported two budgets exhausted and wrote two `slo_burn` events, the second chained to the first by
+`prev_hash`. A third agent, burning at 10.5 times its sustainable rate with budget left, was reported and
+**not written**: verdryx puts a fast burn on the file only when the interval of the indicator sits wholly
+below its target, and a measurement with budget left cannot have that, so the file as verdryx writes it
+today carries `exhausted` events.
+
+| Step | Result |
+|---|---|
+| `GET /readyz` | `200 {"store":"ok","signal_events":"ok"}` |
+| a tool call of each of the four agents | the two with a spent budget `hold`, reason naming `slo_burn` and `exhausted`; the other two `allow` |
+| a person grants one hold, the call is sent with the token | `allow`, and the same token again is a `hold` |
+| the same agent sends its own signal `slo_burn: none` | still `hold` |
+| a line that is not an event is appended to the file, 17 s later | `/readyz` is `200` with `signal_events: broken`, the agent's call is `allow` (the default `when_absent`), the log says which file and why |
+| the line is removed, 15 s later | `/readyz` says `ok`, the agent is `hold` again, the log says the file is readable again |
+| `when_absent: hold`, the file missing | `/readyz` says `unreadable`, a tool call is `hold` for the missing signal, a call with no tool call is `allow` |
+| verdryx runs again over good data for the first agent | it writes nothing for that agent; with the age at 4 minutes the agent is `allow` 246 s after its event. The second agent, still exhausted, got a fresh event and stayed `hold` |
+| `wardryx replay` with the quality plane's file deleted | 33 decisions, 31 reproduced, 1 approval decided, 1 approval spent, none diverged or unreadable |
+
+The standing signal adds 171 bytes to a decision record. `@measured` `go test -bench BenchmarkDecideWith
+./internal/api/`, three rounds of 20000 decides through the handler with no network and no event file, a rule
+on `slo_burn`, and a file of 200 lines: 33 to 42 microseconds and 60 allocations with the option off, 44 to 49
+microseconds and 72 allocations with it on, so about 8 microseconds and 12 allocations more, inside the
+run-to-run spread of the off case.
+
 ## Method
 
 Disposable Hetzner VPS boxes (deleted after each run), Wardryx running as a PEP in front of a real
