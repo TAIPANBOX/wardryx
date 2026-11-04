@@ -109,6 +109,8 @@ Feature: An agent whose error budget is spent has its actions put to a person
     Then the state is broken, no agent is signalled, and the log says why once
     And a torn last line, which is an append in progress, is not an error
     # -> internal/sloburn:TestAFileWhoseChainDoesNotHoldIsBroken
+    # -> internal/sloburn:TestAFileWithALineTooLongToReadIsBroken
+    # -> internal/sloburn:TestHostileBytesNeverPanicAndAFlippedByteInTheMiddleIsNeverBelieved
     # -> internal/sloburn:TestAnEventDatedInTheFutureMakesTheFileBroken
     # -> internal/sloburn:TestAnEventWithNoUsableTimeMakesTheFileBroken
     # -> internal/sloburn:TestAFileOverTheSizeCapIsBroken

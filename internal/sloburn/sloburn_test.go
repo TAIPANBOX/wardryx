@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"log"
+	"math/rand"
 	"os"
 	"path/filepath"
 	"strings"
@@ -660,5 +661,80 @@ func TestAChangeOfStateIsLoggedOnceAndTheDetailNamesTheLine(t *testing.T) {
 	}
 	if r.Detail() != "" {
 		t.Errorf("a good file has the detail %q", r.Detail())
+	}
+}
+
+func TestAFileWithALineTooLongToReadIsBroken(t *testing.T) {
+	b := newBus(t)
+	b.burn(botA, "task_success", "exhausted", 40, t0.Add(-time.Hour))
+	long := append(b.bytes(), bytes.Repeat([]byte("a"), 5<<20)...)
+	b.replace(append(long, '\n'))
+	r := New(b.path, DefaultMaxAge).WithClock((&clock{now: t0}).at)
+	if st := r.Refresh(); st != StateBroken {
+		t.Fatalf("a five megabyte line gave %q, want broken", st)
+	}
+	if sig, ok := r.For(botA); ok {
+		t.Fatalf("a broken file signalled %+v", sig)
+	}
+}
+
+// Whatever bytes the file holds, reading it never panics, a state is always one
+// of the three, and a signal is always well formed. A byte flipped inside a line
+// that another line follows is never believed: the line after it carries the
+// hash of the line as it was.
+func TestHostileBytesNeverPanicAndAFlippedByteInTheMiddleIsNeverBelieved(t *testing.T) {
+	b := newBus(t)
+	b.burn(botA, "task_success", "exhausted", 40, t0.Add(-3*time.Hour))
+	b.burn(botB, "task_success", "exhausted", 40, t0.Add(-2*time.Hour))
+	b.burn(botA, "containment", "fast_burn", 9, t0.Add(-time.Hour))
+	good := b.bytes()
+	lines := bytes.SplitAfter(good, []byte("\n"))
+	lastStart := len(good) - len(lines[len(lines)-2]) // the last complete line starts here
+	valid := map[string]bool{ValueExhausted: true, ValueFastBurn: true, ValueUnmeasured: true, ValueNone: true}
+
+	for seed := int64(0); seed < 200; seed++ {
+		rng := rand.New(rand.NewSource(seed))
+		mutated := append([]byte{}, good...)
+		inMiddle := false
+		switch rng.Intn(6) {
+		case 0: // flip a byte
+			i := rng.Intn(len(mutated))
+			mutated[i] ^= byte(1 + rng.Intn(255))
+			inMiddle = i < lastStart
+		case 1: // cut anywhere
+			mutated = mutated[:rng.Intn(len(mutated))]
+		case 2: // junk in the middle
+			i := rng.Intn(len(mutated))
+			junk := make([]byte, 1+rng.Intn(40))
+			rng.Read(junk)
+			mutated = append(append(append([]byte{}, mutated[:i]...), junk...), mutated[i:]...)
+		case 3: // a line repeated
+			mutated = append(mutated, lines[rng.Intn(len(lines)-1)]...)
+		case 4: // nothing but noise
+			mutated = make([]byte, rng.Intn(2000))
+			rng.Read(mutated)
+		default: // braces and quotes
+			mutated = []byte(strings.Repeat(`{"type":"slo_burn","source":"verdryx"`, 1+rng.Intn(5)) + "\n")
+		}
+		b.replace(mutated)
+		r := New(b.path, DefaultMaxAge).WithClock((&clock{now: t0}).at)
+		st := r.Refresh()
+		switch st {
+		case StateOK, StateBroken, StateUnreadable:
+		default:
+			t.Fatalf("seed %d: state %q", seed, st)
+		}
+		if inMiddle && st == StateOK {
+			t.Fatalf("seed %d: a byte flipped inside a line that another follows was believed", seed)
+		}
+		for _, agent := range []string{botA, botB, "agent://x/y"} {
+			sig, ok := r.For(agent)
+			if st != StateOK && ok {
+				t.Fatalf("seed %d: state %q still signalled %+v", seed, st, sig)
+			}
+			if ok && (sig.Name != SignalName || sig.Probability != 1 || !valid[sig.Value] || sig.Source != SignalSource) {
+				t.Fatalf("seed %d: a malformed signal %+v", seed, sig)
+			}
+		}
 	}
 }

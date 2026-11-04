@@ -6,7 +6,7 @@
 
 [![CI](https://github.com/TAIPANBOX/wardryx/actions/workflows/ci.yml/badge.svg)](https://github.com/TAIPANBOX/wardryx/actions/workflows/ci.yml)
 ![Go](https://img.shields.io/badge/go-1.27-00ADD8.svg)
-![tests](https://img.shields.io/badge/tests-714-brightgreen.svg)
+![tests](https://img.shields.io/badge/tests-716-brightgreen.svg)
 ![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)
 ![Status](https://img.shields.io/badge/status-deterministic%20PDP-2dd4bf.svg)
 
@@ -452,7 +452,8 @@ Beyond the decision engine and the approval flow above, Wardryx ships:
 2. **Storage** (`internal/store`): Postgres via `pgx/v5` with an embedded, idempotent `schema.sql`, or an in-memory store when no DSN is configured. Both implementations satisfy the same `Store` interface.
 3. **Events** (`source: wardryx`): optional NDJSON `agent-event` output (`WARDRYX_EVENTS_PATH`) via `agent-stack-go/event`: `policy_allow`, `policy_deny`, `approval_requested`, `approval_granted`, `approval_denied`, `approval_timeout` (an agent presenting an approval token whose window had already closed, so usually a human did decide and the agent came back late), `approval_unanswered` (a hold nobody decided, see [The hold nobody decided](#the-hold-nobody-decided)), `policy_updated` (a runtime `/v1/policies` write), and `agent_assertion_refused` (a request that named an agent its key may not speak for, refused with no decision; its `data` carries the `route`, the `asserted_agent_id` and `asserted_run_id`, the key's `org`, `role` and `key_fp`, and its `agent_id` is wardryx's own, never the agent it was made in the name of). Every decision event's `data` carries the `org` it was asked in. `approval_granted` and `approval_denied` carry `decided_by` (`key:` and the key's fingerprint), `key_fp`, and `decided_by_label` when the decision was sent with one. `policy_updated`'s `data` carries `action`, `policy_id`, `policy_version`, `policy_org` (the org of the policy written or removed, empty for one across orgs), `decided_by` (the organisation that made the write) and `key_fp`: the first 16 hex characters of SHA-256 over the bearer key that made it, so the record names the key without holding it. To match a `key_fp` to a key, run `printf %s "$KEY" | shasum -a 256 | cut -c1-16` on each candidate key. The key itself is never written to the event file or anywhere else. Events now carry the SPEC §6.5 `prev_hash` chain; verify a stream with `agent-conform -chain <file>`. `identity_mismatch` (a verified agent token names a different agent than the request; `data` names the `route`, the `asserted_agent_id`, the `token_subject`, the key's `org`, `role` and `key_fp`, and its `agent_id` is wardryx's own).
 4. **OTLP export** (`internal/otel`): optional one-span-per-decision export to an OTLP/HTTP collector (`WARDRYX_OTLP_ENDPOINT`), see [OTLP export](#otlp-export).
-5. **CLI** (`cmd/wardryx`): `serve`, `check` (an offline dry-run over a directory of Agent Passports), `approvals` (list from Postgres), `replay` (put recorded decisions back to the engine, see [Replay](#replay-what-a-policy-change-would-have-done)), `version`.
+5. **The error-budget signal** (`internal/sloburn`): optional, off unless `WARDRYX_SIGNAL_EVENTS` is set. Reads the quality plane's hash-chained event file and gives a decision one standing `slo_burn` signal for its agent, which a `hold_if_signal` rule can turn into a hold for a person; see [An error budget that puts an agent on hold](#an-error-budget-that-puts-an-agent-on-hold).
+6. **CLI** (`cmd/wardryx`): `serve`, `check` (an offline dry-run over a directory of Agent Passports), `approvals` (list from Postgres), `replay` (put recorded decisions back to the engine, see [Replay](#replay-what-a-policy-change-would-have-done)), `version`.
 
 ---
 
@@ -467,6 +468,7 @@ internal/store          Store interface; Postgres (pgx/v5, embedded schema.sql) 
 internal/api            net/http API: bearer auth, /v1/decide, /v1/approvals, /v1/policies, /healthz, /readyz
 internal/passports      directory loader for the offline `check` command (agent-stack-go/passport)
 internal/otel           OTLP/HTTP-JSON span export, one per /v1/decide outcome
+internal/sloburn        reads the quality plane's event file for the slo_burn signal (read-only; outside the decision path)
 internal/config         WARDRYX_* environment variables, read once at startup
 ```
 
