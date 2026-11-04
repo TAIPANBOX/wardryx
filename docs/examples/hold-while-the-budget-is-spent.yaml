@@ -1,0 +1,26 @@
+# Put an agent's tool calls to a person while its error budget is spent.
+#
+# It needs wardryx started with WARDRYX_SIGNAL_EVENTS pointing at the file the
+# quality plane (verdryx) writes its events to. Without that setting nothing
+# supplies the slo_burn signal and this rule never fires. Without this rule the
+# signal changes nothing: the decision is the one it was.
+#
+# The rule can add a hold and nothing else. A granted approval lets that one
+# call through, and the agent stays on hold until its budget is no longer spent.
+name: hold-while-the-budget-is-spent
+target: "agent://acme.example/support/*"
+hold_if_signal:
+  name: slo_burn
+  # exhausted: the budget is gone. fast_burn: it is burning fast, over a rate
+  # that was measured. Add unmeasured to hold also on an event the quality plane
+  # wrote without establishing a burn (a fast burn whose burn_events_seen is
+  # missing, zero or not a count).
+  values: [exhausted, fast_burn]
+  # The signal is always at probability 1: a line in the file is a fact the
+  # quality plane established, not an estimate.
+  min_probability: 1
+  # Uncomment to hold every tool call while the file cannot be read (missing,
+  # broken chain). With the default, allow, an unreadable file lets calls through
+  # as they went before the option existed. A call that is not a tool call is
+  # never held for a missing signal. Leave single-use approvals on where this is set.
+  # when_absent: hold

@@ -283,6 +283,20 @@ func runServe(args []string) error {
 			fmt.Fprintf(os.Stderr, "wardryx: agent-token sources not refreshed, keeping what they held: %v\n", err)
 		})
 	}
+	// The quality plane's event file is read for the slo_burn signal when
+	// WARDRYX_SIGNAL_EVENTS is set (invariant 45).
+	sloReader, err := buildSLOBurn(cfg)
+	if err != nil {
+		return fmt.Errorf("signal events: %w", err)
+	}
+	if sloReader != nil {
+		srv.WithSLOBurn(sloReader)
+		fmt.Fprintf(os.Stderr, "wardryx: the slo_burn signal is read from %s (%s); an event signals for %s after its time\n",
+			sloReader.Path(), sloReader.State(), sloReader.MaxAge())
+		sloCtx, sloCancel := context.WithCancel(context.Background())
+		defer sloCancel()
+		go sloReader.Run(sloCtx)
+	}
 	if keyryxRefresh != nil {
 		kctx, kcancel := context.WithCancel(context.Background())
 		defer kcancel()

@@ -118,6 +118,12 @@
           },
           "WARDRYX_APPROVAL_V2_UNTIL": {
             "required": false
+          },
+          "WARDRYX_SIGNAL_EVENTS": {
+            "required": false
+          },
+          "WARDRYX_SIGNAL_EVENTS_MAX_AGE": {
+            "required": false
           }
         },
         "starts_with_empty_environment": false,

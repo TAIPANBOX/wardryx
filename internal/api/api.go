@@ -66,6 +66,7 @@ import (
 	wotel "github.com/TAIPANBOX/wardryx/internal/otel"
 	"github.com/TAIPANBOX/wardryx/internal/pdp"
 	"github.com/TAIPANBOX/wardryx/internal/policy"
+	"github.com/TAIPANBOX/wardryx/internal/sloburn"
 	"github.com/TAIPANBOX/wardryx/internal/store"
 )
 
@@ -132,6 +133,11 @@ type Server struct {
 	// (WARDRYX_ALLOW_KEY_APPROVALS=1; invariant 43).
 	allowKeyApprovals     bool
 	agentTokenIgnoredOnce sync.Once
+	// sloBurn reads the quality plane's event file and supplies the standing
+	// slo_burn signal of a decision (invariant 45). Nil is the default: no file
+	// is read and a decision is made as it was.
+	sloBurn            *sloburn.Reader
+	sloBurnDroppedOnce sync.Once
 	// allow is compiled from keys once: whether they name one org, and each
 	// listed key's agent patterns. See speaksFor.
 	allow             allowance
@@ -451,6 +457,11 @@ func handleHealthz(w http.ResponseWriter, _ *http.Request) {
 type readyDTO struct {
 	Store  string `json:"store"`
 	Record string `json:"record,omitempty"`
+	// SignalEvents is what the quality plane's event file is doing, "ok",
+	// "unreadable" or "broken", present only while WARDRYX_SIGNAL_EVENTS is set.
+	// It never changes the status: the file is advisory, and draining every
+	// instance of a decision point for it would stop every governed call.
+	SignalEvents string `json:"signal_events,omitempty"`
 }
 
 // handleReadyz reads nothing from the request: no body, no query, no bearer.
@@ -474,6 +485,9 @@ func (s *Server) handleReadyz(w http.ResponseWriter, r *http.Request) {
 	if s.record.isFailing() {
 		dto.Record = "failing"
 		status = http.StatusServiceUnavailable
+	}
+	if s.sloBurn != nil {
+		dto.SignalEvents = string(s.sloBurn.State())
 	}
 	writeJSON(w, status, dto)
 }
@@ -783,6 +797,9 @@ func (s *Server) handleDecide(w http.ResponseWriter, r *http.Request, principal 
 	}
 
 	signals, toolCall, refusal := decideSignalInputs(dto)
+	if refusal == "" {
+		signals, refusal = s.withStandingSignal(signals, dto.AgentID)
+	}
 	if refusal != "" {
 		writeError(w, http.StatusBadRequest, refusal)
 		return

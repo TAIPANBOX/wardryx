@@ -127,6 +127,12 @@ type Config struct {
 	// which v2 HMAC tokens are refused. Set, v2 verifies before it; unset, v2
 	// verifies forever without a signer and not at all with one.
 	ApprovalV2Until string
+	// SignalEvents is WARDRYX_SIGNAL_EVENTS: the quality plane's event file, read
+	// for the slo_burn signal of a decision (invariant 45). Unset, no file is read.
+	SignalEvents string
+	// SignalEventsMaxAge is WARDRYX_SIGNAL_EVENTS_MAX_AGE: how long after its time
+	// an event keeps signalling. Unset is 48h; the cmd layer checks the rest.
+	SignalEventsMaxAge string
 }
 
 // FromEnv reads every WARDRYX_* variable once. Call it a single time per
@@ -160,6 +166,8 @@ func FromEnv() Config {
 		AgentTokenRequireProof:       os.Getenv("WARDRYX_AGENT_TOKEN_REQUIRE_PROOF"),
 		AgentTokenProofMaxAgeSeconds: os.Getenv("WARDRYX_AGENT_TOKEN_PROOF_MAX_AGE_SECONDS"),
 		ApprovalV2Until:              os.Getenv("WARDRYX_APPROVAL_V2_UNTIL"),
+		SignalEvents:                 os.Getenv("WARDRYX_SIGNAL_EVENTS"),
+		SignalEventsMaxAge:           os.Getenv("WARDRYX_SIGNAL_EVENTS_MAX_AGE"),
 	}
 }
 
