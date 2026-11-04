@@ -69,6 +69,12 @@ jobs:
       - name: the proof record is shared, and refuses when it cannot be asked
         run: ./scripts/proof-record-is-shared.sh
 
+      # Invariant 45: every behaviour test runs with the error-budget file present
+      # and healthy, so the decision path coming to know of it, or the caller
+      # coming to remove its signal, turns no suite red.
+      - name: the error-budget file stays outside the decision
+        run: ./scripts/slo-signal-stays-outside-the-decision.sh
+
       # Last, because it mutates tracked files and restores them. It needs a
       # clean tree and says so plainly, so it also reports any earlier step
       # that starts writing into the checkout.

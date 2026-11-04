@@ -152,8 +152,11 @@ run_case() {
 	# Exit code first, then wording. Checking the needle before the expectation
 	# turns "it did not fail at all" into "it failed for the wrong reason",
 	# which sends the reader to look at prose when the gate is toothless.
+	# A here-string and not a pipe: under pipefail, grep -q closing the pipe at its
+	# first match can make the writer die of SIGPIPE, and a needle that was found
+	# then reads as missing (seen on a loaded machine, 2026-11-04).
 	if [ "$expect" = fail ] && [ "$rc" -ne 0 ] && [ -n "$needle" ] &&
-		! printf '%s' "$out" | grep -qF -- "$needle"; then
+		! grep -qF -- "$needle" <<<"$out"; then
 		printf 'WRONG REASON  %s\n              it failed, but not saying: %s\n' "$name" "$needle"
 		failures=$((failures + 1))
 		return
@@ -678,6 +681,70 @@ run_case "proof-record-is-shared: a comment naming the shapes it refuses" pass \
 run_case "proof-record-is-shared: the claim is gone" fail \
 	'./scripts/proof-record-is-shared.sh' \
 	"$(py 'edit("internal/store/pgstore.go", "func (p *Postgres) TryRecordProof(", "func (p *Postgres) ClaimProof(")')" \
+	"measured nothing"
+
+# The file that carries an agent's error budget (invariant 45). Every behaviour
+# test runs with the file present and healthy, so each way the decision path
+# could come to know of it, and each way the caller could come to remove its
+# signal, is a fault only this gate sees.
+run_case "slo-signal: the PDP imports the file reader" fail \
+	'./scripts/slo-signal-stays-outside-the-decision.sh' \
+	"$(py 'edit("internal/pdp/pdp.go", "import (", "import (\n\t_ \"github.com/TAIPANBOX/wardryx/internal/sloburn\"")')" \
+	"internal/pdp depends on internal/sloburn"
+
+run_case "slo-signal: a replay stands on the file reader" fail \
+	'./scripts/slo-signal-stays-outside-the-decision.sh' \
+	"$(py 'edit("internal/replay/replay.go", "import (", "import (\n\t_ \"github.com/TAIPANBOX/wardryx/internal/sloburn\"")')" \
+	"internal/replay depends on internal/sloburn"
+
+run_case "slo-signal: the policy package names the setting" fail \
+	'./scripts/slo-signal-stays-outside-the-decision.sh' \
+	"$(py 'edit("internal/policy/policy.go", "import (", "const signalFile = \"WARDRYX_SIGNAL_EVENTS\"\n\nimport (")')" \
+	"must not know of it"
+
+run_case "slo-signal: the reader reaches the network" fail \
+	'./scripts/slo-signal-stays-outside-the-decision.sh' \
+	"$(py 'edit("internal/sloburn/sloburn.go", "import (", "import (\n\t_ \"net/http\"")')" \
+	"reaches net/http"
+
+run_case "slo-signal: the reader starts a process" fail \
+	'./scripts/slo-signal-stays-outside-the-decision.sh' \
+	"$(py 'edit("internal/sloburn/sloburn.go", "import (", "import (\n\t_ \"os/exec\"")')" \
+	"reaches os/exec"
+
+run_case "slo-signal: the reader reaches a database" fail \
+	'./scripts/slo-signal-stays-outside-the-decision.sh' \
+	"$(py 'edit("internal/sloburn/sloburn.go", "import (", "import (\n\t_ \"database/sql\"")')" \
+	"reaches database/sql"
+
+run_case "slo-signal: the reader opens its file for writing" fail \
+	'./scripts/slo-signal-stays-outside-the-decision.sh' \
+	"$(py 'edit("internal/sloburn/sloburn.go", "f, err := os.Open(r.path)", "f, err := os.OpenFile(r.path, os.O_RDWR, 0)")')" \
+	"the reader may only read"
+
+run_case "slo-signal: the decide handler no longer adds the standing signal" fail \
+	'./scripts/slo-signal-stays-outside-the-decision.sh' \
+	"$(py 'edit("internal/api/api.go", "signals, refusal = s.withStandingSignal(signals, dto.AgentID)", "signals, refusal = signals, \"\"")')" \
+	"does not pass its signals through withStandingSignal"
+
+run_case "slo-signal: a caller's own slo_burn is compared exactly" fail \
+	'./scripts/slo-signal-stays-outside-the-decision.sh' \
+	"$(py 'edit("internal/api/slo_burn.go", "strings.EqualFold(strings.TrimSpace(sg.Name), sloburn.SignalName)", "sg.Name == sloburn.SignalName")')" \
+	"with EqualFold"
+
+run_case "slo-signal: the reader keeps its file by size and time" fail \
+	'./scripts/slo-signal-stays-outside-the-decision.sh' \
+	"$(py 'edit("internal/sloburn/sloburn.go", "sum := sha256.Sum256(data)", "sum := [sha256.Size]byte{byte(len(data))}")')" \
+	"digest of the bytes"
+
+# Comments that name the shapes the gate refuses are prose, not code.
+run_case "slo-signal: comments naming the shapes it refuses" pass \
+	'./scripts/slo-signal-stays-outside-the-decision.sh' \
+	"$(py 'edit("internal/pdp/pdp.go", "import (", "// sloburn and WARDRYX_SIGNAL_EVENTS are outside this package.\nimport ("); edit("internal/sloburn/sloburn.go", "import (", "// os.WriteFile and net/http are refused here.\nimport (")')"
+
+run_case "slo-signal: the reader is gone" fail \
+	'./scripts/slo-signal-stays-outside-the-decision.sh' \
+	"$(py 'import os; os.remove("internal/sloburn/sloburn.go")')" \
 	"measured nothing"
 
 echo

@@ -15,6 +15,7 @@ import (
 	"github.com/TAIPANBOX/wardryx/internal/agenttoken"
 	"github.com/TAIPANBOX/wardryx/internal/api"
 	"github.com/TAIPANBOX/wardryx/internal/config"
+	"github.com/TAIPANBOX/wardryx/internal/sloburn"
 )
 
 // The README's environment table is the one place an operator reads what a
@@ -50,6 +51,7 @@ func codeDefaults(t *testing.T) map[string]string {
 	if !envSet("WARDRYX_APPROVAL_UNANSWERED_AFTER") {
 		unanswered = api.DefaultUnansweredAfter
 	}
+	signalMaxAge, _ := sloburn.ParseMaxAge(cfg.SignalEventsMaxAge)
 	return map[string]string{
 		"WARDRYX_ADDR":                              orDefault(cfg.Addr, serveAddrFallback(t)),
 		"WARDRYX_KEYS":                              cfg.Keys,
@@ -77,6 +79,8 @@ func codeDefaults(t *testing.T) map[string]string {
 		"WARDRYX_AGENT_TOKEN_PROOF_MAX_AGE_SECONDS": orDefault(cfg.AgentTokenProofMaxAgeSeconds, strconv.Itoa(int(agenttoken.DefaultProofAge/time.Second))),
 		"WARDRYX_APPROVER_JWKS":                     cfg.ApproverJWKSFile,
 		"WARDRYX_ALLOW_KEY_APPROVALS":               strconv.FormatBool(cfg.AllowKeyApprovals),
+		"WARDRYX_SIGNAL_EVENTS":                     cfg.SignalEvents,
+		"WARDRYX_SIGNAL_EVENTS_MAX_AGE":             signalMaxAge.String(),
 	}
 }
 
