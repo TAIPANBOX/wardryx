@@ -50,6 +50,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"log/slog"
 	"net/http"
 	"sort"
 	"strconv"
@@ -71,8 +72,10 @@ import (
 	"github.com/TAIPANBOX/wardryx/internal/store"
 )
 
-// Event types Server emits (source "wardryx"), matching the spec's
-// enumerated set exactly. See emit.
+// Event types Server emits (source "wardryx"): the row agent-passport SPEC.md 6.2
+// gives wardryx, each at the severity the row gives it, and nothing else
+// (invariant 50, scripts/bus-types-are-registered.sh). A fact that row has no type
+// for is a log line, not an event: see logPendingCapReached and logPolicySetLoaded.
 const (
 	evPolicyAllow       = "policy_allow"
 	evPolicyDeny        = "policy_deny"
@@ -92,15 +95,23 @@ const (
 	// with no decision (F-001 of the 2026-10-17 review). Not a decision, so
 	// replay counts it as none.
 	evAgentAssertionRefused = "agent_assertion_refused"
-	// An agent reached the pending cap: its holds of the floor stay holds and
-	// stay recorded, and no longer add a row a person can answer (invariant 48).
-	// Once per agent per process. Not a decision, so replay counts it as none.
-	evApprovalQueueFull = "approval_queue_full"
-	// The set a process decides under from its first request, written once at
-	// start. The policy file is read at start and nothing else records it, so
-	// without this an edit of the file leaves no trace between two decisions that
-	// happen to name different versions (invariant 49).
-	evPolicyLoaded = "policy_loaded"
+)
+
+// The log lines that carry what SPEC 6.2 gives wardryx no type for. Each is a
+// structured line (log/slog through the standard logger, so it lands where every
+// other line of this service does), and the message is fixed so an operator can
+// grep for it. 2.6.0 wrote both as events, approval_queue_full and policy_loaded,
+// which put two types on the shared bus that no consumer had been told exist
+// (invariant 50).
+const (
+	// An agent reached the pending cap: its holds of the floor stay holds, each
+	// recorded as approval_requested with queue_full, and no longer add a row a
+	// person can answer (invariant 48). Once per agent per process.
+	logPendingCapReached = "wardryx: an agent reached its pending cap"
+	// The set a process decides under from its first request, said once at start.
+	// The policy file is read at start and at no other time; the archive keeps the
+	// set itself, and this line says which version it was (invariant 49).
+	logPolicySetLoaded = "wardryx: policy set loaded"
 )
 
 // authAgentID is the agent_id of an agent_assertion_refused event. The agent
@@ -306,12 +317,13 @@ func ParsePendingPerAgent(raw string) (int, error) {
 // SetPendingPerAgent overrides [DefaultPendingPerAgent].
 func (s *Server) SetPendingPerAgent(n int) { s.pendingPerAgent = n }
 
-// RecordPolicyLoaded writes the policy_loaded event: the version this process
-// decides under, and how many policies make it up. serve calls it once, after the
-// store's policies are restored and before the first request, so a version that
-// appears in the record for the first time has this line in front of it. It goes
-// through emit: a start is not a decision, and a record that cannot be written is
-// already what /readyz reports.
+// RecordPolicyLoaded logs the set this process decides under: its version, how many
+// policies make it up, the names of its floors, and the archived file that holds
+// it. serve calls it once, after the store's policies are restored and before the
+// first request, so a version that appears in the record for the first time has
+// this line in front of it in the log. The set itself is the archive's to keep
+// (invariant 17), and it is kept before this runs; with no archive the line says
+// archived=none. It writes nothing to the shared bus (invariant 50).
 func (s *Server) RecordPolicyLoaded() {
 	set := s.engine.CurrentSet()
 	floors := make([]string, 0, 1)
@@ -320,12 +332,17 @@ func (s *Server) RecordPolicyLoaded() {
 			floors = append(floors, p.Name)
 		}
 	}
-	s.emit(evPolicyLoaded, event.SeverityInfo, systemAgentID, "", nil, map[string]any{
-		"policy_version":  set.Version(),
-		"policies":        set.Len(),
-		"base_policies":   len(s.basePolicies),
-		"no_grant_floors": floors,
-	})
+	archived := s.policyArchive.File(set.Version())
+	if archived == "" {
+		archived = "none"
+	}
+	slog.Info(logPolicySetLoaded,
+		"policy_version", set.Version(),
+		"policies", set.Len(),
+		"base_policies", len(s.basePolicies),
+		"no_grant_floors", floors,
+		"archived", archived,
+	)
 }
 
 // SetUnansweredAfter overrides [DefaultUnansweredAfter]. Zero or negative
@@ -1040,10 +1057,13 @@ func (s *Server) requestApproval(ctx context.Context, req pdp.DecideRequest, res
 	return store.Approval{}, true, nil
 }
 
-// reportQueueFull raises approval_queue_full the first time an agent reaches the
-// cap in this process and says nothing the next time, so an agent in a loop cannot
-// fill the record with the news that it is in a loop. The hold events it goes on
-// producing carry queue_full.
+// reportQueueFull logs the first time an agent reaches the cap in this process and
+// says nothing the next time, so an agent in a loop cannot fill the log with the
+// news that it is in a loop. The fact is on the bus already: every hold that found
+// the queue full is recorded as approval_requested with queue_full, a type SPEC 6.2
+// lists. A warning, because those holds are ones nobody is asked about. The agent id
+// is the caller's word and slog quotes it, so a line break in it stays inside the
+// line.
 func (s *Server) reportQueueFull(agentID, runID string) {
 	s.queueFullMu.Lock()
 	seen := s.queueFullSeen[agentID]
@@ -1052,9 +1072,11 @@ func (s *Server) reportQueueFull(agentID, runID string) {
 	if seen {
 		return
 	}
-	s.emit(evApprovalQueueFull, event.SeverityHigh, agentID, runID, nil, map[string]any{
-		"pending_limit": s.pendingPerAgent,
-	})
+	slog.Warn(logPendingCapReached,
+		"agent_id", agentID,
+		"run_id", runID,
+		"pending_limit", s.pendingPerAgent,
+	)
 }
 
 // --- POST /v1/filter-tools ---

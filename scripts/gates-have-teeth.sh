@@ -814,6 +814,54 @@ run_case "no-grant: the rule is gone" fail \
 	"$(py 'import os; os.remove("internal/pdp/no_grant.go")')" \
 	"measured nothing"
 
+# Invariant 50: every test reads back what it wrote and finds it there, so a type
+# the shared row does not carry, or a listed type at another band, turns no suite
+# red by itself. 2.6.0 shipped two such types with every check green.
+run_case "bus-types: an emit of a type SPEC 6.2 does not list" fail \
+	'./scripts/bus-types-are-registered.sh' \
+	"$(py 'edit("internal/api/api.go", "\tslog.Warn(logPendingCapReached,", "\ts.emit(\"approval_queue_full\", event.SeverityHigh, agentID, runID, nil, nil)\n\tslog.Warn(logPendingCapReached,")')" \
+	"SPEC 6.2 does not list it there"
+
+run_case "bus-types: a listed type at a severity the row does not give it" fail \
+	'./scripts/bus-types-are-registered.sh' \
+	"$(py 'edit("internal/api/api.go", "s.emit(evApprovalUnanswered, event.SeverityHigh,", "s.emit(evApprovalUnanswered, event.SeverityMedium,")')" \
+	"SPEC 6.2 gives it high"
+
+run_case "bus-types: a type computed at the call site" fail \
+	'./scripts/bus-types-are-registered.sh' \
+	"$(py 'edit("internal/api/api.go", "s.emit(evPolicyUpdated, event.SeverityHigh, systemAgentID", "s.emit(policyEventType(p), event.SeverityHigh, systemAgentID")')" \
+	"cannot be read (policyEventType(p))"
+
+run_case "bus-types: a severity chosen at the call site" fail \
+	'./scripts/bus-types-are-registered.sh' \
+	"$(py 'edit("internal/api/api.go", "s.emit(evApprovalUnanswered, event.SeverityHigh,", "s.emit(evApprovalUnanswered, severityFor(a),")')" \
+	"never chosen at the call site"
+
+run_case "bus-types: a listed type nothing writes any more" fail \
+	'./scripts/bus-types-are-registered.sh' \
+	"$(py 'edit("internal/api/api.go", "s.emit(evApprovalTimeout, event.SeverityHigh,", "s.note(evApprovalTimeout, event.SeverityHigh,")')" \
+	"approval_timeout under wardryx and no emit site writes it"
+
+run_case "bus-types: a second writer of the envelope" fail \
+	'./scripts/bus-types-are-registered.sh' \
+	"$(py 'edit("internal/api/api.go", "func (s *Server) emit(", "func (s *Server) sideWrite() {\n\t_ = s.records.Write(event.Event{Type: \"policy_loaded\"})\n}\n\nfunc (s *Server) emit(")')" \
+	"outside writeRecord"
+
+# A comment naming an old type, and a log line carrying its name, are not writers.
+run_case "bus-types: a comment and a log line naming an unlisted type" pass \
+	'./scripts/bus-types-are-registered.sh' \
+	"$(py 'edit("internal/api/api.go", "\tslog.Warn(logPendingCapReached,", "\t// 2.6.0: s.emit(evApprovalQueueFull, event.SeverityHigh, agentID, runID, nil, nil)\n\tslog.Debug(\"approval_queue_full\")\n\tslog.Warn(logPendingCapReached,")')"
+
+run_case "bus-types: the copy of the row is gone" fail \
+	'./scripts/bus-types-are-registered.sh' \
+	"$(py 'import os; os.remove("internal/api/testdata/spec-6.2-wardryx.json")')" \
+	"measured nothing"
+
+run_case "bus-types: the writer is gone" fail \
+	'./scripts/bus-types-are-registered.sh' \
+	"$(py 'edit("internal/api/api.go", "func (s *Server) writeRecord(", "func (s *Server) appendRecord(")')" \
+	"measured nothing"
+
 echo
 if [ -n "$(git status --porcelain)" ]; then
 	printf 'FAIL: this script left the tree dirty, so it cannot be trusted about anything above\n'
