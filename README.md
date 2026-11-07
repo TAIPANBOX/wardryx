@@ -390,7 +390,7 @@ hold_if_signal:
   min_probability: 1
 ```
 
-(The same policy, with its comments, is [docs/examples/hold-while-the-budget-is-spent.yaml](docs/examples/hold-while-the-budget-is-spent.yaml).) Start wardryx with `WARDRYX_SIGNAL_EVENTS` pointing at the file. From then on a tool call of an agent with a live `exhausted` or `fast_burn` event is held for a person, and the reason names the signal and its value. A granted approval lets that one call through, as for any hold. **It is off unless the setting is set, and it changes nothing without a rule that reads it**: with the file configured and no `hold_if_signal` on `slo_burn`, every decision is the one it would have been, with the same `policy_version`.
+(The same policy, with its comments, is [docs/examples/hold-while-the-budget-is-spent.yaml](docs/examples/hold-while-the-budget-is-spent.yaml).) Start wardryx with `WARDRYX_SIGNAL_EVENTS` pointing at the file. From then on every call of an agent with a live `exhausted` or `fast_burn` event is held for a person, model calls as well as tool calls, because a signal that is present holds any decision and only a missing one needs a tool call. The reason names the signal and its value. A granted approval lets that one call through, as for any hold. **It is off unless the setting is set, and it changes nothing without a rule that reads it**: with the file configured and no `hold_if_signal` on `slo_burn`, every decision is the one it would have been, with the same `policy_version`.
 
 **What the signal says.** Every decision of an agent carries one signal named `slo_burn` while the file can be believed, always at probability 1 (a line in the file is a fact the quality plane established, not an estimate), and its value is one of:
 
