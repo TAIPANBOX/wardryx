@@ -81,6 +81,12 @@ jobs:
       - name: the floor is the file's, and rule 15 keeps its shape
         run: ./scripts/no-grant-hold-is-file-only.sh
 
+      # Invariant 50: every test reads back what it wrote, so a type the shared
+      # registry does not list for wardryx turns no suite red. 2.6.0 shipped two,
+      # and only estate-gates C4 saw them, after the merge.
+      - name: the bus carries only the types SPEC 6.2 lists for wardryx
+        run: ./scripts/bus-types-are-registered.sh
+
       # Last, because it mutates tracked files and restores them. It needs a
       # clean tree and says so plainly, so it also reports any earlier step
       # that starts writing into the checkout.

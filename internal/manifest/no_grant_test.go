@@ -115,11 +115,60 @@ func TestTheBuiltBinaryHoldsAToolCallNothingGrants(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(evs) == 0 || evs[0].Type != "policy_loaded" {
-		t.Fatalf("the first event is not policy_loaded: %+v", evs)
+	// The built binary's own record carries only what SPEC 6.2 lists under wardryx,
+	// at the severity it gives (invariant 50): no start event, and no event for the
+	// agent that reached the cap, whose holds carry queue_full instead.
+	row := specRow(t)
+	if len(evs) == 0 || evs[0].Type != "approval_requested" {
+		t.Fatalf("the first event is not the first hold: the start writes nothing to the bus: %+v", evs)
 	}
-	loaded, _ := evs[0].Data["policy_version"].(string)
-	if loaded == "" || !strings.Contains(out.String(), loaded) {
-		t.Fatalf("policy_loaded names version %q and the start line does not:\n%s", loaded, out.String())
+	full := 0
+	for _, ev := range evs {
+		if want, listed := row[ev.Type]; !listed || ev.Severity != want {
+			t.Errorf("the record carries %q at %q; SPEC 6.2 gives wardryx %v", ev.Type, ev.Severity, row)
+		}
+		if ev.Data["queue_full"] == true {
+			full++
+		}
 	}
+	if full != 1 {
+		t.Errorf("%d hold(s) carry queue_full, want the one past WARDRYX_PENDING_PER_AGENT=1", full)
+	}
+	// The start and the cap are in the log: the start line names the version the
+	// first decision names, and the cap line names the agent once.
+	first, _ := evs[0].Data["policy_version"].(string)
+	start := lineWith(out.String(), "wardryx: policy set loaded ")
+	if first == "" || !strings.Contains(start, "policy_version="+first+" ") || !strings.Contains(start, "no_grant_floors=[tool-hold] ") {
+		t.Fatalf("the first decision names version %q and the start line is %q:\n%s", first, start, out.String())
+	}
+	if n := strings.Count(out.String(), "wardryx: an agent reached its pending cap agent_id=agent://acme.example/agents/worker run_id=r1 pending_limit=1"); n != 1 {
+		t.Fatalf("the pending cap was logged %d time(s), want once:\n%s", n, out.String())
+	}
+}
+
+// specRow reads the copy of SPEC 6.2's wardryx row that internal/api's tests and
+// scripts/bus-types-are-registered.sh read: type to severity.
+func specRow(t *testing.T) map[string]string {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join("..", "api", "testdata", "spec-6.2-wardryx.json"))
+	if err != nil {
+		t.Fatalf("the copy of SPEC 6.2's wardryx row is not readable: %v", err)
+	}
+	var row struct {
+		Types map[string]string `json:"types"`
+	}
+	if err := json.Unmarshal(raw, &row); err != nil || len(row.Types) == 0 {
+		t.Fatalf("the copy of SPEC 6.2's wardryx row lists nothing (%v)", err)
+	}
+	return row.Types
+}
+
+// lineWith is the first line of s that contains needle, or "".
+func lineWith(s, needle string) string {
+	for _, line := range strings.Split(s, "\n") {
+		if strings.Contains(line, needle) {
+			return line
+		}
+	}
+	return ""
 }

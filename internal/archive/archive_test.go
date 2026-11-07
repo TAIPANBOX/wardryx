@@ -364,3 +364,28 @@ func TestAVersionOfADifferentLengthIsStillAcceptable(t *testing.T) {
 		}
 	}
 }
+
+// TestFileNamesWhereAKeptVersionLives: serve's start line names the file that holds
+// the set it decides under (invariant 49), so the name must be the one Keep writes,
+// and a path-shaped version or a disabled archive must name nothing.
+func TestFileNamesWhereAKeptVersionLives(t *testing.T) {
+	a := newTemp(t)
+	s := set(t, "good.example.com")
+	if err := a.Keep(s); err != nil {
+		t.Fatalf("Keep: %v", err)
+	}
+	got := a.File(s.Version())
+	if got != filepath.Join(a.dir, s.Version()+".json") {
+		t.Fatalf("File(%s) = %q, want the file in %s", s.Version(), got, a.dir)
+	}
+	if _, err := os.Stat(got); err != nil {
+		t.Fatalf("File names %s and Keep wrote no such file: %v", got, err)
+	}
+	if got := a.File("../../etc/passwd"); got != "" {
+		t.Errorf("a path-shaped version names %q", got)
+	}
+	var off *Archive
+	if got := off.File(s.Version()); got != "" {
+		t.Errorf("a disabled archive names %q", got)
+	}
+}

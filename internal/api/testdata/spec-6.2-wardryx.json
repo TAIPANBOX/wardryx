@@ -1,0 +1,26 @@
+{
+  "$comment": [
+    "The row agent-passport SPEC.md section 6.2 gives source wardryx: every type this",
+    "service may write onto the shared event bus, with the severity the row gives it.",
+    "It is a copy, and the spec is the original: a type joins this file in the same",
+    "change that adds its emit, and only after the spec lists it (invariant 50).",
+    "Read by scripts/bus-types-are-registered.sh against every emit site, and by the",
+    "tests in internal/api/bus_registry_test.go and internal/manifest against what the",
+    "server and the built binary actually write. estate-gates C4 compares the spec",
+    "itself with the code; this copy is what lets a push be refused before C4 runs."
+  ],
+  "spec": "agent-passport SPEC.md section 6.2",
+  "source": "wardryx",
+  "types": {
+    "policy_allow": "info",
+    "policy_deny": "high",
+    "approval_requested": "medium",
+    "approval_granted": "info",
+    "approval_denied": "high",
+    "approval_timeout": "high",
+    "approval_unanswered": "high",
+    "policy_updated": "high",
+    "agent_assertion_refused": "high",
+    "identity_mismatch": "high"
+  }
+}

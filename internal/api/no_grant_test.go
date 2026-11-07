@@ -406,30 +406,6 @@ func TestOverThePendingCapTheVerdictStaysAndNoRowIsAdded(t *testing.T) {
 	}
 }
 
-func TestTheQueueFullEventFiresOncePerAgentPerProcess(t *testing.T) {
-	h := newSigHarness(t, true, floorPol())
-	h.srv.SetPendingPerAgent(1)
-	for i := 0; i < 6; i++ {
-		h.brokerDecide(t, "fetch_url", fmt.Sprintf(`{"u":%d}`, i), "")
-	}
-	other := "agent://acme.example/agents/other"
-	for i := 0; i < 3; i++ {
-		h.decideRaw(t, brokerCall(other, "r", "fetch_url", fmt.Sprintf(`{"u":%d}`, i), ""))
-	}
-	got := map[string]int{}
-	for _, ev := range h.read(t) {
-		if ev.Type == evApprovalQueueFull {
-			got[ev.AgentID]++
-			if ev.Data["pending_limit"] != float64(1) {
-				t.Errorf("pending_limit = %v", ev.Data["pending_limit"])
-			}
-		}
-	}
-	if got[floorAgentID] != 1 || got[other] != 1 || len(got) != 2 {
-		t.Fatalf("approval_queue_full fired %v, want once for each of the two agents", got)
-	}
-}
-
 func TestThePendingCapIsPerAgent(t *testing.T) {
 	h := newSigHarness(t, true, floorPol())
 	h.srv.SetPendingPerAgent(1)
@@ -456,6 +432,7 @@ func TestAnAnsweredRowFreesItsPlaceUnderTheCap(t *testing.T) {
 // belong to the floor's holds, and a deployment that has none sees every hold it
 // saw, one row each, however many there are.
 func TestWithNoFloorTheQueueIsWhatItWas(t *testing.T) {
+	logged := captureLog(t)
 	h := newSigHarness(t, true, policy.Policy{
 		Name: "must-ask", Target: "agent://*",
 		HoldIfSignal: &policy.SignalRule{Name: "s", Values: []string{"v"}, MinProbability: usd(0), WhenAbsent: policy.WhenAbsentHold},
@@ -466,10 +443,8 @@ func TestWithNoFloorTheQueueIsWhatItWas(t *testing.T) {
 	if first.ApprovalID == "" || second.ApprovalID == "" || first.ApprovalID == second.ApprovalID {
 		t.Fatalf("with no floor one call held twice got %q and %q, want two rows as before", first.ApprovalID, second.ApprovalID)
 	}
-	for _, ev := range h.read(t) {
-		if ev.Type == evApprovalQueueFull {
-			t.Fatal("approval_queue_full fired with no floor in force")
-		}
+	if n := countLines(logged.String(), pendingCapLine); n != 0 {
+		t.Fatalf("the pending cap was logged %d time(s) with no floor in force", n)
 	}
 }
 
@@ -533,30 +508,6 @@ func TestThePendingCapIsReadFromAWholeNumberOfAtLeastOne(t *testing.T) {
 		if n, err := ParsePendingPerAgent(bad); err == nil {
 			t.Errorf("%q read as %d: a typo must not read as a queue with no bound", bad, n)
 		}
-	}
-}
-
-func TestPolicyLoadedRecordsTheVersionADecisionWillName(t *testing.T) {
-	h := newSigHarness(t, true, floorPol(), policy.Policy{Name: "g", Target: floorAgentID, GrantTool: []string{"ask"}})
-	h.srv.RecordPolicyLoaded()
-	got := h.brokerDecide(t, "ask", `{}`, "")
-	evs := h.read(t)
-	if len(evs) != 2 || evs[0].Type != evPolicyLoaded {
-		t.Fatalf("events: %+v, want policy_loaded and then the decision", evs)
-	}
-	ev := evs[0]
-	if ev.Data["policy_version"] != got.PolicyVersion || ev.AgentID != systemAgentID || ev.Source != "wardryx" {
-		t.Fatalf("policy_loaded = %+v, want the version the decision names (%s)", ev, got.PolicyVersion)
-	}
-	if ev.Data["policies"] != float64(2) || ev.Data["base_policies"] != float64(2) {
-		t.Errorf("counts: %v", ev.Data)
-	}
-	floors, _ := ev.Data["no_grant_floors"].([]any)
-	if len(floors) != 1 || floors[0] != "tool-hold" {
-		t.Errorf("no_grant_floors = %v", ev.Data["no_grant_floors"])
-	}
-	if report := replay.Run(evs, h.arch, nil); report.Total != 1 {
-		t.Fatalf("replay counted %d decisions, want policy_loaded left out: %+v", report.Total, report)
 	}
 }
 

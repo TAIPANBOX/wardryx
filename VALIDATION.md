@@ -269,6 +269,12 @@ and one fleet-wide `deny_tool`, then the candidate report, then the floor on.
 | the record | two `policy_loaded` events, `9e5d23cb3d6f` with no floor and `6c5914b6007f` with `tool-hold` |
 | `wardryx replay` of the whole record | 46 decisions: 44 reproduced, 1 approval decided, 1 approval spent, none diverged, the allows from before the floor word for word |
 
+The rows naming `approval_queue_full` and `policy_loaded` were measured on 2.6.0. From 2.6.1 the bus carries
+neither type, because agent-passport SPEC 6.2 lists neither under wardryx (invariant 50): the first is the
+`queue_full` member each such hold already carried plus one warning line in the log, and the second is one line
+in the log at start beside the policy archive (invariants 48 and 49). `TestTheBuiltBinaryHoldsAToolCallNothingGrants`
+holds that form on the built binary in CI.
+
 ## Method
 
 Disposable Hetzner VPS boxes (deleted after each run), Wardryx running as a PEP in front of a real

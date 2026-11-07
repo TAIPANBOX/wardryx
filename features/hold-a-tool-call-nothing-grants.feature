@@ -181,10 +181,10 @@ Feature: A tool call of an agent nothing grants is held for a person
   Scenario: past the pending cap the verdict stays and no row is added
     Given an agent at its pending cap
     When another call is held
-    Then the verdict and the reason are the same, the event is written, no row is added
-    And approval_queue_full fires once for that agent
+    Then the verdict and the reason are the same, the event is written with queue_full, no row is added
+    And one log line names that agent once, and nothing else reaches the bus
     # -> internal/api:TestOverThePendingCapTheVerdictStaysAndNoRowIsAdded
-    # -> internal/api:TestTheQueueFullEventFiresOncePerAgentPerProcess
+    # -> internal/api:TestAnAgentPastTheCapIsLoggedOncePerProcess
     # -> internal/api:TestThePendingCapIsPerAgent
 
   Scenario: a candidate floor reports what it would hold before anything is enabled
@@ -211,10 +211,12 @@ Feature: A tool call of an agent nothing grants is held for a person
     # -> cmd/wardryx:TestCheckSaysWhatTheFloorDoesToEachAgent
 
   Scenario: an edit of the policy file leaves a trace
-    Given a process that starts with an events file
+    Given a process that starts with a policy archive
     When it comes up
-    Then a policy_loaded event names the version its first decision will name
-    # -> internal/api:TestPolicyLoadedRecordsTheVersionADecisionWillName
+    Then one log line names the version its first decision will name, and the archived file that holds that set
+    And with no archive the line says nothing keeps it
+    # -> internal/api:TestTheStartIsLoggedWithTheVersionTheFirstDecisionNames
+    # -> internal/api:TestTheStartLineSaysWhenNothingKeepsTheSet
 
   Scenario: an id written to be read by a person arrives as quoted data
     Given an agent id with a line break and an instruction in it

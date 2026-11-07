@@ -204,6 +204,20 @@ func (a *Archive) Get(version string) ([]policy.Policy, error) {
 	return policies, nil
 }
 
+// File is the path a kept version lives at, for a log line or an operator to
+// follow. It is "" when no archive is configured or version is not shaped like
+// one, and it does not say the file exists: Keep is what puts it there.
+func (a *Archive) File(version string) string {
+	if a == nil {
+		return ""
+	}
+	path, err := a.path(version)
+	if err != nil {
+		return ""
+	}
+	return path
+}
+
 // Versions lists every archived version, unordered.
 func (a *Archive) Versions() ([]string, error) {
 	if a == nil {
