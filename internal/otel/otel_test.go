@@ -201,11 +201,21 @@ func TestExportDoesNotBlockCaller(t *testing.T) {
 	// A server that never responds within the test's patience -- Export
 	// must still return immediately, proving it never blocks on the POST.
 	block := make(chan struct{})
-	defer close(block)
+	arrived := make(chan struct{}, 1)
 	server := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
+		select {
+		case arrived <- struct{}{}:
+		default:
+		}
 		<-block
 	}))
+	// Deferred calls run last in, first out, so the handler is released before the
+	// server is closed. Close waits for every request in flight, and a handler still
+	// waiting on its channel waits for Close in turn: in the other order this test
+	// hung until the package timeout whenever the POST reached the handler first,
+	// which a loaded CI runner did on 2026-11-07.
 	defer server.Close()
+	defer close(block)
 
 	exp := New(server.URL)
 	done := make(chan struct{})
@@ -217,6 +227,12 @@ func TestExportDoesNotBlockCaller(t *testing.T) {
 	case <-done:
 	case <-time.After(1 * time.Second):
 		t.Fatal("Export blocked the caller instead of firing the POST in the background")
+	}
+	// The POST was fired, in the background, and is held by the server.
+	select {
+	case <-arrived:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Export returned and never posted the span")
 	}
 }
 
