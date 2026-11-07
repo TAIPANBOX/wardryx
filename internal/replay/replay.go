@@ -114,6 +114,11 @@ type Row struct {
 	Note string
 	// Candidate is nil unless the row reproduced.
 	Candidate *pdp.DecideResponse
+	// Ungranted lists the tools the candidate's floor would hold on this row, the
+	// tools named by no grant. Empty unless Candidate is a hold of the floor.
+	Ungranted []string
+	// TS is the event's own time.
+	TS string
 }
 
 // Changed reports whether the candidate set would have decided differently.
@@ -122,8 +127,8 @@ func (r Row) Changed() bool {
 }
 
 // Report is the whole run. Every count is over decisions actually found:
-// Total is the sum of the five fidelities, and Changed is a subset of
-// Reproduced plus ApprovalDecided.
+// Total is the sum of the seven fidelities, and Changed is a subset of
+// Replayable.
 type Report struct {
 	Rows            []Row
 	Total           int
@@ -135,6 +140,21 @@ type Report struct {
 	Unreadable      int
 	Diverged        int
 	Changed         int
+	// WouldHold is what the candidate's floor would hold, one entry per agent and
+	// tool, sorted. It reads every decision that was replayed, whatever its verdict
+	// was, so it is the question to ask before a floor is turned on: which calls
+	// that went through would wait for a person, and what to grant so they do not.
+	WouldHold []HeldTool
+}
+
+// HeldTool is one agent and tool a candidate's floor would hold.
+type HeldTool struct {
+	AgentID string `json:"agent_id"`
+	Tool    string `json:"tool"`
+	// Calls is how many replayed decisions would have held on this tool.
+	Calls int `json:"calls"`
+	// Last is the time of the latest of them, as the event carries it.
+	Last string `json:"last"`
 }
 
 // Replayable is how many rows carried a counterfactual at all.
@@ -176,7 +196,40 @@ func Run(events []event.Event, arch *archive.Archive, candidate *policy.Set) Rep
 			report.Changed++
 		}
 	}
+	report.WouldHold = heldTools(report.Rows)
 	return report
+}
+
+// heldTools folds the rows a candidate's floor would hold into one entry per agent
+// and tool, in a stable order, so two runs over one history read the same.
+func heldTools(rows []Row) []HeldTool {
+	type key struct{ agent, tool string }
+	byKey := map[key]*HeldTool{}
+	for _, row := range rows {
+		for _, tool := range row.Ungranted {
+			k := key{row.AgentID, tool}
+			h := byKey[k]
+			if h == nil {
+				h = &HeldTool{AgentID: row.AgentID, Tool: tool}
+				byKey[k] = h
+			}
+			h.Calls++
+			if row.TS > h.Last {
+				h.Last = row.TS
+			}
+		}
+	}
+	out := make([]HeldTool, 0, len(byKey))
+	for _, h := range byKey {
+		out = append(out, *h)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].AgentID != out[j].AgentID {
+			return out[i].AgentID < out[j].AgentID
+		}
+		return out[i].Tool < out[j].Tool
+	})
+	return out
 }
 
 func replayOne(ev event.Event, verdict string, arch *archive.Archive, candidate *policy.Set) Row {
@@ -186,6 +239,7 @@ func replayOne(ev event.Event, verdict string, arch *archive.Archive, candidate 
 		Type:     ev.Type,
 		Recorded: verdict,
 		Baseline: verdict,
+		TS:       ev.TS,
 	}
 
 	req, version, tokenRequired, err := question(ev)
@@ -256,8 +310,12 @@ func replayOne(ev event.Event, verdict string, arch *archive.Archive, candidate 
 	}
 
 	if candidate != nil {
-		answer := pdp.New(candidate, nil).Decide(req)
+		engine := pdp.New(candidate, nil)
+		answer := engine.Decide(req)
 		row.Candidate = &answer
+		if answer.Decision == pdp.Hold && answer.HoldKind == pdp.HoldKindNoGrant {
+			row.Ungranted = engine.Ungranted(req)
+		}
 	}
 	return row
 }
@@ -466,6 +524,41 @@ func text(v any) string {
 	return s
 }
 
+// JSON is what `wardryx replay -format json` prints, the same run for a program to
+// read. Unexamined is there beside WouldHold for the reason Format prints the two
+// together: an installer that reads "nothing would be held" off a history it could
+// not replay has read nothing. Rows is left out: it carries what the record carries
+// and the record is already on disk.
+type JSON struct {
+	Source          string     `json:"source"`
+	Candidate       string     `json:"candidate,omitempty"`
+	Total           int        `json:"total"`
+	Reproduced      int        `json:"reproduced"`
+	ApprovalDecided int        `json:"approval_decided"`
+	ApprovalSpent   int        `json:"approval_spent"`
+	ApprovalRefused int        `json:"approval_refused"`
+	NotArchived     int        `json:"not_archived"`
+	Unreadable      int        `json:"unreadable"`
+	Diverged        int        `json:"diverged"`
+	Unexamined      int        `json:"unexamined"`
+	Changed         int        `json:"changed"`
+	WouldHold       []HeldTool `json:"would_hold"`
+}
+
+// AsJSON renders r for a program.
+func AsJSON(r Report, source, candidateName string) JSON {
+	held := r.WouldHold
+	if held == nil {
+		held = []HeldTool{}
+	}
+	return JSON{
+		Source: source, Candidate: candidateName, Total: r.Total, Reproduced: r.Reproduced,
+		ApprovalDecided: r.ApprovalDecided, ApprovalSpent: r.ApprovalSpent, ApprovalRefused: r.ApprovalRefused,
+		NotArchived: r.NotArchived, Unreadable: r.Unreadable, Diverged: r.Diverged,
+		Unexamined: r.NotArchived + r.Unreadable + r.Diverged, Changed: r.Changed, WouldHold: held,
+	}
+}
+
 // Format renders a report the way an operator reads it: what could be
 // replayed, what could not, and only then what would change. The order is
 // deliberate. A count of changes is meaningless without the count of
@@ -524,6 +617,16 @@ func Format(r Report, source, candidateName string) string {
 		fmt.Fprintf(&b, "\n  %s -> %s   %s  run %s\n", row.Baseline, row.Candidate.Decision, row.AgentID, row.RunID)
 		fmt.Fprintf(&b, "        was: %s\n", row.Reason)
 		fmt.Fprintf(&b, "        now: %s\n", row.Candidate.Reason)
+	}
+
+	if len(r.WouldHold) > 0 {
+		fmt.Fprintf(&b, "\nUnder %s these tool calls would wait for a person (when_no_grant):\n", candidateName)
+		fmt.Fprintf(&b, "  %-6s  %-25s  %-24s  %s\n", "CALLS", "LAST", "TOOL", "AGENT")
+		for _, h := range r.WouldHold {
+			// Quoted: an agent id and a tool name are whatever a caller wrote, and
+			// this goes to a terminal.
+			fmt.Fprintf(&b, "  %-6d  %-25s  %-24q  %q\n", h.Calls, h.Last, h.Tool, h.AgentID)
+		}
 	}
 
 	if unexamined > 0 {

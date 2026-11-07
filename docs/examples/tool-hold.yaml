@@ -1,0 +1,34 @@
+# Hold every tool call of an agent until something grants the tool.
+#
+# The floor below makes wardryx hold, for a person, a tool call of any agent that
+# nothing grants. Model calls and egress questions pass as they did. Only a grant
+# lifts the hold, on a target that names a trust domain: a deny_tool, a max_steps or
+# a signal rule on the agent changes nothing about it, because a restriction is
+# not a permission.
+#
+# Before you turn it on, ask what it would hold, over what your agents actually did:
+#
+#   wardryx replay -events events.ndjson -archive archive/ -policy docs/examples/tool-hold.yaml
+#
+# The floor is read from this file at start. PUT /v1/policies/{id} refuses the key,
+# so keep this block in the file. Grants can live here too, or be written through
+# that route, where they take effect with no restart.
+- name: tool-hold
+  # "*" and not agent://*: an agent id with no scheme must not escape.
+  target: "*"
+  when_no_grant: hold
+
+# One agent, the tools it needs. require_identity_source keeps a static key from
+# borrowing this agent's name, and deny_if_chain_unproven keeps a delegated call
+# honest: a grant says what the agent may do, not who it is.
+- name: grant-operator-web
+  target: agent://acme.example/agents/operator
+  grant_tool: [fetch_url, browse]
+  require_identity_source: [agent-token]
+  deny_if_chain_unproven: true
+
+# Every tool, for one trust domain. Written here on purpose: this is the widest a
+# grant can be, and a target with no domain in it is refused at load.
+- name: grant-drills
+  target: agent://drills.acme.example/*
+  grant_tool: ["*"]

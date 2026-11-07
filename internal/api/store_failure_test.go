@@ -42,10 +42,16 @@ type brokenStore struct{}
 
 func (brokenStore) Ping(context.Context) error                           { return errStoreIsDown }
 func (brokenStore) CreateApproval(context.Context, store.Approval) error { return errStoreIsDown }
+func (brokenStore) CreateApprovalOnce(context.Context, store.Approval, string, int) (store.Approval, store.PendingOutcome, error) {
+	return store.Approval{}, store.PendingCreated, errStoreIsDown
+}
 func (brokenStore) GetApproval(context.Context, string) (store.Approval, error) {
 	return store.Approval{}, errStoreIsDown
 }
 func (brokenStore) ListApprovals(context.Context) ([]store.Approval, error) {
+	return nil, errStoreIsDown
+}
+func (brokenStore) ListPendingApprovals(context.Context) ([]store.Approval, error) {
 	return nil, errStoreIsDown
 }
 func (brokenStore) DecideApproval(context.Context, string, string, string, string, time.Time) (store.Approval, error) {

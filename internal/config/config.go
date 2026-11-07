@@ -133,6 +133,11 @@ type Config struct {
 	// SignalEventsMaxAge is WARDRYX_SIGNAL_EVENTS_MAX_AGE: how long after its time
 	// an event keeps signalling. Unset is 48h; the cmd layer checks the rest.
 	SignalEventsMaxAge string
+	// PendingPerAgent is WARDRYX_PENDING_PER_AGENT: how many approvals an agent may
+	// have waiting before a hold of the floor adds no row (invariant 48). Unset is
+	// api.DefaultPendingPerAgent; api.ParsePendingPerAgent reads the rest, and
+	// serve refuses to start on what it refuses.
+	PendingPerAgent string
 }
 
 // FromEnv reads every WARDRYX_* variable once. Call it a single time per
@@ -168,6 +173,7 @@ func FromEnv() Config {
 		ApprovalV2Until:              os.Getenv("WARDRYX_APPROVAL_V2_UNTIL"),
 		SignalEvents:                 os.Getenv("WARDRYX_SIGNAL_EVENTS"),
 		SignalEventsMaxAge:           os.Getenv("WARDRYX_SIGNAL_EVENTS_MAX_AGE"),
+		PendingPerAgent:              os.Getenv("WARDRYX_PENDING_PER_AGENT"),
 	}
 }
 

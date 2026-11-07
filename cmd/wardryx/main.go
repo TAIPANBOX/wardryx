@@ -91,6 +91,7 @@ func runReplay(args []string) error {
 	eventsPath := fs.String("events", cfg.EventsPath, "NDJSON agent-event file to replay (WARDRYX_EVENTS_PATH)")
 	archiveDir := fs.String("archive", cfg.PolicyArchive, "policy archive directory (WARDRYX_POLICY_ARCHIVE)")
 	candidatePath := fs.String("policy", "", "candidate policy file or directory to test; empty asks only whether the history can be replayed at all")
+	format := fs.String("format", "human", "output format: human|json")
 	fs.Usage = func() {
 		fmt.Fprintf(os.Stderr, `usage: wardryx replay [flags]
 
@@ -103,12 +104,20 @@ named. It replays one decision, not the agent: if a candidate turns a refusal
 into an allowance, what the agent would have done next is a world nothing
 recorded.
 
+A candidate with when_no_grant is reported per agent and tool: what would wait
+for a person, how often, and when it last happened. Ask it before enabling a
+floor. -format json prints the same run for a program, and its unexamined count
+says how much of the history could not be asked.
+
 flags:
 `)
 		fs.PrintDefaults()
 	}
 	if err := fs.Parse(args); err != nil {
 		return err
+	}
+	if *format != "human" && *format != "json" {
+		return fmt.Errorf("unknown format %q", *format)
 	}
 	if *eventsPath == "" {
 		fs.Usage()
@@ -139,7 +148,15 @@ flags:
 	}
 
 	report := replay.Run(events, arch, candidate)
-	fmt.Print(replay.Format(report, *eventsPath, candidateName))
+	if *format == "json" {
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		if err := enc.Encode(replay.AsJSON(report, *eventsPath, candidateName)); err != nil {
+			return err
+		}
+	} else {
+		fmt.Print(replay.Format(report, *eventsPath, candidateName))
+	}
 
 	// A divergence means the record and this build disagree about the past,
 	// which is a finding and not a report. Everything else, including
@@ -181,6 +198,10 @@ func runServe(args []string) error {
 	}
 	if cfg.ApprovalSecret == "" && strings.TrimSpace(cfg.ApprovalSigner) == "" && policies.RequiresHumanApproval() {
 		fmt.Fprintln(os.Stderr, "wardryx: WARDRYX_APPROVAL_SECRET is empty but a policy requires human approval; hold decisions cannot be granted until it is set")
+	}
+	pendingPerAgent, err := api.ParsePendingPerAgent(cfg.PendingPerAgent)
+	if err != nil {
+		return err
 	}
 
 	var st store.Store
@@ -304,6 +325,7 @@ func runServe(args []string) error {
 			fmt.Fprintf(os.Stderr, "wardryx: approval key set from Keyryx not refreshed, keeping the set it has: %v\n", err)
 		})
 	}
+	srv.SetPendingPerAgent(pendingPerAgent)
 	srv.SetRecordFailOpen(cfg.RecordFailMode == "open")
 	if warn := recordFailModeWarning(cfg.RecordFailMode); warn != "" {
 		fmt.Fprintln(os.Stderr, warn)
@@ -343,6 +365,11 @@ func runServe(args []string) error {
 		}
 		engine.SetPolicies(restored)
 	}
+
+	// The version this process decides under, on the record before the first
+	// decision: the file is read here and at no other time, so this line is what
+	// shows an edit of it (invariant 49).
+	srv.RecordPolicyLoaded()
 
 	// The hold nobody decides. A sweep rather than a check on the request
 	// path, because the case is defined by the absence of requests: see
@@ -523,6 +550,10 @@ type checkResult struct {
 	Owner    string
 	Decision string
 	Reason   string
+	// ToolCalls says what a floor does to this agent's tool calls, or is empty when
+	// no floor matches it. A passport names no call, so Decision never reflects
+	// the floor; this is where a dry-run says which tools are granted.
+	ToolCalls string
 }
 
 // checkAgents loads every passport under passportDir and the policy set at
@@ -562,13 +593,29 @@ func checkAgents(passportDir, policyPath string) ([]checkResult, passports.Repor
 			ModelAbsent: true,
 		})
 		results = append(results, checkResult{
-			AgentID:  p.ID,
-			Owner:    p.Owner,
-			Decision: resp.Decision,
-			Reason:   resp.Reason,
+			AgentID:   p.ID,
+			Owner:     p.Owner,
+			Decision:  resp.Decision,
+			Reason:    resp.Reason,
+			ToolCalls: toolCallsLine(engine.ToolPosture(p.ID, "")),
 		})
 	}
 	return results, rep, policies.Version(), nil
+}
+
+// toolCallsLine is one agent's tool posture for the check's table: empty with no
+// floor, so a file with no floor prints what it always printed.
+func toolCallsLine(p pdp.ToolPosture) string {
+	switch {
+	case p.Floor == "":
+		return ""
+	case p.All:
+		return "granted: every tool"
+	case len(p.Granted) == 0:
+		return "held: nothing grants a tool"
+	default:
+		return "granted: " + strings.Join(p.Granted, ", ") + "; any other tool is held"
+	}
 }
 
 func runCheck(args []string) error {
@@ -613,7 +660,19 @@ func printCheckHuman(w io.Writer, results []checkResult, policyVersion string) {
 		fmt.Fprintln(w, "No passports found.")
 		return
 	}
+	floor := false
+	for _, r := range results {
+		floor = floor || r.ToolCalls != ""
+	}
 	tw := tabwriter.NewWriter(w, 0, 4, 2, ' ', 0)
+	if floor {
+		fmt.Fprintln(tw, "AGENT\tOWNER\tDECISION\tTOOL CALLS\tREASON")
+		for _, r := range results {
+			fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n", r.AgentID, r.Owner, r.Decision, orDash(r.ToolCalls), r.Reason)
+		}
+		_ = tw.Flush()
+		return
+	}
 	fmt.Fprintln(tw, "AGENT\tOWNER\tDECISION\tREASON")
 	for _, r := range results {
 		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", r.AgentID, r.Owner, r.Decision, r.Reason)
@@ -622,10 +681,11 @@ func printCheckHuman(w io.Writer, results []checkResult, policyVersion string) {
 }
 
 type checkResultJSON struct {
-	AgentID  string `json:"agent_id"`
-	Owner    string `json:"owner"`
-	Decision string `json:"decision"`
-	Reason   string `json:"reason"`
+	AgentID   string `json:"agent_id"`
+	Owner     string `json:"owner"`
+	Decision  string `json:"decision"`
+	Reason    string `json:"reason"`
+	ToolCalls string `json:"tool_calls,omitempty"`
 }
 
 func printCheckJSON(w io.Writer, results []checkResult) error {

@@ -75,6 +75,12 @@ jobs:
       - name: the error-budget file stays outside the decision
         run: ./scripts/slo-signal-stays-outside-the-decision.sh
 
+      # Invariants 46 and 47: every behaviour test builds a set with a floor in it,
+      # so a floor that reached the store, or a default that moved into the code,
+      # turns no suite red.
+      - name: the floor is the file's, and rule 15 keeps its shape
+        run: ./scripts/no-grant-hold-is-file-only.sh
+
       # Last, because it mutates tracked files and restores them. It needs a
       # clean tree and says so plainly, so it also reports any earlier step
       # that starts writing into the checkout.

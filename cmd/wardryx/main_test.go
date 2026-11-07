@@ -8,7 +8,10 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/TAIPANBOX/agent-stack-go/v2/event"
+	"github.com/TAIPANBOX/wardryx/internal/archive"
 	"github.com/TAIPANBOX/wardryx/internal/pdp"
+	"github.com/TAIPANBOX/wardryx/internal/policy"
 )
 
 func TestRunNoArgsErrors(t *testing.T) {
@@ -345,5 +348,223 @@ func TestCheckDoesNotJudgeAModelItWasNotShown(t *testing.T) {
 		if r.Decision != pdp.Allow {
 			t.Errorf("%s: %s (%s), want allow: the check named no model", r.AgentID, r.Decision, r.Reason)
 		}
+	}
+}
+
+// The offline check has an agent and no call, so its decision never reflects the
+// floor. The table says what the floor does to each agent instead.
+
+func writeCheckPolicy(t *testing.T, doc string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "policy.yaml")
+	if err := os.WriteFile(path, []byte(doc), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func TestCheckSaysWhatTheFloorDoesToEachAgent(t *testing.T) {
+	pol := writeCheckPolicy(t, `- name: tool-hold
+  target: "*"
+  when_no_grant: hold
+- name: grant-bot1
+  target: agent://acme.example/finance/bot1
+  grant_tool: [search, ask]
+`)
+	results, _, _, err := checkAgents("testdata/passports", pol)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 2 {
+		t.Fatalf("%+v", results)
+	}
+	var granted, held bool
+	for _, r := range results {
+		if r.Decision != pdp.Allow {
+			t.Errorf("%s is %s (%s): a passport names no call, so the floor does not judge it", r.AgentID, r.Decision, r.Reason)
+		}
+		granted = granted || r.ToolCalls == "granted: ask, search; any other tool is held"
+		held = held || r.ToolCalls == "held: nothing grants a tool"
+	}
+	if !granted || !held {
+		t.Fatalf("the table does not tell the two agents apart: %+v", results)
+	}
+	var out bytes.Buffer
+	printCheckHuman(&out, results, "v1")
+	for _, want := range []string{"TOOL CALLS", "any other tool is held", "nothing grants a tool"} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("the table does not say %q:\n%s", want, out.String())
+		}
+	}
+	out.Reset()
+	if err := printCheckJSON(&out, results); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), `"tool_calls": "held: nothing grants a tool"`) {
+		t.Errorf("the JSON form has no tool_calls:\n%s", out.String())
+	}
+}
+
+func TestToolCallsLineSaysEveryToolAndNoFloor(t *testing.T) {
+	if got := toolCallsLine(pdp.ToolPosture{Floor: "f", All: true}); got != "granted: every tool" {
+		t.Fatalf("%q", got)
+	}
+	if got := toolCallsLine(pdp.ToolPosture{}); got != "" {
+		t.Fatalf("%q", got)
+	}
+}
+
+func TestCheckPrintsWhatItAlwaysPrintedWithNoFloor(t *testing.T) {
+	results, _, _, err := checkAgents("testdata/passports", "testdata/policy.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	printCheckHuman(&out, results, "v1")
+	if strings.Contains(out.String(), "TOOL CALLS") {
+		t.Fatalf("a file with no floor changed the table:\n%s", out.String())
+	}
+	out.Reset()
+	if err := printCheckJSON(&out, results); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(out.String(), "tool_calls") {
+		t.Fatalf("a file with no floor changed the JSON:\n%s", out.String())
+	}
+}
+
+// The example an operator is pointed at is the floor as it is meant to be written,
+// so it is loaded and driven: an id with no scheme stays held, which is why its
+// target is "*". A seed with agent://* would let that id through.
+func TestTheExampleFloorHoldsAnIDWithoutTheScheme(t *testing.T) {
+	set, err := policy.Load("../../docs/examples/tool-hold.yaml")
+	if err != nil {
+		t.Fatalf("the example does not load: %v", err)
+	}
+	engine := pdp.New(set, nil)
+	call := func(agent, tool string) pdp.DecideResponse {
+		return engine.Decide(pdp.DecideRequest{
+			AgentID: agent, RunID: "r", ToolNames: []string{tool}, IdentitySource: "agent-token",
+			ToolCall: &pdp.ToolCall{Name: tool, Target: "t"},
+		})
+	}
+	if got := call("aws-comparable-agent", "ask"); got.Decision != pdp.Hold {
+		t.Fatalf("an id with no scheme is %s (%s) under the example, want hold", got.Decision, got.Reason)
+	}
+	if got := call("agent://acme.example/agents/operator", "fetch_url"); got.Decision != pdp.Allow {
+		t.Fatalf("a granted tool is %s (%s)", got.Decision, got.Reason)
+	}
+	if got := call("agent://acme.example/agents/operator", "exec"); got.Decision != pdp.Hold {
+		t.Fatalf("an ungranted tool is %s (%s)", got.Decision, got.Reason)
+	}
+	if got := call("agent://drills.acme.example/any", "exec"); got.Decision != pdp.Allow {
+		t.Fatalf("a tool under the wide grant is %s (%s)", got.Decision, got.Reason)
+	}
+}
+
+func replayFixture(t *testing.T) (eventsPath, archiveDir, candidate string) {
+	t.Helper()
+	dir := t.TempDir()
+	eventsPath, archiveDir = filepath.Join(dir, "events.ndjson"), filepath.Join(dir, "archive")
+	arch, err := archive.New(archiveDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := policy.Empty()
+	if err := arch.Keep(old); err != nil {
+		t.Fatal(err)
+	}
+	w, err := event.NewChainedWriter(eventsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	agent := "agent://acme.example/agents/worker"
+	if err := w.Write(event.Event{
+		Schema: event.SchemaV02, TS: "2026-11-01T10:00:00Z", Source: "wardryx", Type: "policy_allow", AgentID: agent, Severity: event.SeverityInfo, RunID: "r",
+		Data: map[string]any{
+			"tool_names": []string{"fetch_url"}, "domains": nil, "steps": 0, "model": "", "est_cost_usd": 0, "attestation_method": "",
+			"chain_proven": false, "policy_version": old.Version(), "reason": "allowed: no policy targets agent " + agent, "approval_token_required": false,
+			"tool_call": map[string]any{"name": "fetch_url", "target": "t", "arguments_sha256": "00", "arguments_truncated": false, "digest": "00"},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return eventsPath, archiveDir, writeCheckPolicy(t, "name: tool-hold\ntarget: \"*\"\nwhen_no_grant: hold\n")
+}
+
+func capture(t *testing.T, f func() error) (string, error) {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "stdout")
+	out, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := os.Stdout
+	os.Stdout = out
+	ferr := f()
+	os.Stdout = old
+	_ = out.Close()
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(raw), ferr
+}
+
+func TestReplayReportsWhatACandidateFloorWouldHold(t *testing.T) {
+	events, arch, cand := replayFixture(t)
+	out, err := capture(t, func() error { return run([]string{"replay", "-events", events, "-archive", arch, "-policy", cand}) })
+	if err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	for _, want := range []string{"would wait for a person", `"fetch_url"`, "agent://acme.example/agents/worker", "2026-11-01T10:00:00Z"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("the report does not say %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestReplayJSONIsWhatAnInstallerReads(t *testing.T) {
+	events, arch, cand := replayFixture(t)
+	out, err := capture(t, func() error {
+		return run([]string{"replay", "-events", events, "-archive", arch, "-policy", cand, "-format", "json"})
+	})
+	if err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	var got struct {
+		Total      int `json:"total"`
+		Unexamined int `json:"unexamined"`
+		WouldHold  []struct {
+			AgentID string `json:"agent_id"`
+			Tool    string `json:"tool"`
+			Calls   int    `json:"calls"`
+			Last    string `json:"last"`
+		} `json:"would_hold"`
+	}
+	if err := json.Unmarshal([]byte(out), &got); err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	if got.Total != 1 || got.Unexamined != 0 || len(got.WouldHold) != 1 || got.WouldHold[0].Tool != "fetch_url" || got.WouldHold[0].Calls != 1 || got.WouldHold[0].Last != "2026-11-01T10:00:00Z" {
+		t.Fatalf("%+v\n%s", got, out)
+	}
+}
+
+func TestReplayRefusesAFormatItDoesNotHave(t *testing.T) {
+	events, arch, _ := replayFixture(t)
+	if err := run([]string{"replay", "-events", events, "-archive", arch, "-format", "yaml"}); err == nil || !strings.Contains(err.Error(), "unknown format") {
+		t.Fatalf("%v", err)
+	}
+}
+
+func TestServeRefusesAPendingCapItCannotRead(t *testing.T) {
+	t.Setenv("WARDRYX_PENDING_PER_AGENT", "many")
+	t.Setenv("WARDRYX_KEYS", "k:acme:admin")
+	err := run([]string{"serve", "-addr", "127.0.0.1:0"})
+	if err == nil || !strings.Contains(err.Error(), "WARDRYX_PENDING_PER_AGENT") {
+		t.Fatalf("serve answered %v, want a refusal naming the variable", err)
 	}
 }

@@ -124,6 +124,9 @@
           },
           "WARDRYX_SIGNAL_EVENTS_MAX_AGE": {
             "required": false
+          },
+          "WARDRYX_PENDING_PER_AGENT": {
+            "required": false
           }
         },
         "starts_with_empty_environment": false,
