@@ -84,6 +84,19 @@ type Approval struct {
 // Pending reports whether the approval has not yet been decided.
 func (a Approval) Pending() bool { return a.Decision == "" }
 
+// PendingOutcome says what CreateApprovalOnce did.
+type PendingOutcome int
+
+const (
+	// PendingCreated: a new pending approval was written.
+	PendingCreated PendingOutcome = iota
+	// PendingExisting: the same call is already pending, and that approval was
+	// returned.
+	PendingExisting
+	// PendingQueueFull: the agent is at its limit, and nothing was written.
+	PendingQueueFull
+)
+
 // PolicyRecord is one stored policy-as-code document: an operator-assigned
 // id (distinct from Policy.Name, which need not be unique or URL-safe),
 // the policy body itself, and when it was last written. Reusing
@@ -119,6 +132,21 @@ type Store interface {
 	// unique; Decision, DecidedAt, and DecidedBy on a must be zero values.
 	CreateApproval(ctx context.Context, a Approval) error
 
+	// CreateApprovalOnce inserts a as a pending approval for one call, keeping the
+	// queue bounded for a caller that repeats itself. key names the call
+	// (approval.PendingKey). When an approval of the same agent and run with the
+	// same key is pending, nothing is written and that approval is returned, with
+	// PendingExisting. When the agent already has limit approvals pending in the
+	// org a.Context["org"] names, nothing is written and the zero Approval is
+	// returned, with PendingQueueFull. Otherwise a is written and returned, with
+	// PendingCreated. A repeat of a pending call is told as such even when the
+	// agent is at its limit: it adds nothing.
+	//
+	// An approval that has been decided no longer counts, so the same call held
+	// after a person answered is a new approval. Implementations must make the
+	// key race-safe: of concurrent calls with one key, exactly one writes.
+	CreateApprovalOnce(ctx context.Context, a Approval, key string, limit int) (Approval, PendingOutcome, error)
+
 	// GetApproval returns the approval with the given id, or ErrNotFound.
 	GetApproval(ctx context.Context, id string) (Approval, error)
 
@@ -126,6 +154,11 @@ type Store interface {
 	// by RequestedAt ascending. Callers that need to scope the list (e.g.
 	// by org) filter the result themselves using Approval.Context.
 	ListApprovals(ctx context.Context) ([]Approval, error)
+
+	// ListPendingApprovals returns the approvals nobody has decided, ordered by
+	// RequestedAt ascending. It is what the unanswered-approval sweep reads, so
+	// the cost of a tick follows what is waiting and not everything ever decided.
+	ListPendingApprovals(ctx context.Context) ([]Approval, error)
 
 	// DecideApproval records decision ("grant" or "deny"), decidedBy and
 	// label against the approval with the given id, and returns the updated

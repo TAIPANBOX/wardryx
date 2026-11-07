@@ -511,3 +511,64 @@ func TestNoProductionCodeOutsideThisPackageUsesTheUnboundEntryPoints(t *testing.
 		t.Fatalf("production code asks the unbound question: %v", offenders)
 	}
 }
+
+// The key a pending hold is kept under separates org and call the way the digest
+// separates name and target: by length, so no two pairs share a key.
+func TestThePendingKeySeparatesOrgAndCall(t *testing.T) {
+	a := PendingKey("acme", digestOf(`{"a":1}`))
+	if a != PendingKey("acme", digestOf(`{"a":1}`)) {
+		t.Fatal("one org and call gave two keys")
+	}
+	for name, other := range map[string]string{
+		"another org":        PendingKey("other", digestOf(`{"a":1}`)),
+		"no org":             PendingKey("", digestOf(`{"a":1}`)),
+		"another call":       PendingKey("acme", digestOf(`{"a":2}`)),
+		"bytes moved across": PendingKey("acme"+digestOf(`{"a":1}`)[:1], digestOf(`{"a":1}`)[1:]),
+	} {
+		if other == a {
+			t.Errorf("%s gave the same key", name)
+		}
+	}
+	if !validToolCallDigest(a) {
+		t.Fatalf("%q is not a fixed-size hex digest", a)
+	}
+}
+
+func TestRequestOnceKeepsOneRowAndSaysWhatItDid(t *testing.T) {
+	st, ctx := store.NewMemory(), context.Background()
+	first, outcome, err := RequestOnce(ctx, st, bindAgent, bindRun, []string{"b", "a"}, map[string]any{"org": "acme"}, "k", 2)
+	if err != nil || outcome != store.PendingCreated {
+		t.Fatalf("%v %v", outcome, err)
+	}
+	if got := toolsFromContext(first.Context); len(got) != 2 || got[0] != "a" {
+		t.Fatalf("the row does not carry the sorted tool set a grant binds to: %v", first.Context)
+	}
+	if !strings.HasPrefix(first.ApprovalID, "ap_") {
+		t.Fatalf("approval id %q", first.ApprovalID)
+	}
+	again, outcome, err := RequestOnce(ctx, st, bindAgent, bindRun, []string{"a", "b"}, map[string]any{"org": "acme"}, "k", 2)
+	if err != nil || outcome != store.PendingExisting || again.ApprovalID != first.ApprovalID {
+		t.Fatalf("%+v %v %v", again, outcome, err)
+	}
+}
+
+// Stale for over a year: until 2026-11-07 this file's package comment still said a
+// token was reusable for its TTL by default and that single use was an opt-in.
+func TestThePackageCommentSaysATokenIsSingleUseByDefault(t *testing.T) {
+	src, err := os.ReadFile("approval.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	head, _, found := strings.Cut(string(src), "package approval\n")
+	if !found {
+		t.Fatal("no package clause: this test measured nothing")
+	}
+	for _, stale := range []string{"reusable for its full TTL", "opt-in mode"} {
+		if strings.Contains(head, stale) {
+			t.Errorf("the package comment still says %q: invariant 5 has made a token single-use by default since 1.0", stale)
+		}
+	}
+	if !strings.Contains(head, "invariant 5") {
+		t.Error("the package comment does not point at invariant 5")
+	}
+}

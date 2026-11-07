@@ -5,7 +5,8 @@
 // an agent:// glob and constrains what those agents may do: which tools are
 // denied outright, which domains its declared tools may reach, how many
 // steps a run may take, whether the agent must carry a live attestation,
-// and the spend level above which a human must approve the action. Loading
+// the spend level above which a human must approve the action, and whether a
+// tool call nothing grants waits for a person. Loading
 // and compiling is entirely deterministic: no LLM, no network call, and no
 // randomness anywhere in this package, matching Idryx's rule that the
 // decision path stays deterministic and auditable.
@@ -204,7 +205,83 @@ type Policy struct {
 	// of being silently dropped by the second. Any value, even false, is
 	// refused. It never survives into a compiled Set.
 	DenyIfSignal any `yaml:"deny_if_signal,omitempty" json:"deny_if_signal,omitempty"`
+	// WhenNoGrant is the floor: with WhenNoGrantHold, a tool call of an agent this
+	// policy matches is held for a person unless every tool it names is granted
+	// (see GrantTool). Only a request that carries a tool_call is judged, so a
+	// model call and an egress question pass as they did. See internal/pdp's
+	// Decide, rule 15.
+	//
+	// A restriction never lifts the hold, whatever it matches: only a matched
+	// policy that pins a trust domain and names the tool, in AllowTool or
+	// GrantTool, does. So a floor on "*" is lifted by exactly the grants written
+	// for it, and adding a deny_tool or a max_steps for a whole fleet changes
+	// nothing about what is held.
+	//
+	// Empty, the default, imposes nothing, and WhenNoGrantAllow means the same:
+	// Compile stores it as empty, so a policy that writes allow and one that
+	// leaves the key out are one policy with one PolicyVersion. There is no deny:
+	// a call nothing grants waits for a person, and a refusal is deny_tool's or
+	// allow_tool's to say, so deny is refused at load with a sentence saying so.
+	//
+	// File only. PUT /v1/policies/{id} refuses the key, because the store reads a
+	// policy with a decoder that drops what it does not know, so a rollback would
+	// silently take the floor away and leave a policy that reads as in force.
+	WhenNoGrant NoGrantAction `yaml:"when_no_grant,omitempty" json:"when_no_grant,omitempty"`
+	// GrantTool lifts the floor for the tools it names, for the agents this policy
+	// matches: GrantAllTools ("*") for every tool, any other entry for that tool,
+	// with the case and surrounding space folding DenyTool uses. It restricts
+	// nothing and it lifts nothing else: a tool a matched deny_tool names is still
+	// denied, and so is one a matched allow_tool leaves out.
+	//
+	// A grant is refused at load on a target that pins no trust domain (see
+	// PinsTrustDomain): a grant to every agent is a floor switched off, written so
+	// it reads as a rule. It is refused in the policy that holds the floor, a blank
+	// entry is refused, and so is an entry that holds "*" beside other text, which
+	// would read as a glob and match nothing. Unlike the floor it may be written
+	// through PUT: it is what ends a hold on a running box with no restart.
+	GrantTool []string `yaml:"grant_tool,omitempty" json:"grant_tool,omitempty"`
 }
+
+// NoGrantAction is the type of when_no_grant. A type of its own so that the JSON
+// decoders, the strict ones and the lax ones alike, refuse a key written with no
+// value, as null or as anything but text (UnmarshalJSON): decoded as a plain
+// string, a blank would read as a choice. The YAML decoder never calls an
+// unmarshaler on a null, so decodeYAMLDocument reads the node first.
+type NoGrantAction string
+
+// The values when_no_grant takes.
+const (
+	WhenNoGrantAllow NoGrantAction = "allow"
+	WhenNoGrantHold  NoGrantAction = "hold"
+)
+
+// GrantAllTools is the grant_tool entry that names every tool.
+const GrantAllTools = "*"
+
+// errWhenNoGrantNotText refuses a when_no_grant written with no value, as null or
+// as anything but text, the way errWhenAbsentNotText does for when_absent.
+var errWhenNoGrantNotText = errors.New("when_no_grant takes hold or allow, written as text; leave the key out for no floor")
+
+// UnmarshalJSON refuses anything but non-blank text, in every JSON decoder.
+func (a *NoGrantAction) UnmarshalJSON(data []byte) error {
+	var text *string
+	if json.Unmarshal(data, &text) != nil || text == nil || strings.TrimSpace(*text) == "" {
+		return errWhenNoGrantNotText
+	}
+	*a = NoGrantAction(*text)
+	return nil
+}
+
+// trustDomainTarget is what a target must look like to pin a trust domain: the
+// scheme, then a domain with no glob in it, then the end or a path.
+var trustDomainTarget = regexp.MustCompile(`^agent://[^*?/]+(/|$)`)
+
+// PinsTrustDomain reports whether target names one trust domain, so that a policy
+// on it can grant a tool. "*", "agent://*", "agent://*/x" and "agent://ac*/x" do
+// not: each of them reaches agents of domains nobody named, and an agent id with
+// no scheme can be pinned by nothing. internal/pdp reads it for rule 15 and
+// Compile for the refusal, so the two cannot disagree on what a grant may be on.
+func PinsTrustDomain(target string) bool { return trustDomainTarget.MatchString(target) }
 
 // SignalRule is the body of hold_if_signal: hold when a signal named Name
 // carries one of Values with probability at least MinProbability, and, with
@@ -452,10 +529,10 @@ func (s *Set) RequiresHumanApproval() bool {
 		return false
 	}
 	for _, c := range s.policies {
-		// A hold_if_signal rule is the other way a hold can happen, and a hold
-		// with no approval secret cannot be granted: the warning is owed to
-		// both.
-		if c.RequireHumanAboveUSD != nil || c.HoldIfSignal != nil {
+		// A hold_if_signal rule and the floor are the other ways a hold can
+		// happen, and a hold with no approval secret cannot be granted: the
+		// warning is owed to all three.
+		if c.RequireHumanAboveUSD != nil || c.HoldIfSignal != nil || c.WhenNoGrant == WhenNoGrantHold {
 			return true
 		}
 	}
@@ -578,7 +655,8 @@ func isUnknownFieldError(err error) bool {
 	// (see SignalRule): that is the same finding as an unknown field, and must
 	// not fall through to the single-document attempt either.
 	return strings.Contains(msg, "not found in type") || strings.Contains(msg, "unknown field") ||
-		strings.Contains(msg, "hold_if_signal has no key") || strings.Contains(msg, errWhenAbsentNotText.Error())
+		strings.Contains(msg, "hold_if_signal has no key") || strings.Contains(msg, errWhenAbsentNotText.Error()) ||
+		strings.Contains(msg, errWhenNoGrantNotText.Error())
 }
 
 // strictJSON and strictYAML refuse a field the Policy struct does not declare.
@@ -703,6 +781,9 @@ func countYAMLDocuments(data []byte) (int, error) {
 // decodeYAMLDocument reads document index (zero-based) as a list of policies,
 // or failing that as one policy, the same two shapes decodeJSON accepts.
 func decodeYAMLDocument(data []byte, index int) ([]Policy, error) {
+	if err := refuseUnwrittenWhenNoGrant(data, index); err != nil {
+		return nil, err
+	}
 	var list []Policy
 	err := strictYAML(data, index, &list)
 	if err == nil {
@@ -716,6 +797,40 @@ func decodeYAMLDocument(data []byte, index int) ([]Policy, error) {
 		return nil, err
 	}
 	return []Policy{one}, nil
+}
+
+// refuseUnwrittenWhenNoGrant reads document index as nodes and refuses a
+// when_no_grant whose value is not non-blank text. The decoder cannot: yaml.v3
+// calls no unmarshaler on a null, so "when_no_grant:" with nothing after it would
+// load as no floor, in a file that reads as if the operator had chosen one. A
+// custom unmarshaler on Policy is no answer either: it would decode through a
+// Node, which forgets KnownFields, and every misspelled field would load.
+func refuseUnwrittenWhenNoGrant(data []byte, index int) error {
+	var doc yaml.Node
+	if err := strictYAML(data, index, &doc); err != nil {
+		return err
+	}
+	if doc.Kind != yaml.DocumentNode || len(doc.Content) == 0 {
+		return nil
+	}
+	top := doc.Content[0]
+	entries := []*yaml.Node{top}
+	if top.Kind == yaml.SequenceNode {
+		entries = top.Content
+	}
+	for _, n := range entries {
+		if n.Kind != yaml.MappingNode {
+			continue
+		}
+		for i := 0; i+1 < len(n.Content); i += 2 {
+			v := n.Content[i+1]
+			if n.Content[i].Value == "when_no_grant" &&
+				(v.Kind != yaml.ScalarNode || v.Tag != "!!str" || strings.TrimSpace(v.Value) == "") {
+				return errWhenNoGrantNotText
+			}
+		}
+	}
+	return nil
 }
 
 // The identity sources a request can come with, as the enforcement point reports
@@ -770,6 +885,9 @@ func Compile(policies []Policy) (*Set, error) {
 		if err := refuseBlankAllowModels(p); err != nil {
 			return nil, err
 		}
+		if err := refuseMalformedGrantTool(p); err != nil {
+			return nil, err
+		}
 		if err := refuseUnknownIdentitySource(p); err != nil {
 			return nil, err
 		}
@@ -782,6 +900,9 @@ func Compile(policies []Policy) (*Set, error) {
 			return nil, err
 		}
 		re, err := compileGlob(p.Target)
+		if err == nil && p.WhenNoGrant == WhenNoGrantHold {
+			re, err = compileFloorGlob(p.Target)
+		}
 		if err != nil {
 			return nil, fmt.Errorf("policy %q: %w", p.Name, err)
 		}
@@ -810,6 +931,45 @@ func refuseBlankAllowModels(p Policy) error {
 		if strings.TrimSpace(m) == "" {
 			return fmt.Errorf("policy %q: allow_models must not contain a blank entry: a blank is dropped and the list would read as no restriction", p.Name)
 		}
+	}
+	return nil
+}
+
+// refuseMalformedGrantTool refuses a grant_tool entry that is blank, which
+// normalization would drop, leaving a grant that reads as one and grants nothing,
+// and an entry that holds "*" beside other text: grant_tool takes names, and
+// "fetch*" would read as a glob and match no tool. The refusal says what to write.
+func refuseMalformedGrantTool(p Policy) error {
+	for _, tool := range p.GrantTool {
+		t := strings.TrimSpace(tool)
+		if t == "" {
+			return fmt.Errorf("policy %q: grant_tool must not contain a blank entry; name a tool, or write %q for every tool", p.Name, GrantAllTools)
+		}
+		if t != GrantAllTools && strings.Contains(t, GrantAllTools) {
+			return fmt.Errorf("policy %q: grant_tool entry %q is not a glob: name each tool, or write %q alone for every tool", p.Name, tool, GrantAllTools)
+		}
+	}
+	return nil
+}
+
+// refuseMalformedNoGrant checks the floor and the grant against each other and
+// against the target. It runs after normalize, so allow has become empty.
+func refuseMalformedNoGrant(p Policy) error {
+	switch w := p.WhenNoGrant; {
+	case w == "" || w == WhenNoGrantHold:
+	case strings.EqualFold(strings.TrimSpace(string(w)), "deny"):
+		return fmt.Errorf("policy %q: when_no_grant %q is refused: a tool call nothing grants waits for a person and is never denied; write hold, and use deny_tool or allow_tool to refuse a tool", p.Name, string(w))
+	default:
+		return fmt.Errorf("policy %q: when_no_grant %q is not one of hold or allow", p.Name, string(w))
+	}
+	if len(p.GrantTool) == 0 {
+		return nil
+	}
+	if p.WhenNoGrant != "" {
+		return fmt.Errorf("policy %q: when_no_grant and grant_tool are refused in one policy: one holds and the other lifts, so write the floor and each grant as policies of their own", p.Name)
+	}
+	if !PinsTrustDomain(p.Target) {
+		return fmt.Errorf("policy %q: grant_tool on target %q is refused: a grant must name the trust domain it is for, so write the target as agent://<domain> or agent://<domain>/..., for example agent://acme.example/agents/*", p.Name, p.Target)
 	}
 	return nil
 }
@@ -869,6 +1029,9 @@ func validate(p Policy) error {
 			return err
 		}
 	}
+	if err := refuseMalformedNoGrant(p); err != nil {
+		return err
+	}
 	if p.RequireRootPrincipal != "" {
 		if _, err := compileGlob(p.RequireRootPrincipal); err != nil {
 			return fmt.Errorf("policy %q: require_root_principal %q is not a valid glob: %w",
@@ -879,7 +1042,7 @@ func validate(p Policy) error {
 }
 
 // normalize returns a defensive copy of policies with Name defaulted, and
-// DenyTool, AllowTool, AllowModels and AllowDomains deduplicated, sorted, and stripped of blank entries,
+// DenyTool, AllowTool, AllowModels, AllowDomains and GrantTool deduplicated, sorted, and stripped of blank entries,
 // then sorts the policies themselves by (target, name, org). The result is
 // deterministic regardless of the input's source-file or field order, which
 // is what makes computeVersion stable across equivalent policy sets.
@@ -891,10 +1054,16 @@ func normalize(policies []Policy) []Policy {
 		np.AllowTool = sortedUnique(p.AllowTool)
 		np.AllowModels = sortedUnique(p.AllowModels)
 		np.AllowDomains = sortedUnique(p.AllowDomains)
+		np.GrantTool = sortedUnique(p.GrantTool)
 		np.RequireIdentitySource = sortedUnique(p.RequireIdentitySource)
 		np.RequireHumanAboveUSD = cloneUSD(p.RequireHumanAboveUSD)
 		np.DenyAboveUSD = cloneUSD(p.DenyAboveUSD)
 		np.HoldIfSignal = p.HoldIfSignal.clone()
+		// The default is stored as the default, as when_absent's is: writing allow
+		// and leaving the key out are one policy, with one PolicyVersion.
+		if np.WhenNoGrant == WhenNoGrantAllow {
+			np.WhenNoGrant = ""
+		}
 		if np.Name == "" {
 			np.Name = np.Target
 		}
@@ -968,14 +1137,27 @@ func computeVersion(policies []Policy) string {
 // compileGlob turns an agent:// glob into an anchored regular expression.
 // "*" matches any run of characters (including "/"), "?" matches exactly
 // one character, and every other character matches itself literally.
-func compileGlob(pattern string) (*regexp.Regexp, error) {
+func compileGlob(pattern string) (*regexp.Regexp, error) { return compileGlobFlags(pattern, "") }
+
+// compileFloorGlob is compileGlob for the target of a when_no_grant: hold policy,
+// where "*" and "?" run across a line break as well. In a regular expression "."
+// stops at one, so "*" matches every agent id except one holding a line break, and
+// /v1/decide takes an id as sent: a floor on "*" would let exactly the id with an
+// instruction written into it walk past. Every other policy keeps the glob it
+// always had. A grant among them does not reach such an id, which is the side a
+// hold errs on. Measured: without this, an id with "\n" in it was allowed.
+func compileFloorGlob(pattern string) (*regexp.Regexp, error) {
+	return compileGlobFlags(pattern, "(?s)")
+}
+
+func compileGlobFlags(pattern, flags string) (*regexp.Regexp, error) {
 	if pattern == "" {
 		return nil, fmt.Errorf("empty target glob")
 	}
 	escaped := regexp.QuoteMeta(pattern)
 	escaped = strings.ReplaceAll(escaped, `\*`, `.*`)
 	escaped = strings.ReplaceAll(escaped, `\?`, `.`)
-	re, err := regexp.Compile("^" + escaped + "$")
+	re, err := regexp.Compile(flags + "^" + escaped + "$")
 	if err != nil {
 		return nil, fmt.Errorf("invalid target glob %q: %w", pattern, err)
 	}

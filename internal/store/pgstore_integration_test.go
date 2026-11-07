@@ -559,3 +559,201 @@ func TestPgTheProofRecordSchemaAppliesTwice(t *testing.T) {
 		t.Fatalf("a second migrate: %v", err)
 	}
 }
+
+func pgOnce(id, agent, run, org string) Approval {
+	return Approval{ApprovalID: id, AgentID: agent, RunID: run, RequestedAt: time.Now().UTC(), Context: map[string]any{"org": org}}
+}
+
+func TestPgOneCallIsOnePendingRow(t *testing.T) {
+	p := testDB(t)
+	ctx := context.Background()
+	a, outcome, err := p.CreateApprovalOnce(ctx, pgOnce("ap1", "agent://x/a", "r", "acme"), "k", 5)
+	if err != nil || outcome != PendingCreated || a.ApprovalID != "ap1" || a.Context["org"] != "acme" {
+		t.Fatalf("first: %+v %v %v", a, outcome, err)
+	}
+	b, outcome, err := p.CreateApprovalOnce(ctx, pgOnce("ap2", "agent://x/a", "r", "acme"), "k", 5)
+	if err != nil || outcome != PendingExisting || b.ApprovalID != "ap1" {
+		t.Fatalf("second: %+v %v %v, want the row it has", b, outcome, err)
+	}
+	all, err := p.ListApprovals(ctx)
+	if err != nil || len(all) != 1 {
+		t.Fatalf("%d rows, %v", len(all), err)
+	}
+}
+
+func TestPgADecidedRowLeavesTheIndex(t *testing.T) {
+	p := testDB(t)
+	ctx := context.Background()
+	if _, _, err := p.CreateApprovalOnce(ctx, pgOnce("ap1", "agent://x/a", "r", "acme"), "k", 1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.DecideApproval(ctx, "ap1", "deny", "key:x", "", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	got, outcome, err := p.CreateApprovalOnce(ctx, pgOnce("ap2", "agent://x/a", "r", "acme"), "k", 1)
+	if err != nil || outcome != PendingCreated || got.ApprovalID != "ap2" {
+		t.Fatalf("after a decision: %+v %v %v", got, outcome, err)
+	}
+}
+
+func TestPgTheLimitIsPerAgentAndOrgAndARepeatIsNotStoppedByIt(t *testing.T) {
+	p := testDB(t)
+	ctx := context.Background()
+	if _, _, err := p.CreateApprovalOnce(ctx, pgOnce("ap1", "agent://x/a", "r", "acme"), "k1", 1); err != nil {
+		t.Fatal(err)
+	}
+	if got, outcome, err := p.CreateApprovalOnce(ctx, pgOnce("ap2", "agent://x/a", "r", "acme"), "k2", 1); err != nil || outcome != PendingQueueFull || got.ApprovalID != "" {
+		t.Fatalf("past the limit: %+v %v %v", got, outcome, err)
+	}
+	if got, outcome, err := p.CreateApprovalOnce(ctx, pgOnce("ap3", "agent://x/a", "r", "acme"), "k1", 1); err != nil || outcome != PendingExisting || got.ApprovalID != "ap1" {
+		t.Fatalf("a repeat at the limit: %+v %v %v", got, outcome, err)
+	}
+	if _, outcome, err := p.CreateApprovalOnce(ctx, pgOnce("ap4", "agent://x/b", "r", "acme"), "k1", 1); err != nil || outcome != PendingCreated {
+		t.Fatalf("another agent: %v %v", outcome, err)
+	}
+	if _, outcome, err := p.CreateApprovalOnce(ctx, pgOnce("ap5", "agent://x/a", "r", "other"), "k9", 1); err != nil || outcome != PendingCreated {
+		t.Fatalf("another org: %v %v", outcome, err)
+	}
+	if err := p.CreateApproval(ctx, pgOnce("ap6", "agent://x/c", "r", "acme")); err != nil {
+		t.Fatal(err)
+	}
+	if _, outcome, err := p.CreateApprovalOnce(ctx, pgOnce("ap7", "agent://x/c", "r", "acme"), "k1", 1); err != nil || outcome != PendingQueueFull {
+		t.Fatalf("beside a plain row: %v %v", outcome, err)
+	}
+}
+
+// A call stopped by the limit is looked up, to tell a repeat from a new call, and the
+// row a person already answered must not read as that repeat.
+func TestPgADecidedRowIsNotReportedAsPendingAtTheLimit(t *testing.T) {
+	p := testDB(t)
+	ctx := context.Background()
+	if _, _, err := p.CreateApprovalOnce(ctx, pgOnce("ap1", "agent://x/a", "r", "acme"), "k1", 1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.DecideApproval(ctx, "ap1", "deny", "key:x", "", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := p.CreateApprovalOnce(ctx, pgOnce("ap2", "agent://x/a", "r", "acme"), "k2", 1); err != nil {
+		t.Fatal(err)
+	}
+	got, outcome, err := p.CreateApprovalOnce(ctx, pgOnce("ap3", "agent://x/a", "r", "acme"), "k1", 1)
+	if err != nil || outcome != PendingQueueFull || got.ApprovalID != "" {
+		t.Fatalf("the call of an answered row at the limit: %+v %v %v, want the queue full", got, outcome, err)
+	}
+}
+
+func TestPgOneCallIsOneRowAcrossConnections(t *testing.T) {
+	p := testDB(t)
+	ctx := context.Background()
+	const callers = 48
+	var (
+		wg      sync.WaitGroup
+		created atomic.Int32
+		ids     sync.Map
+	)
+	for i := 0; i < callers; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			got, outcome, err := p.CreateApprovalOnce(ctx, pgOnce(fmt.Sprintf("ap%d", i), "agent://x/a", "r", "acme"), "k", 5)
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			if outcome == PendingCreated {
+				created.Add(1)
+			}
+			if outcome == PendingQueueFull {
+				t.Error("one call reported the queue full")
+			}
+			ids.Store(got.ApprovalID, true)
+		}(i)
+	}
+	wg.Wait()
+	distinct := 0
+	ids.Range(func(any, any) bool { distinct++; return true })
+	if created.Load() != 1 || distinct != 1 {
+		t.Fatalf("%d callers wrote and %d ids came back, want one of each", created.Load(), distinct)
+	}
+}
+
+// The limit is read in the statement's snapshot, so a burst may pass it. It must not
+// pass it by more than the statements running at that moment, the pool's size.
+func TestPgABurstPastTheLimitStaysNearIt(t *testing.T) {
+	p := testDB(t)
+	ctx := context.Background()
+	const callers, limit = 200, 5
+	var wg sync.WaitGroup
+	for i := 0; i < callers; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			if _, _, err := p.CreateApprovalOnce(ctx, pgOnce(fmt.Sprintf("ap%d", i), "agent://x/a", "r", "acme"), fmt.Sprintf("k%d", i), limit); err != nil {
+				t.Error(err)
+			}
+		}(i)
+	}
+	wg.Wait()
+	all, err := p.ListPendingApprovals(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all) < limit || len(all) > limit+maxPoolConns {
+		t.Fatalf("%d rows pending after a burst of %d against a limit of %d: the bound is the limit plus the pool, %d", len(all), callers, limit, limit+maxPoolConns)
+	}
+	if _, outcome, err := p.CreateApprovalOnce(ctx, pgOnce("after", "agent://x/a", "r", "acme"), "after", limit); err != nil || outcome != PendingQueueFull {
+		t.Fatalf("after the burst: %v %v", outcome, err)
+	}
+}
+
+func TestPgListPendingApprovalsLeavesOutWhatWasDecided(t *testing.T) {
+	p := testDB(t)
+	ctx := context.Background()
+	base := time.Now().UTC().Truncate(time.Second)
+	for i, id := range []string{"ap_new", "ap_old", "ap_done"} {
+		a := pgOnce(id, "agent://x/a", "r", "acme")
+		a.RequestedAt = base.Add(time.Duration(2-i) * time.Minute)
+		if err := p.CreateApproval(ctx, a); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := p.DecideApproval(ctx, "ap_done", "grant", "key:x", "", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	got, err := p.ListPendingApprovals(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || got[0].ApprovalID != "ap_old" || got[1].ApprovalID != "ap_new" {
+		t.Fatalf("%+v, want the two pending rows, oldest first", got)
+	}
+}
+
+// An upgrade meets a table that already holds identical pending rows, written
+// before dedup existed. The schema is applied at open, so an index that refused
+// them would be a process that does not start.
+func TestPgTheSchemaUpgradesATableThatAlreadyHoldsDuplicates(t *testing.T) {
+	p := testDB(t)
+	ctx := context.Background()
+	if _, err := p.db.ExecContext(ctx, `DROP INDEX IF EXISTS approvals_pending_call`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.db.ExecContext(ctx, `ALTER TABLE approvals DROP COLUMN IF EXISTS pending_key`); err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{"old1", "old2"} {
+		a := pgOnce(id, "agent://x/a", "r", "acme")
+		a.Context["tool_call"] = map[string]any{"digest": "same"}
+		if err := p.CreateApproval(ctx, a); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i := 0; i < 2; i++ {
+		if err := p.migrate(ctx); err != nil {
+			t.Fatalf("apply %d: %v", i+1, err)
+		}
+	}
+	if all, _ := p.ListPendingApprovals(ctx); len(all) != 2 {
+		t.Fatalf("%d rows after the upgrade", len(all))
+	}
+}

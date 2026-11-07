@@ -747,6 +747,73 @@ run_case "slo-signal: the reader is gone" fail \
 	"$(py 'import os; os.remove("internal/sloburn/sloburn.go")')" \
 	"measured nothing"
 
+# Invariants 46 and 47: every behaviour test builds its own set with a floor in it,
+# so none of these turns a suite red by itself.
+run_case "no-grant: PUT stops refusing the floor" fail \
+	'./scripts/no-grant-hold-is-file-only.sh' \
+	"$(py 'edit("internal/api/api.go", "if p.WhenNoGrant != \"\" {\n\t\twriteError(w, http.StatusBadRequest, noGrantIsFileOnly)\n\t\treturn\n\t}\n", "")')" \
+	"does not refuse when_no_grant"
+
+run_case "no-grant: PUT refuses the floor only after the store write" fail \
+	'./scripts/no-grant-hold-is-file-only.sh' \
+	"$(py 'edit("internal/api/api.go", "if p.WhenNoGrant != \"\" {\n\t\twriteError(w, http.StatusBadRequest, noGrantIsFileOnly)\n\t\treturn\n\t}\n", ""); edit("internal/api/api.go", "\ts.outage.recovered()\n\ts.engine.SetPolicies(newSet)\n\ts.emit(evPolicyUpdated, event.SeverityHigh, systemAgentID, \"\", nil,\n\t\tmap[string]any{\"action\": \"put\"", "\tif p.WhenNoGrant != \"\" {\n\t\twriteError(w, http.StatusBadRequest, noGrantIsFileOnly)\n\t\treturn\n\t}\n\ts.outage.recovered()\n\ts.engine.SetPolicies(newSet)\n\ts.emit(evPolicyUpdated, event.SeverityHigh, systemAgentID, \"\", nil,\n\t\tmap[string]any{\"action\": \"put\"")')" \
+	"only after the store write"
+
+run_case "no-grant: the code sets a floor" fail \
+	'./scripts/no-grant-hold-is-file-only.sh' \
+	"$(py 'edit("cmd/wardryx/main.go", "\tbasePolicies := policies.Policies()\n", "\tbasePolicies := append(policies.Policies(), policy.Policy{Target: \"*\", WhenNoGrant: policy.WhenNoGrantHold})\n")')" \
+	"sets a floor in code"
+
+run_case "no-grant: a decision under the floor can be cached" fail \
+	'./scripts/no-grant-hold-is-file-only.sh' \
+	"$(py 'edit("internal/pdp/pdp.go", "len(p.RequireIdentitySource) > 0 ||\n\t\t\tp.WhenNoGrant != \"\" || len(p.GrantTool) > 0 {", "len(p.RequireIdentitySource) > 0 {")')" \
+	"does not read WhenNoGrant"
+
+run_case "no-grant: a model call reaches the floor" fail \
+	'./scripts/no-grant-hold-is-file-only.sh' \
+	"$(py 'edit("internal/pdp/no_grant.go", "\tif req.ToolCall == nil {\n\t\treturn noGrant{}, false\n\t}\n", "")')" \
+	"does not stop at a request with no tool call"
+
+run_case "no-grant: rule 15 accepts a token that binds no call" fail \
+	'./scripts/no-grant-hold-is-file-only.sh' \
+	"$(py 'edit("internal/pdp/pdp.go", "if req.ApprovalToken != \"\" &&\n\t\t\te.approvals.VerifyBoundToCall(req.ApprovalToken", "if req.ApprovalToken != \"\" &&\n\t\t\te.approvals.VerifyForCall(req.ApprovalToken")')" \
+	"does not verify with VerifyBoundToCall"
+
+run_case "no-grant: rule 15 stops being an approval gate" fail \
+	'./scripts/no-grant-hold-is-file-only.sh' \
+	"$(py 'edit("internal/pdp/pdp.go", "\t\tresp.ApprovalTokenRequired = true\n\t\tresp.HoldKind = HoldKindNoGrant\n", "\t\tresp.HoldKind = HoldKindNoGrant\n")')" \
+	"does not set ApprovalTokenRequired"
+
+run_case "no-grant: rule 15 denies" fail \
+	'./scripts/no-grant-hold-is-file-only.sh' \
+	"$(py 'edit("internal/pdp/pdp.go", "\t\tresp.Decision = Hold\n\t\tresp.Reason = why + \"; human approval required\"\n\t\treturn resp\n\t}\n\n\tresp.Decision = Allow\n", "\t\tresp.Decision = Deny\n\t\tresp.Reason = why + \"; human approval required\"\n\t\treturn resp\n\t}\n\n\tresp.Decision = Allow\n")')" \
+	"rule 15 can deny"
+
+run_case "no-grant: the cost gate takes a token that binds no call" fail \
+	'./scripts/no-grant-hold-is-file-only.sh' \
+	"$(py 'edit("internal/pdp/pdp.go", "\t\t\tif floorHolds {\n\t\t\t\tverify = e.approvals.VerifyBoundToCall\n\t\t\t}\n", "")')" \
+	"rule 13 does not read the floor"
+
+run_case "no-grant: a signal hold takes a token that binds no call" fail \
+	'./scripts/no-grant-hold-is-file-only.sh' \
+	"$(py 'edit("internal/pdp/pdp.go", "held.callMustBeBound || floorHolds", "held.callMustBeBound")')" \
+	"rule 14 does not read the floor"
+
+run_case "no-grant: a frozen sentence is reworded" fail \
+	'./scripts/no-grant-hold-is-file-only.sh' \
+	"$(py 'edit("internal/pdp/pdp.go", "\"allowed: no policy targets agent %s\"", "\"allowed: nothing targets agent %s\"")')" \
+	"frozen sentence"
+
+# Comments that name the shapes it refuses are prose, not code.
+run_case "no-grant: a comment naming a floor in code" pass \
+	'./scripts/no-grant-hold-is-file-only.sh' \
+	"$(py 'edit("cmd/wardryx/main.go", "\tbasePolicies := policies.Policies()\n", "\t// never WhenNoGrant: hold here, and never p.WhenNoGrant = anything.\n\tbasePolicies := policies.Policies()\n")')"
+
+run_case "no-grant: the rule is gone" fail \
+	'./scripts/no-grant-hold-is-file-only.sh' \
+	"$(py 'import os; os.remove("internal/pdp/no_grant.go")')" \
+	"measured nothing"
+
 echo
 if [ -n "$(git status --porcelain)" ]; then
 	printf 'FAIL: this script left the tree dirty, so it cannot be trusted about anything above\n'

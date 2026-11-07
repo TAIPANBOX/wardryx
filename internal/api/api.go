@@ -52,6 +52,7 @@ import (
 	"log"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -91,6 +92,15 @@ const (
 	// with no decision (F-001 of the 2026-10-17 review). Not a decision, so
 	// replay counts it as none.
 	evAgentAssertionRefused = "agent_assertion_refused"
+	// An agent reached the pending cap: its holds of the floor stay holds and
+	// stay recorded, and no longer add a row a person can answer (invariant 48).
+	// Once per agent per process. Not a decision, so replay counts it as none.
+	evApprovalQueueFull = "approval_queue_full"
+	// The set a process decides under from its first request, written once at
+	// start. The policy file is read at start and nothing else records it, so
+	// without this an edit of the file leaves no trace between two decisions that
+	// happen to name different versions (invariant 49).
+	evPolicyLoaded = "policy_loaded"
 )
 
 // authAgentID is the agent_id of an agent_assertion_refused event. The agent
@@ -165,6 +175,14 @@ type Server struct {
 	unansweredMu    sync.Mutex
 	unansweredSeen  map[string]bool
 
+	// pendingPerAgent is how many approvals an agent may have waiting before a
+	// hold of the floor adds no row (WARDRYX_PENDING_PER_AGENT), and queueFullSeen
+	// which agents have been reported as past it. In memory for the reason
+	// unansweredSeen is: a restart that says it again is saying something true.
+	pendingPerAgent int
+	queueFullMu     sync.Mutex
+	queueFullSeen   map[string]bool
+
 	// storeTimeout bounds every store call made on behalf of a policy write
 	// and the readiness ping. See DefaultStoreTimeout.
 	storeTimeout time.Duration
@@ -236,6 +254,8 @@ func New(engine *pdp.Engine, st store.Store, events *event.ChainedWriter, otel *
 		basePolicies:      basePolicies,
 		unansweredAfter:   DefaultUnansweredAfter,
 		unansweredSeen:    map[string]bool{},
+		pendingPerAgent:   DefaultPendingPerAgent,
+		queueFullSeen:     map[string]bool{},
 		storeTimeout:      DefaultStoreTimeout,
 	}
 	if events != nil {
@@ -258,6 +278,55 @@ const DefaultStoreTimeout = 3 * time.Second
 //
 // Override with WARDRYX_APPROVAL_UNANSWERED_AFTER.
 const DefaultUnansweredAfter = 15 * time.Minute
+
+// DefaultPendingPerAgent is how many approvals an agent may have waiting in one
+// org before a hold of the floor stops adding rows. An agent in a loop with varying
+// arguments is the case it is for: each call is a new row, and a person reads a
+// queue, not a log. Twenty is more than anybody answers in one sitting, and past it
+// another row tells that person nothing the first twenty did not.
+//
+// Override with WARDRYX_PENDING_PER_AGENT.
+const DefaultPendingPerAgent = 20
+
+// ParsePendingPerAgent reads WARDRYX_PENDING_PER_AGENT: unset is the default, and
+// anything but a whole number of at least 1 is an error, which serve refuses to
+// start on. A typo must not read as a queue with no bound, and a cap of zero would
+// be a floor whose holds nobody could ever be asked to answer.
+func ParsePendingPerAgent(raw string) (int, error) {
+	if raw == "" {
+		return DefaultPendingPerAgent, nil
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil || n < 1 {
+		return 0, fmt.Errorf("WARDRYX_PENDING_PER_AGENT must be a whole number of at least 1")
+	}
+	return n, nil
+}
+
+// SetPendingPerAgent overrides [DefaultPendingPerAgent].
+func (s *Server) SetPendingPerAgent(n int) { s.pendingPerAgent = n }
+
+// RecordPolicyLoaded writes the policy_loaded event: the version this process
+// decides under, and how many policies make it up. serve calls it once, after the
+// store's policies are restored and before the first request, so a version that
+// appears in the record for the first time has this line in front of it. It goes
+// through emit: a start is not a decision, and a record that cannot be written is
+// already what /readyz reports.
+func (s *Server) RecordPolicyLoaded() {
+	set := s.engine.CurrentSet()
+	floors := make([]string, 0, 1)
+	for _, p := range set.Policies() {
+		if p.WhenNoGrant == policy.WhenNoGrantHold {
+			floors = append(floors, p.Name)
+		}
+	}
+	s.emit(evPolicyLoaded, event.SeverityInfo, systemAgentID, "", nil, map[string]any{
+		"policy_version":  set.Version(),
+		"policies":        set.Len(),
+		"base_policies":   len(s.basePolicies),
+		"no_grant_floors": floors,
+	})
+}
 
 // SetUnansweredAfter overrides [DefaultUnansweredAfter]. Zero or negative
 // disables the sweep entirely, which is a real choice: an operator who watches
@@ -381,18 +450,16 @@ func sweepInterval(threshold time.Duration) time.Duration {
 }
 
 func (s *Server) sweepUnansweredApprovals(ctx context.Context, now time.Time) {
-	all, err := s.store.ListApprovals(ctx)
+	waiting, err := s.store.ListPendingApprovals(ctx)
 	if err != nil {
 		// A store that cannot be listed is already reported elsewhere, and a
 		// sweep that logs on every tick would drown it.
 		return
 	}
-	pending := make(map[string]bool, len(all))
-	for _, a := range all {
-		if a.Pending() {
-			pending[a.ApprovalID] = true
-		}
-		if !a.Pending() || now.Sub(a.RequestedAt) < s.unansweredAfter {
+	pending := make(map[string]bool, len(waiting))
+	for _, a := range waiting {
+		pending[a.ApprovalID] = true
+		if now.Sub(a.RequestedAt) < s.unansweredAfter {
 			continue
 		}
 		s.unansweredMu.Lock()
@@ -894,6 +961,11 @@ func (s *Server) handleDecide(w http.ResponseWriter, r *http.Request, principal 
 			"reason":             resp.Reason,
 			"policy_version":     resp.PolicyVersion,
 		}
+		// What a console needs to say what ends this hold for good: a grant,
+		// where any other hold ends with the one answer.
+		if resp.HoldKind != "" {
+			holdContext["hold_kind"] = resp.HoldKind
+		}
 		// A person deciding this hold sees every signal that was used, with
 		// who said it and the answer id that finds the classifier's record.
 		if len(req.Signals) > 0 {
@@ -911,7 +983,7 @@ func (s *Server) handleDecide(w http.ResponseWriter, r *http.Request, principal 
 				approval.ContextKeyDigest: tc.Digest(),
 			}
 		}
-		held, err := approval.Request(r.Context(), s.store, req.AgentID, req.RunID, req.ToolNames, holdContext)
+		held, queueFull, err := s.requestApproval(r.Context(), req, resp, principal, holdContext)
 		if err != nil {
 			writeInternalError(w, "recording the approval hold", err)
 			return
@@ -919,9 +991,14 @@ func (s *Server) handleDecide(w http.ResponseWriter, r *http.Request, principal 
 		resp.ApprovalID = held.ApprovalID
 		// A hold is a verdict like the other two, so it records the same
 		// question: an operator tuning the approvable band needs to replay
-		// holds, not only denials.
+		// holds, not only denials. The verdict and the reason are Decide's, so a
+		// hold that found the queue full replays like any other.
 		heldInput := decisionInput(req, resp)
-		heldInput["approval_id"] = held.ApprovalID
+		if queueFull {
+			heldInput["queue_full"] = true
+		} else {
+			heldInput["approval_id"] = held.ApprovalID
+		}
 		// A refused hold leaves its approval pending in the queue: nobody was
 		// given its ID, so nobody waits on it (named in invariant 40).
 		if !s.recordDecision(evApprovalRequested, event.SeverityMedium, req.AgentID, req.RunID, req.OnBehalfOf,
@@ -939,6 +1016,44 @@ func (s *Server) handleDecide(w http.ResponseWriter, r *http.Request, principal 
 		ApprovalID:            resp.ApprovalID,
 		ApprovalTokenRequired: resp.ApprovalTokenRequired,
 		Cacheable:             resp.Cacheable,
+	})
+}
+
+// requestApproval writes the row a hold is answered through. A hold of the floor
+// goes through approval.RequestOnce: an agent that repeats a call gets the row it
+// already has, and past the pending cap gets none, with queueFull true. Every other
+// hold is written as it always was, so a deployment with no floor sees no change.
+func (s *Server) requestApproval(ctx context.Context, req pdp.DecideRequest, resp pdp.DecideResponse, principal Principal, holdContext map[string]any) (store.Approval, bool, error) {
+	if resp.HoldKind != pdp.HoldKindNoGrant {
+		held, err := approval.Request(ctx, s.store, req.AgentID, req.RunID, req.ToolNames, holdContext)
+		return held, false, err
+	}
+	key := approval.PendingKey(principal.Org, req.ToolCall.Digest())
+	held, outcome, err := approval.RequestOnce(ctx, s.store, req.AgentID, req.RunID, req.ToolNames, holdContext, key, s.pendingPerAgent)
+	if err != nil {
+		return store.Approval{}, false, err
+	}
+	if outcome != store.PendingQueueFull {
+		return held, false, nil
+	}
+	s.reportQueueFull(req.AgentID, req.RunID)
+	return store.Approval{}, true, nil
+}
+
+// reportQueueFull raises approval_queue_full the first time an agent reaches the
+// cap in this process and says nothing the next time, so an agent in a loop cannot
+// fill the record with the news that it is in a loop. The hold events it goes on
+// producing carry queue_full.
+func (s *Server) reportQueueFull(agentID, runID string) {
+	s.queueFullMu.Lock()
+	seen := s.queueFullSeen[agentID]
+	s.queueFullSeen[agentID] = true
+	s.queueFullMu.Unlock()
+	if seen {
+		return
+	}
+	s.emit(evApprovalQueueFull, event.SeverityHigh, agentID, runID, nil, map[string]any{
+		"pending_limit": s.pendingPerAgent,
 	})
 }
 
@@ -1380,6 +1495,9 @@ func (s *Server) canWrite(p Principal, org string) bool {
 // org or to none, so it tells a caller only that the id is not theirs to use.
 const notYourPolicy = "an admin key writes the policies of its own org only; a policy of another org, or one that applies across orgs, needs a " + RoleCrossOrgAdmin + " key"
 
+// noGrantIsFileOnly is the refusal of a when_no_grant in a policy write.
+const noGrantIsFileOnly = "when_no_grant is refused here: the floor is set in the policy file and takes effect at start; to end a hold through this API, write a policy with grant_tool"
+
 func (s *Server) handleListPolicies(w http.ResponseWriter, r *http.Request, principal Principal) {
 	all, err := s.store.ListPolicies(r.Context())
 	if err != nil {
@@ -1441,6 +1559,15 @@ func (s *Server) handlePutPolicy(w http.ResponseWriter, r *http.Request, princip
 		return
 	}
 	p := body.Policy
+	// The floor is the file's. The store reads a policy with a decoder that drops
+	// what it does not know, so a floor written here would be gone after a
+	// rollback, silently, and the rest of the policy would still read as in force.
+	// Refused whatever its value, allow included: a body that names the key is a
+	// writer who believes it means something here.
+	if p.WhenNoGrant != "" {
+		writeError(w, http.StatusBadRequest, noGrantIsFileOnly)
+		return
+	}
 	// The org a policy belongs to is the writer's. An org admin's policy is
 	// its org's whatever the body says, and a body naming another org is
 	// refused rather than rewritten; a principal allowed across orgs writes

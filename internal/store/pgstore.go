@@ -91,6 +91,61 @@ func (p *Postgres) CreateApproval(ctx context.Context, a Approval) error {
 	return nil
 }
 
+// CreateApprovalOnce writes a in one statement: the partial unique index on
+// (agent_id, run_id, pending_key) makes the key atomic across every wardryx on this
+// database, the way TryRedeem's primary key does, and the count in the same
+// statement stops the row at the limit.
+//
+// The limit is a bound on a queue, not a budget, and it is read in the statement's
+// snapshot: instances writing for one agent at the same moment can each see room,
+// so a burst can pass it by as many statements as run at that moment. Each of
+// those is a different call, and the next one is refused.
+//
+// A statement that wrote nothing was stopped by the key or by the limit. Which one
+// is asked afterwards, and a key whose row was decided in between is written again,
+// once. An approval that is pending is reported as such whatever the count says.
+func (p *Postgres) CreateApprovalOnce(ctx context.Context, a Approval, key string, limit int) (Approval, PendingOutcome, error) {
+	ctxJSON, err := marshalContext(a.Context)
+	if err != nil {
+		return Approval{}, PendingCreated, err
+	}
+	org, _ := a.Context["org"].(string)
+	for attempt := 0; attempt < 2; attempt++ {
+		res, err := p.db.ExecContext(ctx,
+			`INSERT INTO approvals (approval_id, agent_id, run_id, requested_at, context_json, pending_key)
+			 SELECT $1::text, $2::text, $3::text, $4::timestamptz, $5::jsonb, $6::text
+			 WHERE (SELECT count(*) FROM approvals
+			        WHERE agent_id = $2::text AND decision IS NULL
+			          AND COALESCE(context_json->>'org', '') = $7::text) < $8::bigint
+			 ON CONFLICT (agent_id, run_id, pending_key) WHERE decision IS NULL AND pending_key IS NOT NULL
+			 DO NOTHING`,
+			a.ApprovalID, a.AgentID, a.RunID, a.RequestedAt, ctxJSON, key, org, limit)
+		if err != nil {
+			return Approval{}, PendingCreated, fmt.Errorf("store: insert approval %q: %w", a.ApprovalID, err)
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return Approval{}, PendingCreated, fmt.Errorf("store: insert approval %q: %w", a.ApprovalID, err)
+		}
+		if n == 1 {
+			return a, PendingCreated, nil
+		}
+		row := p.db.QueryRowContext(ctx,
+			`SELECT approval_id, agent_id, run_id, requested_at, decided_at, decided_by, decided_by_label, decision, context_json
+			 FROM approvals
+			 WHERE agent_id = $1 AND run_id = $2 AND pending_key = $3 AND decision IS NULL`,
+			a.AgentID, a.RunID, key)
+		existing, err := scanApproval(row)
+		if err == nil {
+			return existing, PendingExisting, nil
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			return Approval{}, PendingCreated, fmt.Errorf("store: read pending approval: %w", err)
+		}
+	}
+	return Approval{}, PendingQueueFull, nil
+}
+
 func (p *Postgres) GetApproval(ctx context.Context, id string) (Approval, error) {
 	row := p.db.QueryRowContext(ctx,
 		`SELECT approval_id, agent_id, run_id, requested_at, decided_at, decided_by, decided_by_label, decision, context_json
@@ -124,6 +179,29 @@ func (p *Postgres) ListApprovals(ctx context.Context) ([]Approval, error) {
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("store: list approvals: %w", err)
+	}
+	return out, nil
+}
+
+func (p *Postgres) ListPendingApprovals(ctx context.Context) ([]Approval, error) {
+	rows, err := p.db.QueryContext(ctx,
+		`SELECT approval_id, agent_id, run_id, requested_at, decided_at, decided_by, decided_by_label, decision, context_json
+		 FROM approvals WHERE decision IS NULL ORDER BY requested_at ASC`)
+	if err != nil {
+		return nil, fmt.Errorf("store: list pending approvals: %w", err)
+	}
+	defer rows.Close()
+
+	var out []Approval
+	for rows.Next() {
+		a, err := scanApproval(rows)
+		if err != nil {
+			return nil, fmt.Errorf("store: scan approval: %w", err)
+		}
+		out = append(out, a)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: list pending approvals: %w", err)
 	}
 	return out, nil
 }

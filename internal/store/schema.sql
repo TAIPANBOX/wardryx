@@ -21,8 +21,23 @@ ALTER TABLE approvals ADD COLUMN IF NOT EXISTS context_json JSONB NOT NULL DEFAU
 -- row decided before the column existed, and when no text was sent.
 ALTER TABLE approvals ADD COLUMN IF NOT EXISTS decided_by_label TEXT;
 
+-- The call a hold of the floor is about (approval.PendingKey), which keeps a
+-- repeated call to one pending row (CLAUDE.md invariant 48). A column of its own
+-- rather than an expression over context_json: a database may already hold
+-- identical pending rows, and an index over them would fail at this line, which is
+-- a process that does not start. Every existing row is NULL here, and NULL is
+-- outside the index, so this upgrades in place. A decided row leaves the index, so
+-- the same call held after a person answered is a new row.
+ALTER TABLE approvals ADD COLUMN IF NOT EXISTS pending_key TEXT;
+
 CREATE INDEX IF NOT EXISTS approvals_agent_id ON approvals (agent_id);
 CREATE INDEX IF NOT EXISTS approvals_requested_at ON approvals (requested_at);
+CREATE UNIQUE INDEX IF NOT EXISTS approvals_pending_call
+    ON approvals (agent_id, run_id, pending_key)
+    WHERE decision IS NULL AND pending_key IS NOT NULL;
+-- What the unanswered-approval sweep reads, and the per-agent count beside it.
+CREATE INDEX IF NOT EXISTS approvals_pending ON approvals (agent_id, requested_at)
+    WHERE decision IS NULL;
 
 -- WARDRYX_APPROVAL_SINGLE_USE redemption tracking. A minted approval_token's
 -- claims do not carry its originating approval_id (see

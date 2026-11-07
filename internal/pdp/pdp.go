@@ -66,6 +66,12 @@ const ReasonApprovalSpent = "approval_token was already redeemed once under WARD
 // recorded deny was the credential's doing and not the policy's.
 const ReasonApprovalRefused = "presented approval_token is invalid"
 
+// HoldKindNoGrant is DecideResponse.HoldKind on a decision rule 15 reached: a tool
+// call the floor holds because nothing grants it. internal/api stamps it on the
+// approval as hold_kind, so a person is told what ends the hold for good, and
+// reads it to keep such a hold to one row per call (invariant 48).
+const HoldKindNoGrant = "no_grant"
+
 // DecideRequest describes one action an agent is about to take, submitted
 // to POST /v1/decide.
 type DecideRequest struct {
@@ -157,10 +163,11 @@ type DecideRequest struct {
 	Signals []Signal
 	// ToolCall is the concrete call this request is about to make, when the
 	// enforcement point knows it. Decide reads its Name in rules 2 and 3
-	// (deny_tool and allow_tool), and in rule 14 whether it is present at all: a
-	// hold_if_signal rule with when_absent: hold holds a tool call that came
+	// (deny_tool and allow_tool), and in rules 14 and 15 whether it is present at
+	// all: a hold_if_signal rule with when_absent: hold holds a tool call that came
 	// with no signal of its name, and never a request without one; that hold's
-	// reason names the call and says whether its arguments were truncated. It
+	// reason names the call and says whether its arguments were truncated. The
+	// floor (when_no_grant) judges a request that carries one and no other. It
 	// never reads the arguments: the decision record leaves them out, and they
 	// are digested only to verify an approval token bound to the call.
 	ToolCall *ToolCall
@@ -184,8 +191,9 @@ type DecideResponse struct {
 	ApprovalID string
 	// ApprovalTokenRequired reports whether this action is gated by human
 	// approval at all -- true whenever the estimated cost exceeds a matched
-	// policy's require_human_above_usd threshold, or a matched policy's
-	// hold_if_signal rule is satisfied, whether or not a valid
+	// policy's require_human_above_usd threshold, a matched policy's
+	// hold_if_signal rule is satisfied, or a matched when_no_grant holds a tool
+	// call nothing grants, whether or not a valid
 	// token ultimately satisfied it. False when no cost rule was ever
 	// reached (e.g. a deny fired first) or no matched policy sets a
 	// threshold. It is also false when a matched policy's deny_above_usd
@@ -202,12 +210,19 @@ type DecideResponse struct {
 	// possibly downgrade this Allow to a fresh Hold. Decide itself stays
 	// storage-free either way; it never performs that check.
 	ApprovalTokenRequired bool
+	// HoldKind says which gate stood in the way when that is the floor:
+	// HoldKindNoGrant on a hold rule 15 produced and on the allow a valid token
+	// earned there, so a token spent a second time keeps the kind on the fresh
+	// hold internal/api substitutes. Empty for every other decision. It is not
+	// part of the wire response and no rule reads it.
+	HoldKind string
 	// Cacheable reports whether this decision is a pure function of
 	// (agent_id, tool set), independent of any per-request value such as
 	// Steps, Domains, or EstCostUSD. True when no policy matched by
 	// AgentID sets MaxSteps, AllowDomains, AllowTool, RequireHumanAboveUSD,
-	// or DenyAboveUSD -- the fields Decide checks against per-request state,
-	// AllowTool with the name of the tool call -- or when no policy matched at
+	// DenyAboveUSD, WhenNoGrant or GrantTool -- the fields Decide checks against
+	// per-request state, AllowTool with the name of the tool call, the floor with
+	// the tool call itself -- or when no policy matched at
 	// all. A request that carries a tool call is not True under a matched
 	// DenyTool either, since rule 2 reads the call's name, which lies outside
 	// the agent and tool set. False whenever a matched policy sets any of those
@@ -332,15 +347,30 @@ func (e *Engine) SetPolicies(policies *policy.Set) {
 //     its name, resolves to Hold, unless a valid ApprovalToken was presented
 //     (then Allow; for a hold on an absent signal only a token bound to the
 //     call is valid); an invalid token holds, it never denies;
-//  15. otherwise, Allow.
+//  15. a tool call under a matched when_no_grant, one of whose requested tools
+//     no matched policy grants, resolves to Hold, unless an ApprovalToken bound
+//     to the call was presented (then Allow); any other token holds, it never
+//     denies. A request with no tool_call is not judged. A tool is granted by a
+//     matched policy whose target pins a trust domain and which names it in
+//     allow_tool or grant_tool, and by nothing else;
+//  16. otherwise, Allow.
 //
-// Rule 14 is the only rule a signal, or the absence of one, can reach, and it
-// is last on purpose: it runs only once every deny rule and the cost gate have
-// declined, so a signal can turn an allow into a hold and can change nothing
-// else. It never turns a deny into anything, never replaces another rule's hold
-// or its reason, and never allows. Its invalid-token branch holds where rule
-// 13's denies, because without the signal that same call would have been
-// allowed, and a signal must not be able to turn an allow into a refusal.
+// Rule 14 is the only rule a signal, or the absence of one, can reach. It runs
+// only once every deny rule and the cost gate have declined, so a signal can turn
+// an allow into a hold and can change nothing else. It never turns a deny into
+// anything, never replaces another rule's hold or its reason, and never allows.
+// Its invalid-token branch holds where rule 13's denies, because without the
+// signal that same call would have been allowed, and a signal must not be able to
+// turn an allow into a refusal.
+//
+// Rule 15 is the only rule a matched policy can lift by being there, which makes
+// it the first rule of this list that is not monotonic: every other rule a policy
+// adds can only narrow what passes. So it is last, like rule 14 and for the same
+// reason, and what lifts it is held to one shape: a restriction never does, only
+// a grant, and a grant reaches no other rule, so it lifts no deny and no other
+// hold. Rules 13 and 14 read the floor in one respect: on a call it would hold,
+// their token must be bound to the call too. Otherwise a token that binds no call
+// would pass them and return Allow before rule 15 could see it.
 //
 // A deny from any rule wins outright: it short-circuits every later rule
 // and Decide never has to reconcile a deny against a later hold or allow.
@@ -352,7 +382,7 @@ func (e *Engine) SetPolicies(policies *policy.Set) {
 // require_human_above_usd, with a cost that exceeds both, must Deny rather
 // than Hold -- the hard ceiling always wins over the approval gate, and
 // require_human_above_usd's threshold is never even reached, so no
-// ApprovalToken is checked at all. Rules 13 and 14 are the only ones that can
+// ApprovalToken is checked at all. Rules 13, 14 and 15 are the only ones that can
 // resolve to something other than Deny or fall-through (Hold, or Allow via a
 // redeemed token), so they come after every unconditional deny check,
 // including the hard ceiling of rule 12 and the model rule, which no approval
@@ -487,10 +517,18 @@ func (e *Engine) Decide(req DecideRequest) DecideResponse {
 		return resp
 	}
 
+	// For rules 13 and 14: on a call rule 15 would hold, their token must be bound
+	// to the call as well, or it would return Allow before rule 15 saw it.
+	_, floorHolds := heldWithoutGrant(matched, req)
+
 	if pol, ok := overThreshold(matched, req.EstCostUSD); ok {
 		resp.ApprovalTokenRequired = true
 		if req.ApprovalToken != "" {
-			verr := e.approvals.VerifyForCall(req.ApprovalToken, req.AgentID, req.RunID, req.ToolNames, req.EstCostUSD, req.ToolCall.Digest())
+			verify := e.approvals.VerifyForCall
+			if floorHolds {
+				verify = e.approvals.VerifyBoundToCall
+			}
+			verr := verify(req.ApprovalToken, req.AgentID, req.RunID, req.ToolNames, req.EstCostUSD, req.ToolCall.Digest())
 			if verr == nil {
 				resp.Decision = Allow
 				resp.Reason = fmt.Sprintf("estimated cost %s exceeds policy %q threshold %s; allowed via a valid approval_token", formatUSD(req.EstCostUSD), pol.Name, formatUSD(*pol.RequireHumanAboveUSD))
@@ -517,13 +555,35 @@ func (e *Engine) Decide(req DecideRequest) DecideResponse {
 		resp.ApprovalTokenRequired = true
 		why := held.reason(req.ToolCall)
 		// A hold on an absent signal is lifted only by a token bound to this
-		// call; any other signal hold by any token that verifies for it.
+		// call, and so is any hold on a call the floor would hold; any other
+		// signal hold by any token that verifies for it.
 		verify := e.approvals.VerifyForCall
-		if held.callMustBeBound {
+		if held.callMustBeBound || floorHolds {
 			verify = e.approvals.VerifyBoundToCall
 		}
 		if req.ApprovalToken != "" &&
 			verify(req.ApprovalToken, req.AgentID, req.RunID, req.ToolNames, req.EstCostUSD, req.ToolCall.Digest()) == nil {
+			resp.Decision = Allow
+			resp.Reason = why + "; allowed via a valid approval_token"
+			return resp
+		}
+		resp.Decision = Hold
+		resp.Reason = why + "; human approval required"
+		return resp
+	}
+
+	// Rule 15. Reached only when every deny rule, the cost gate and the signal
+	// rules have declined, so it turns an allow into a hold and nothing else. The
+	// hold exists because nothing says this agent may use this tool, so only an
+	// approval of this call lifts it, and a token that does not verify holds
+	// again: the call was allowed the moment before the floor was written, and a
+	// floor must not be able to turn an allow into a refusal.
+	if held, ok := heldWithoutGrant(matched, req); ok {
+		resp.ApprovalTokenRequired = true
+		resp.HoldKind = HoldKindNoGrant
+		why := held.reason(req.AgentID)
+		if req.ApprovalToken != "" &&
+			e.approvals.VerifyBoundToCall(req.ApprovalToken, req.AgentID, req.RunID, req.ToolNames, req.EstCostUSD, req.ToolCall.Digest()) == nil {
 			resp.Decision = Allow
 			resp.Reason = why + "; allowed via a valid approval_token"
 			return resp
@@ -587,11 +647,17 @@ func requestSpecific(matched []policy.Policy, hasToolCall bool) bool {
 		// point knew the agent is a claim about one request, so a decision that
 		// could have read it must not be served to a request that came with
 		// another source.
+		//
+		// WhenNoGrant and GrantTool join them because a token can lift the floor
+		// for one call, and an enforcement point's decision cache has no call
+		// digest in its key: a cached allow for one call would open the same tool
+		// with other arguments until the entry expired.
 		if p.MaxSteps > 0 || p.RequireHumanAboveUSD != nil || p.DenyAboveUSD != nil ||
 			len(p.AllowDomains) > 0 || len(p.AllowTool) > 0 || p.DenyIfChainUnproven ||
 			p.MaxChainDepth > 0 || p.RequireRootPrincipal != "" ||
 			p.HoldIfSignal != nil || len(p.AllowModels) > 0 ||
-			len(p.RequireIdentitySource) > 0 {
+			len(p.RequireIdentitySource) > 0 ||
+			p.WhenNoGrant != "" || len(p.GrantTool) > 0 {
 			return true
 		}
 		// deny_tool reads the tool call's name as well as the tool list (rule 2).

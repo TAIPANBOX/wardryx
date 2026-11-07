@@ -52,6 +52,7 @@ func codeDefaults(t *testing.T) map[string]string {
 		unanswered = api.DefaultUnansweredAfter
 	}
 	signalMaxAge, _ := sloburn.ParseMaxAge(cfg.SignalEventsMaxAge)
+	pendingPerAgent, _ := api.ParsePendingPerAgent(cfg.PendingPerAgent)
 	return map[string]string{
 		"WARDRYX_ADDR":                              orDefault(cfg.Addr, serveAddrFallback(t)),
 		"WARDRYX_KEYS":                              cfg.Keys,
@@ -81,6 +82,7 @@ func codeDefaults(t *testing.T) map[string]string {
 		"WARDRYX_ALLOW_KEY_APPROVALS":               strconv.FormatBool(cfg.AllowKeyApprovals),
 		"WARDRYX_SIGNAL_EVENTS":                     cfg.SignalEvents,
 		"WARDRYX_SIGNAL_EVENTS_MAX_AGE":             signalMaxAge.String(),
+		"WARDRYX_PENDING_PER_AGENT":                 strconv.Itoa(pendingPerAgent),
 	}
 }
 

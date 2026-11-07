@@ -58,11 +58,17 @@ func (refusingStore) Ping(context.Context) error { return errRefused("ping") }
 func (refusingStore) CreateApproval(context.Context, store.Approval) error {
 	return errRefused("insert approval")
 }
+func (refusingStore) CreateApprovalOnce(context.Context, store.Approval, string, int) (store.Approval, store.PendingOutcome, error) {
+	return store.Approval{}, store.PendingCreated, errRefused("insert approval")
+}
 func (refusingStore) GetApproval(context.Context, string) (store.Approval, error) {
 	return store.Approval{}, errRefused("get approval")
 }
 func (refusingStore) ListApprovals(context.Context) ([]store.Approval, error) {
 	return nil, errRefused("list approvals")
+}
+func (refusingStore) ListPendingApprovals(context.Context) ([]store.Approval, error) {
+	return nil, errRefused("list pending approvals")
 }
 func (refusingStore) DecideApproval(context.Context, string, string, string, string, time.Time) (store.Approval, error) {
 	return store.Approval{}, errRefused("decide approval")
@@ -96,11 +102,17 @@ func (hangingStore) Ping(ctx context.Context) error { return hang(ctx, "ping") }
 func (hangingStore) CreateApproval(ctx context.Context, _ store.Approval) error {
 	return hang(ctx, "insert approval")
 }
+func (hangingStore) CreateApprovalOnce(ctx context.Context, _ store.Approval, _ string, _ int) (store.Approval, store.PendingOutcome, error) {
+	return store.Approval{}, store.PendingCreated, hang(ctx, "insert approval")
+}
 func (hangingStore) GetApproval(ctx context.Context, _ string) (store.Approval, error) {
 	return store.Approval{}, hang(ctx, "get approval")
 }
 func (hangingStore) ListApprovals(ctx context.Context) ([]store.Approval, error) {
 	return nil, hang(ctx, "list approvals")
+}
+func (hangingStore) ListPendingApprovals(ctx context.Context) ([]store.Approval, error) {
+	return nil, hang(ctx, "list pending approvals")
 }
 func (hangingStore) DecideApproval(ctx context.Context, _, _, _, _ string, _ time.Time) (store.Approval, error) {
 	return store.Approval{}, hang(ctx, "decide approval")

@@ -219,3 +219,39 @@ func TestMutatingWhatGetPolicyReturnsDoesNotReachTheStore(t *testing.T) {
 			second.Policy.AllowDomains)
 	}
 }
+
+func TestListPendingApprovalsHandsOutACopy(t *testing.T) {
+	m, ctx := NewMemory(), context.Background()
+	if err := m.CreateApproval(ctx, Approval{ApprovalID: "a", AgentID: "x", Context: map[string]any{"org": "acme"}}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := m.ListPendingApprovals(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got[0].Context["org"] = "rewritten"
+	again, _ := m.GetApproval(ctx, "a")
+	if again.Context["org"] != "acme" {
+		t.Fatal("an edit of what ListPendingApprovals handed out reached the store")
+	}
+}
+
+func TestCreateApprovalOnceHandsOutACopy(t *testing.T) {
+	m, ctx := NewMemory(), context.Background()
+	in := Approval{ApprovalID: "a", AgentID: "x", RunID: "r", Context: map[string]any{"org": "acme"}}
+	first, _, err := m.CreateApprovalOnce(ctx, in, "k", 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first.Context["org"] = "rewritten"
+	in.Context["org"] = "rewritten too"
+	second, outcome, err := m.CreateApprovalOnce(ctx, Approval{ApprovalID: "b", AgentID: "x", RunID: "r", Context: map[string]any{"org": "acme"}}, "k", 5)
+	if err != nil || outcome != PendingExisting {
+		t.Fatalf("%v %v", outcome, err)
+	}
+	second.Context["org"] = "rewritten three"
+	again, _ := m.GetApproval(ctx, "a")
+	if again.Context["org"] != "acme" {
+		t.Fatalf("an edit of what CreateApprovalOnce took or handed out reached the store: %v", again.Context)
+	}
+}

@@ -22,13 +22,12 @@
 // who approved "delete bucket X" has not approved "delete bucket Y" with the
 // same tool; see claims.ToolCallDigest.
 //
-// A valid token is reusable for its full TTL against the same
-// (agent_id, run_id, tool set), at the same or a lower est_cost_usd, by
-// default: fine for retry-tolerance, and no longer loose for spend
-// governance now that the cost ceiling is enforced too.
-// WARDRYX_APPROVAL_SINGLE_USE (internal/api, backed by internal/store's
-// Store.TryRedeem) is an opt-in mode that lets a minted token allow exactly
-// one /v1/decide call; see RedemptionKey.
+// A valid token allows exactly one /v1/decide call, the default since 1.0
+// (CLAUDE.md invariant 5): internal/api claims its RedemptionKey through
+// internal/store's Store.TryRedeem, and a second presentation is a fresh hold.
+// Only WARDRYX_APPROVAL_SINGLE_USE set to an explicit false restores the pre-1.0
+// behaviour of a token redeemed repeatedly for its TTL against the same
+// (agent_id, run_id, tool set), at the same or a lower est_cost_usd.
 package approval
 
 import (
@@ -459,6 +458,33 @@ func newApprovalID() (string, error) {
 // est_cost_usd, attestation_method, on_behalf_of, reason, policy_version);
 // a nil context is treated as empty.
 func Request(ctx context.Context, st store.Store, agentID, runID string, tools []string, context map[string]any) (store.Approval, error) {
+	a, err := newPending(agentID, runID, tools, context)
+	if err != nil {
+		return store.Approval{}, err
+	}
+	if err := st.CreateApproval(ctx, a); err != nil {
+		return store.Approval{}, err
+	}
+	return a, nil
+}
+
+// RequestOnce is Request for a hold of the floor (when_no_grant), whose queue is
+// kept bounded for an agent that repeats itself: a call already pending returns
+// that approval, and past limit pending approvals nothing is written. outcome says
+// which, and the decision itself never depends on it: the verdict and the reason
+// are Decide's, so a replay reproduces them whatever the queue was doing. This is
+// a deduplication of what is written, not state between a hold and its resolution
+// (invariant 7): the token stays the only thing a grant hands over.
+func RequestOnce(ctx context.Context, st store.Store, agentID, runID string, tools []string, context map[string]any, key string, limit int) (store.Approval, store.PendingOutcome, error) {
+	a, err := newPending(agentID, runID, tools, context)
+	if err != nil {
+		return store.Approval{}, store.PendingCreated, err
+	}
+	return st.CreateApprovalOnce(ctx, a, key, limit)
+}
+
+// newPending builds the row a hold writes.
+func newPending(agentID, runID string, tools []string, context map[string]any) (store.Approval, error) {
 	id, err := newApprovalID()
 	if err != nil {
 		return store.Approval{}, err
@@ -468,18 +494,31 @@ func Request(ctx context.Context, st store.Store, agentID, runID string, tools [
 		full[k] = v
 	}
 	full["tool_names"] = sortedCopy(tools)
-
-	a := store.Approval{
+	return store.Approval{
 		ApprovalID:  id,
 		AgentID:     agentID,
 		RunID:       runID,
 		RequestedAt: time.Now().UTC(),
 		Context:     full,
+	}, nil
+}
+
+// PendingKey names the call a pending hold of the floor is about: a sha-256 over a
+// fixed tag, then the org and the call's digest, each with its length. The agent
+// and the run are columns beside it. The org is folded in because a call held in
+// one org is not the same hold as the same call held in another: an org's admin
+// sees and decides its own approvals only (invariant 37), so a row shared across
+// two would leave one of them a hold nobody it can reach may answer.
+func PendingKey(org, toolCallDigest string) string {
+	h := sha256.New()
+	h.Write([]byte("wardryx.pending-call.v1"))
+	var n [8]byte
+	for _, f := range []string{org, toolCallDigest} {
+		binary.BigEndian.PutUint64(n[:], uint64(len(f)))
+		h.Write(n[:])
+		h.Write([]byte(f))
 	}
-	if err := st.CreateApproval(ctx, a); err != nil {
-		return store.Approval{}, err
-	}
-	return a, nil
+	return hex.EncodeToString(h.Sum(nil))
 }
 
 // Decide resolves a pending approval as granted or denied. On "deny", no

@@ -28,14 +28,24 @@ type Memory struct {
 	order      []string             // insertion order, for a deterministic ListApprovals
 	redeemed   map[string]time.Time // TryRedeem's claimed keys, by approval.RedemptionKey
 	policyByID map[string]PolicyRecord
+	// pendingCall maps a call to the approval id CreateApprovalOnce wrote for it.
+	// An entry whose approval has been decided no longer counts, the way a decided
+	// row leaves the partial index in Postgres, and is overwritten by the next one.
+	pendingCall map[pendingCallKey]string
 }
+
+// pendingCallKey is what makes two holds the same call: the agent, the run and the
+// key CreateApprovalOnce is given. Postgres's partial unique index is on these
+// three columns.
+type pendingCallKey struct{ agent, run, key string }
 
 // NewMemory returns an empty in-memory Store.
 func NewMemory() *Memory {
 	return &Memory{
-		byID:       make(map[string]Approval),
-		redeemed:   make(map[string]time.Time),
-		policyByID: make(map[string]PolicyRecord),
+		byID:        make(map[string]Approval),
+		redeemed:    make(map[string]time.Time),
+		policyByID:  make(map[string]PolicyRecord),
+		pendingCall: make(map[pendingCallKey]string),
 	}
 }
 
@@ -75,6 +85,45 @@ func (m *Memory) CreateApproval(_ context.Context, a Approval) error {
 	m.byID[a.ApprovalID] = a
 	m.order = append(m.order, a.ApprovalID)
 	return nil
+}
+
+// CreateApprovalOnce writes a unless the same call is pending or the agent is at
+// limit, as Store documents. The mutex makes the check and the write one step, so
+// here the limit is exact; across Postgres connections it is not (see Postgres).
+func (m *Memory) CreateApprovalOnce(_ context.Context, a Approval, key string, limit int) (Approval, PendingOutcome, error) {
+	ctxCopy, err := deepCopyContext(a.Context)
+	if err != nil {
+		return Approval{}, PendingCreated, err
+	}
+	a.Context = ctxCopy
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	call := pendingCallKey{a.AgentID, a.RunID, key}
+	if id, ok := m.pendingCall[call]; ok {
+		if existing := m.byID[id]; existing.Pending() {
+			out, err := copyOut(existing)
+			return out, PendingExisting, err
+		}
+	}
+	org, _ := a.Context["org"].(string)
+	waiting := 0
+	for _, other := range m.byID {
+		if otherOrg, _ := other.Context["org"].(string); other.Pending() && other.AgentID == a.AgentID && otherOrg == org {
+			waiting++
+		}
+	}
+	if waiting >= limit {
+		return Approval{}, PendingQueueFull, nil
+	}
+	if _, exists := m.byID[a.ApprovalID]; exists {
+		return Approval{}, PendingCreated, fmt.Errorf("store: approval %q already exists", a.ApprovalID)
+	}
+	m.byID[a.ApprovalID] = a
+	m.order = append(m.order, a.ApprovalID)
+	m.pendingCall[call] = a.ApprovalID
+	out, err := copyOut(a)
+	return out, PendingCreated, err
 }
 
 // copyOut is deepCopyContext on the way OUT, and it exists because a struct
@@ -125,6 +174,26 @@ func (m *Memory) ListApprovals(_ context.Context) ([]Approval, error) {
 	defer m.mu.Unlock()
 	out := make([]Approval, 0, len(m.order))
 	for _, id := range m.order {
+		a, err := copyOut(m.byID[id])
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, a)
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		return out[i].RequestedAt.Before(out[j].RequestedAt)
+	})
+	return out, nil
+}
+
+func (m *Memory) ListPendingApprovals(_ context.Context) ([]Approval, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]Approval, 0, len(m.order))
+	for _, id := range m.order {
+		if !m.byID[id].Pending() {
+			continue
+		}
 		a, err := copyOut(m.byID[id])
 		if err != nil {
 			return nil, err

@@ -246,6 +246,29 @@ on `slo_burn`, and a file of 200 lines: 33 to 42 microseconds and 60 allocations
 microseconds and 72 allocations with it on, so about 8 microseconds and 12 allocations more, inside the
 run-to-run spread of the off case.
 
+## A tool call nothing grants, held for a person (2026-11-07)
+
+The built binary on one 4-core Intel N150 box, against a real Postgres, with the documentation's own example
+(`docs/examples/tool-hold.yaml`) as the floor. `@measured` 2026-11-07, by hand on that box, the same steps as
+`TestTheBuiltBinaryHoldsAToolCallNothingGrants`, which is in CI. First a history with a file that has no floor
+and one fleet-wide `deny_tool`, then the candidate report, then the floor on.
+
+| Step | Result |
+|---|---|
+| five decisions under the file with no floor (tool calls of two agents, a denied tool, a model call) | as they always were |
+| `wardryx replay -policy docs/examples/tool-hold.yaml` | 5 reproduced, none unexamined, and a table: `fetch_url` 2 calls and `exec` 1 call of the worker would wait for a person. Nothing was enabled |
+| the broker's body, tool nothing grants | `hold`, `approval_token_required: true`, `cacheable: false`, reason `policy "tool-hold" when_no_grant: no policy grants tool "fetch_url" to agent "agent://acme.example/agents/worker"; human approval required` |
+| the same call again | `hold`, the same `approval_id` |
+| a model call of the same agent, an egress question | `allow` |
+| a forged token | `hold`, not `deny` |
+| a person grants; the token on a call with other arguments | `hold` |
+| the token on the approved call, then again | `allow`, then `hold` with the spent sentence |
+| `PUT` with `when_no_grant` | `400`, the sentence says the policy file and `grant_tool` |
+| `PUT` with `grant_tool` on `agent://*`, then on the agent | `400`, then `200`, and the next call of that tool is `allow` with no restart, and the next tool `hold` |
+| 31 different calls of one tool, in a loop | every one `hold` with one reason, 20 rows pending in Postgres, the answers past the cap name no approval, `approval_queue_full` written once |
+| the record | two `policy_loaded` events, `9e5d23cb3d6f` with no floor and `6c5914b6007f` with `tool-hold` |
+| `wardryx replay` of the whole record | 46 decisions: 44 reproduced, 1 approval decided, 1 approval spent, none diverged, the allows from before the floor word for word |
+
 ## Method
 
 Disposable Hetzner VPS boxes (deleted after each run), Wardryx running as a PEP in front of a real

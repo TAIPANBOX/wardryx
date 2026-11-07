@@ -412,3 +412,162 @@ func TestMemoryDeletePolicyNotFound(t *testing.T) {
 		t.Errorf("DeletePolicy(missing) = %v, want ErrNotFound", err)
 	}
 }
+
+// CreateApprovalOnce is what keeps a queue a person reads from being a log of what
+// an agent in a loop tried. The Postgres twin of each of these is in
+// pgstore_integration_test.go.
+
+func onceApproval(id, agent, run, org string) Approval {
+	return Approval{ApprovalID: id, AgentID: agent, RunID: run, RequestedAt: time.Now().UTC(), Context: map[string]any{"org": org}}
+}
+
+func TestMemoryOneCallIsOnePendingRow(t *testing.T) {
+	m, ctx := NewMemory(), context.Background()
+	a, outcome, err := m.CreateApprovalOnce(ctx, onceApproval("ap1", "agent://x/a", "r", "acme"), "k", 5)
+	if err != nil || outcome != PendingCreated || a.ApprovalID != "ap1" {
+		t.Fatalf("first: %+v %v %v", a, outcome, err)
+	}
+	b, outcome, err := m.CreateApprovalOnce(ctx, onceApproval("ap2", "agent://x/a", "r", "acme"), "k", 5)
+	if err != nil || outcome != PendingExisting || b.ApprovalID != "ap1" {
+		t.Fatalf("second: %+v %v %v, want the row it has", b, outcome, err)
+	}
+	if all, _ := m.ListApprovals(ctx); len(all) != 1 {
+		t.Fatalf("%d rows", len(all))
+	}
+}
+
+func TestMemoryAnotherKeyRunOrAgentIsAnotherRow(t *testing.T) {
+	m, ctx := NewMemory(), context.Background()
+	for i, c := range []struct{ agent, run, key string }{
+		{"agent://x/a", "r", "k"}, {"agent://x/a", "r", "k2"}, {"agent://x/a", "r2", "k"}, {"agent://x/b", "r", "k"},
+	} {
+		if _, outcome, err := m.CreateApprovalOnce(ctx, onceApproval(fmt.Sprintf("ap%d", i), c.agent, c.run, "acme"), c.key, 5); err != nil || outcome != PendingCreated {
+			t.Fatalf("case %d: %v %v", i, outcome, err)
+		}
+	}
+}
+
+func TestMemoryADecidedRowNoLongerCounts(t *testing.T) {
+	m, ctx := NewMemory(), context.Background()
+	if _, _, err := m.CreateApprovalOnce(ctx, onceApproval("ap1", "agent://x/a", "r", "acme"), "k", 1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.DecideApproval(ctx, "ap1", "deny", "key:x", "", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	got, outcome, err := m.CreateApprovalOnce(ctx, onceApproval("ap2", "agent://x/a", "r", "acme"), "k", 1)
+	if err != nil || outcome != PendingCreated || got.ApprovalID != "ap2" {
+		t.Fatalf("after a decision: %+v %v %v", got, outcome, err)
+	}
+}
+
+func TestMemoryADecidedRowIsNotReportedAsPendingAtTheLimit(t *testing.T) {
+	m, ctx := NewMemory(), context.Background()
+	if _, _, err := m.CreateApprovalOnce(ctx, onceApproval("ap1", "agent://x/a", "r", "acme"), "k1", 1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.DecideApproval(ctx, "ap1", "deny", "key:x", "", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := m.CreateApprovalOnce(ctx, onceApproval("ap2", "agent://x/a", "r", "acme"), "k2", 1); err != nil {
+		t.Fatal(err)
+	}
+	if got, outcome, err := m.CreateApprovalOnce(ctx, onceApproval("ap3", "agent://x/a", "r", "acme"), "k1", 1); err != nil || outcome != PendingQueueFull {
+		t.Fatalf("the call of an answered row at the limit: %+v %v %v, want the queue full", got, outcome, err)
+	}
+}
+
+func TestMemoryTheLimitIsPerAgentAndOrgAndARepeatIsNotStoppedByIt(t *testing.T) {
+	m, ctx := NewMemory(), context.Background()
+	if _, _, err := m.CreateApprovalOnce(ctx, onceApproval("ap1", "agent://x/a", "r", "acme"), "k1", 1); err != nil {
+		t.Fatal(err)
+	}
+	if _, outcome, err := m.CreateApprovalOnce(ctx, onceApproval("ap2", "agent://x/a", "r", "acme"), "k2", 1); err != nil || outcome != PendingQueueFull {
+		t.Fatalf("past the limit: %v %v", outcome, err)
+	}
+	if got, outcome, _ := m.CreateApprovalOnce(ctx, onceApproval("ap3", "agent://x/a", "r", "acme"), "k1", 1); outcome != PendingExisting || got.ApprovalID != "ap1" {
+		t.Fatalf("a repeat at the limit: %+v %v", got, outcome)
+	}
+	if _, outcome, _ := m.CreateApprovalOnce(ctx, onceApproval("ap4", "agent://x/b", "r", "acme"), "k1", 1); outcome != PendingCreated {
+		t.Fatalf("another agent: %v", outcome)
+	}
+	if _, outcome, _ := m.CreateApprovalOnce(ctx, onceApproval("ap5", "agent://x/a", "r", "other"), "k9", 1); outcome != PendingCreated {
+		t.Fatalf("another org: %v", outcome)
+	}
+	// A plain CreateApproval row counts: a person reads one queue.
+	if err := m.CreateApproval(ctx, onceApproval("ap6", "agent://x/c", "r", "acme")); err != nil {
+		t.Fatal(err)
+	}
+	if _, outcome, _ := m.CreateApprovalOnce(ctx, onceApproval("ap7", "agent://x/c", "r", "acme"), "k1", 1); outcome != PendingQueueFull {
+		t.Fatalf("beside a plain row: %v", outcome)
+	}
+}
+
+func TestMemoryOneCallIsOneRowUnderConcurrency(t *testing.T) {
+	m, ctx := NewMemory(), context.Background()
+	const callers = 64
+	var wg sync.WaitGroup
+	created := make(chan string, callers)
+	for i := 0; i < callers; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			got, outcome, err := m.CreateApprovalOnce(ctx, onceApproval(fmt.Sprintf("ap%d", i), "agent://x/a", "r", "acme"), "k", 5)
+			if err != nil {
+				t.Error(err)
+			}
+			if outcome == PendingCreated {
+				created <- got.ApprovalID
+			}
+		}(i)
+	}
+	wg.Wait()
+	close(created)
+	if n := len(created); n != 1 {
+		t.Fatalf("%d callers wrote the row, want exactly one", n)
+	}
+}
+
+func TestMemoryCreateApprovalOnceRefusesAnIDThatIsTaken(t *testing.T) {
+	m, ctx := NewMemory(), context.Background()
+	if err := m.CreateApproval(ctx, onceApproval("ap1", "agent://x/a", "r", "acme")); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := m.CreateApprovalOnce(ctx, onceApproval("ap1", "agent://x/b", "r", "acme"), "k", 5); err == nil {
+		t.Fatal("an id already taken was written over")
+	}
+}
+
+func TestMemoryCreateApprovalOnceRefusesAContextThatDoesNotMarshal(t *testing.T) {
+	m := NewMemory()
+	bad := onceApproval("ap1", "agent://x/a", "r", "acme")
+	bad.Context["c"] = make(chan int)
+	if _, _, err := m.CreateApprovalOnce(context.Background(), bad, "k", 5); err == nil {
+		t.Fatal("a context that does not marshal was accepted")
+	}
+	if _, err := m.GetApproval(context.Background(), "ap1"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("after a refusal the row reads %v, want it never written", err)
+	}
+}
+
+func TestMemoryListPendingApprovalsLeavesOutWhatWasDecided(t *testing.T) {
+	m, ctx := NewMemory(), context.Background()
+	base := time.Now().UTC()
+	for i, id := range []string{"ap_new", "ap_old", "ap_done"} {
+		a := onceApproval(id, "agent://x/a", "r", "acme")
+		a.RequestedAt = base.Add(time.Duration(2-i) * time.Minute)
+		if err := m.CreateApproval(ctx, a); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := m.DecideApproval(ctx, "ap_done", "grant", "key:x", "", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	got, err := m.ListPendingApprovals(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || got[0].ApprovalID != "ap_old" || got[1].ApprovalID != "ap_new" {
+		t.Fatalf("%+v, want the two pending rows, oldest first", got)
+	}
+}
