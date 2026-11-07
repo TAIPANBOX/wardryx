@@ -1,4 +1,5 @@
-# Put an agent's tool calls to a person while its error budget is spent.
+# Put an agent's calls, model calls as well as tool calls, to a person while its
+# error budget is spent.
 #
 # It needs wardryx started with WARDRYX_SIGNAL_EVENTS pointing at the file the
 # quality plane (verdryx) writes its events to. Without that setting nothing
