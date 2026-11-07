@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/TAIPANBOX/agent-stack-go/v2/event"
 	"github.com/TAIPANBOX/wardryx/internal/archive"
@@ -563,8 +564,15 @@ func TestReplayRefusesAFormatItDoesNotHave(t *testing.T) {
 func TestServeRefusesAPendingCapItCannotRead(t *testing.T) {
 	t.Setenv("WARDRYX_PENDING_PER_AGENT", "many")
 	t.Setenv("WARDRYX_KEYS", "k:acme:admin")
-	err := run([]string{"serve", "-addr", "127.0.0.1:0"})
-	if err == nil || !strings.Contains(err.Error(), "WARDRYX_PENDING_PER_AGENT") {
-		t.Fatalf("serve answered %v, want a refusal naming the variable", err)
+	// On its own goroutine: a serve that does not refuse does not return.
+	done := make(chan error, 1)
+	go func() { done <- run([]string{"serve", "-addr", "127.0.0.1:0"}) }()
+	select {
+	case err := <-done:
+		if err == nil || !strings.Contains(err.Error(), "WARDRYX_PENDING_PER_AGENT") {
+			t.Fatalf("serve answered %v, want a refusal naming the variable", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("serve started on a cap it could not read")
 	}
 }

@@ -461,6 +461,22 @@ func TestMemoryADecidedRowNoLongerCounts(t *testing.T) {
 	}
 }
 
+func TestMemoryADecidedRowIsNotReportedAsPendingAtTheLimit(t *testing.T) {
+	m, ctx := NewMemory(), context.Background()
+	if _, _, err := m.CreateApprovalOnce(ctx, onceApproval("ap1", "agent://x/a", "r", "acme"), "k1", 1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.DecideApproval(ctx, "ap1", "deny", "key:x", "", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := m.CreateApprovalOnce(ctx, onceApproval("ap2", "agent://x/a", "r", "acme"), "k2", 1); err != nil {
+		t.Fatal(err)
+	}
+	if got, outcome, err := m.CreateApprovalOnce(ctx, onceApproval("ap3", "agent://x/a", "r", "acme"), "k1", 1); err != nil || outcome != PendingQueueFull {
+		t.Fatalf("the call of an answered row at the limit: %+v %v %v, want the queue full", got, outcome, err)
+	}
+}
+
 func TestMemoryTheLimitIsPerAgentAndOrgAndARepeatIsNotStoppedByIt(t *testing.T) {
 	m, ctx := NewMemory(), context.Background()
 	if _, _, err := m.CreateApprovalOnce(ctx, onceApproval("ap1", "agent://x/a", "r", "acme"), "k1", 1); err != nil {
@@ -528,6 +544,9 @@ func TestMemoryCreateApprovalOnceRefusesAContextThatDoesNotMarshal(t *testing.T)
 	bad.Context["c"] = make(chan int)
 	if _, _, err := m.CreateApprovalOnce(context.Background(), bad, "k", 5); err == nil {
 		t.Fatal("a context that does not marshal was accepted")
+	}
+	if _, err := m.GetApproval(context.Background(), "ap1"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("after a refusal the row reads %v, want it never written", err)
 	}
 }
 

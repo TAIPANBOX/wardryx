@@ -201,7 +201,8 @@ func Run(events []event.Event, arch *archive.Archive, candidate *policy.Set) Rep
 }
 
 // heldTools folds the rows a candidate's floor would hold into one entry per agent
-// and tool, in a stable order, so two runs over one history read the same.
+// and tool, in a stable order, so two runs over one history read the same. Never
+// nil, so the JSON form says [] and a reader has no null to tell from none.
 func heldTools(rows []Row) []HeldTool {
 	type key struct{ agent, tool string }
 	byKey := map[key]*HeldTool{}
@@ -547,15 +548,11 @@ type JSON struct {
 
 // AsJSON renders r for a program.
 func AsJSON(r Report, source, candidateName string) JSON {
-	held := r.WouldHold
-	if held == nil {
-		held = []HeldTool{}
-	}
 	return JSON{
 		Source: source, Candidate: candidateName, Total: r.Total, Reproduced: r.Reproduced,
 		ApprovalDecided: r.ApprovalDecided, ApprovalSpent: r.ApprovalSpent, ApprovalRefused: r.ApprovalRefused,
 		NotArchived: r.NotArchived, Unreadable: r.Unreadable, Diverged: r.Diverged,
-		Unexamined: r.NotArchived + r.Unreadable + r.Diverged, Changed: r.Changed, WouldHold: held,
+		Unexamined: r.NotArchived + r.Unreadable + r.Diverged, Changed: r.Changed, WouldHold: r.WouldHold,
 	}
 }
 

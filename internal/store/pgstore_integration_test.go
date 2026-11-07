@@ -622,6 +622,26 @@ func TestPgTheLimitIsPerAgentAndOrgAndARepeatIsNotStoppedByIt(t *testing.T) {
 	}
 }
 
+// A call stopped by the limit is looked up, to tell a repeat from a new call, and the
+// row a person already answered must not read as that repeat.
+func TestPgADecidedRowIsNotReportedAsPendingAtTheLimit(t *testing.T) {
+	p := testDB(t)
+	ctx := context.Background()
+	if _, _, err := p.CreateApprovalOnce(ctx, pgOnce("ap1", "agent://x/a", "r", "acme"), "k1", 1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.DecideApproval(ctx, "ap1", "deny", "key:x", "", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := p.CreateApprovalOnce(ctx, pgOnce("ap2", "agent://x/a", "r", "acme"), "k2", 1); err != nil {
+		t.Fatal(err)
+	}
+	got, outcome, err := p.CreateApprovalOnce(ctx, pgOnce("ap3", "agent://x/a", "r", "acme"), "k1", 1)
+	if err != nil || outcome != PendingQueueFull || got.ApprovalID != "" {
+		t.Fatalf("the call of an answered row at the limit: %+v %v %v, want the queue full", got, outcome, err)
+	}
+}
+
 func TestPgOneCallIsOneRowAcrossConnections(t *testing.T) {
 	p := testDB(t)
 	ctx := context.Background()

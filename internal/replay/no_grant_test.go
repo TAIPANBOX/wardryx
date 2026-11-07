@@ -125,6 +125,9 @@ func TestAHoldAnEarlierRuleWouldTakeIsNotReportedAsTheFloors(t *testing.T) {
 	arch := archiveOf(t, old)
 	cand := floorSet(t, policy.Policy{Name: "no", Target: "agent://*", DenyTool: []string{"fetch_url"}})
 	report := Run([]event.Event{toolAllow(workerAgent, "fetch_url", old.Version(), "2026-11-01T10:00:00Z")}, arch, cand)
+	if report.Reproduced != 1 {
+		t.Fatalf("%+v", report)
+	}
 	if len(report.WouldHold) != 0 || report.Rows[0].Candidate.Decision != pdp.Deny {
 		t.Fatalf("%+v %+v", report.WouldHold, report.Rows[0].Candidate)
 	}
@@ -137,6 +140,9 @@ func TestAHoldAnotherRuleTakesIsNotCountedAsTheFloors(t *testing.T) {
 	ev := toolAllow(workerAgent, "fetch_url", old.Version(), "2026-11-01T10:00:00Z")
 	ev.Data["est_cost_usd"] = 5.0
 	report := Run([]event.Event{ev}, arch, cand)
+	if report.Reproduced != 1 {
+		t.Fatalf("%+v", report)
+	}
 	if report.Rows[0].Candidate.Decision != pdp.Hold || len(report.WouldHold) != 0 {
 		t.Fatalf("a cost hold is listed under the floor: %+v %+v", report.Rows[0].Candidate, report.WouldHold)
 	}
@@ -157,7 +163,11 @@ func TestFormatNamesEveryAgentAndToolWithItsCountAndLastTime(t *testing.T) {
 			t.Errorf("the report does not say %q:\n%s", want, out)
 		}
 	}
-	if strings.Contains(strings.SplitN(out, "would wait for a person", 2)[1], "y\n  was:") {
+	_, table, found := strings.Cut(out, "would wait for a person")
+	if !found {
+		t.Fatalf("no table:\n%s", out)
+	}
+	if strings.Contains(table, "y\n  was:") {
 		t.Errorf("a hostile id reached the table raw:\n%s", out)
 	}
 }
