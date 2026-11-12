@@ -111,6 +111,12 @@ Feature: A person deciding a held call is shown its arguments
     # -> internal/approverstmt:TestAVersion2StatementWithAMalformedDigestIsRefused
     # -> internal/approverstmt:TestAVersion1StatementCannotCarryTheVersion2ClaimsAndOtherVersionsAreRefused
 
+  Scenario: A person may refuse a call without reading its arguments
+    Given a sealed preview of a hold
+    When a person denies it with a statement that names no preview
+    Then the denial is made and recorded as unseen, while a grant named the same way is refused
+    # -> internal/api:TestAPersonMayDenyASealedHoldWithoutOpeningItAndTheRecordSaysUnseen
+
   Scenario: A decision without a preview is allowed and marked
     Given a hold whose arguments could not be shown
     When a person decides it

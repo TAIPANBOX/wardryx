@@ -220,9 +220,10 @@ const (
 //
 // A person's version 2 statement must name the hold's call (tcd, or none for a
 // hold with no call) and the hold's preview (pvd when one was sealed, none
-// otherwise). A version 1 statement names neither, so it is refused on a hold
-// whose preview was sealed: the person could have been shown it, and the
-// record must say whether they were. A grant of a hold a policy marked
+// otherwise, and none is also accepted on a sealed hold for a deny, which opens
+// nothing and is recorded as unseen). A version 1 statement names neither, so
+// it is refused on a hold whose preview was sealed: the person could have been
+// shown it, and the record must say whether they were. A grant of a hold a policy marked
 // require_preview needs a person who saw the preview, or a call that had no
 // arguments to see.
 func previewAtDecide(ctx map[string]any, decision string, stmt approverstmt.Statement, person bool) (string, string) {
@@ -241,12 +242,16 @@ func previewAtDecide(ctx map[string]any, decision string, stmt approverstmt.Stat
 		if stmt.ToolCallDigest != wantTCD {
 			return "", refusalStatementMismatch
 		}
-		if rec.state == PreviewSealed {
-			if stmt.PreviewDigest != rec.digest {
-				return "", refusalStatementMismatch
-			}
+		switch {
+		case rec.state == PreviewSealed && stmt.PreviewDigest == rec.digest:
 			outcome = PreviewSeen
-		} else if stmt.PreviewDigest != approverstmt.None {
+		case rec.state == PreviewSealed && stmt.PreviewDigest == approverstmt.None && decision == "deny":
+			// A person may refuse a call without reading its arguments: a deny
+			// opens nothing. It is recorded as unseen. A grant of a call whose
+			// preview exists names that preview.
+		case rec.state == PreviewSealed:
+			return "", refusalStatementMismatch
+		case stmt.PreviewDigest != approverstmt.None:
 			return "", refusalStatementMismatch
 		}
 	case person:
