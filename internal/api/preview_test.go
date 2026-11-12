@@ -518,3 +518,22 @@ func TestWatchPreviewsPurgesUntilItsContextEnds(t *testing.T) {
 		t.Fatal("WatchPreviews did not stop with its context")
 	}
 }
+
+func TestAPersonMayDenyASealedHoldWithoutOpeningItAndTheRecordSaysUnseen(t *testing.T) {
+	h := newPreviewHarness(t, true)
+	id := h.hold(t, "fetch_url", `{"url":"https://example.org"}`)
+	a := h.approval(t, id)
+	// A grant without the preview is refused: the preview exists.
+	blindGrant := statementV2(t, h.console, id, "grant", toolCallDigestOf(a.Context), "none")
+	if code, body := h.decide(t, id, approvalDecideRequestDTO{Decision: "grant", ApproverStatement: blindGrant}); code != http.StatusForbidden || !strings.Contains(body, refusalStatementMismatch) {
+		t.Fatalf("a grant of a sealed hold without its preview: %d %s", code, body)
+	}
+	deny := statementV2(t, h.console, id, "deny", toolCallDigestOf(a.Context), "none")
+	if code, body := h.decide(t, id, approvalDecideRequestDTO{Decision: "deny", ApproverStatement: deny}); code != http.StatusOK {
+		t.Fatalf("a deny without opening the preview: %d %s", code, body)
+	}
+	ev := h.lastDecisionEvent(t, id)
+	if ev[ContextKeyPreview] != PreviewUnseen || ev["preview_state"] != PreviewSealed || ev["preview_digest"] != "none" {
+		t.Fatalf("event %v", ev)
+	}
+}
