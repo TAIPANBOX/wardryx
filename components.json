@@ -127,6 +127,12 @@
           },
           "WARDRYX_PENDING_PER_AGENT": {
             "required": false
+          },
+          "WARDRYX_PREVIEW_RECIPIENT": {
+            "required": false
+          },
+          "WARDRYX_PREVIEW_TTL": {
+            "required": false
           }
         },
         "starts_with_empty_environment": false,

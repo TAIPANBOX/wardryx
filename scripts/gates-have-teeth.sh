@@ -862,6 +862,42 @@ run_case "bus-types: the writer is gone" fail \
 	"$(py 'edit("internal/api/api.go", "func (s *Server) writeRecord(", "func (s *Server) appendRecord(")')" \
 	"measured nothing"
 
+# Invariant 51: what a person is shown of a held call's arguments is built in one
+# place, sealed there, never opened by wardryx, and reaches no record path.
+run_case "preview-never-in-record: a second place builds a preview" fail \
+	'./scripts/preview-never-in-record.sh' \
+	"$(py 'edit("internal/api/api.go", "func valueOf(p *string) string {", "var _ = func() { _, _, _ = preview.Build(nil) }\n\nfunc valueOf(p *string) string {")')" \
+	"preview.Build is called outside"
+
+run_case "preview-never-in-record: wardryx opens a sealed preview" fail \
+	'./scripts/preview-never-in-record.sh' \
+	"$(py 'edit("internal/api/preview.go", "func previewOf(", "var _ = previewseal.Open\nvar _ = func() { _, _ = previewseal.Open(nil, previewseal.Binding{}, nil) }\n\nfunc previewOf(")')" \
+	"production code opens a sealed preview"
+
+run_case "preview-never-in-record: replay imports the preview package" fail \
+	'./scripts/preview-never-in-record.sh' \
+	"$(py 'edit("internal/replay/replay.go", "import (", "import (\n\t_ \"github.com/TAIPANBOX/wardryx/internal/preview\"")')" \
+	"imports the preview packages"
+
+run_case "preview-never-in-record: the sealed bytes named in a record path" fail \
+	'./scripts/preview-never-in-record.sh' \
+	"$(py 'edit("internal/api/api.go", "\t\t\theldInput[ContextKeyPreview] = plan.contextValue()", "\t\t\theldInput[ContextKeyPreview] = plan.contextValue()\n\t\t\theldInput[\"preview_bytes\"] = plan.sealed")')" \
+	"the sealed preview is named outside"
+
+run_case "preview-never-in-record: a comment that names the preview" pass \
+	'./scripts/preview-never-in-record.sh' \
+	"$(py 'edit("internal/api/api.go", "func valueOf(p *string) string {", "// The preview of a held call is built in preview.go and nowhere else.\nfunc valueOf(p *string) string {")')"
+
+run_case "preview-never-in-record: the preview site is gone" fail \
+	'./scripts/preview-never-in-record.sh' \
+	"$(py 'import os; os.remove("internal/api/preview.go")')" \
+	"measured nothing"
+
+run_case "decision-path-purity: the preview reads the clock" fail \
+	'./scripts/decision-path-purity.sh' \
+	"$(py 'edit("internal/preview/preview.go", "import (", "import (\n\t_ \"time\"")')" \
+	"imports 'time' directly"
+
 echo
 if [ -n "$(git status --porcelain)" ]; then
 	printf 'FAIL: this script left the tree dirty, so it cannot be trusted about anything above\n'

@@ -32,6 +32,11 @@ type Memory struct {
 	// An entry whose approval has been decided no longer counts, the way a decided
 	// row leaves the partial index in Postgres, and is overwritten by the next one.
 	pendingCall map[pendingCallKey]string
+	// previews are the sealed previews by approval id (invariant 51).
+	previews map[string]Preview
+	// now is the clock a preview's expiry is read against; time.Now unless a
+	// test sets it.
+	now func() time.Time
 }
 
 // pendingCallKey is what makes two holds the same call: the agent, the run and the
@@ -46,6 +51,8 @@ func NewMemory() *Memory {
 		redeemed:    make(map[string]time.Time),
 		policyByID:  make(map[string]PolicyRecord),
 		pendingCall: make(map[pendingCallKey]string),
+		previews:    make(map[string]Preview),
+		now:         time.Now,
 	}
 }
 
@@ -221,7 +228,60 @@ func (m *Memory) DecideApproval(_ context.Context, id, decision, decidedBy, labe
 	a.DecidedByLabel = label
 	a.DecidedAt = decidedAt
 	m.byID[id] = a
+	// Under the same lock as the decision, as Postgres does it in one
+	// transaction (invariant 51).
+	delete(m.previews, id)
 	return copyOut(a)
+}
+
+// PutPreview keeps a copy of pv unless its approval already has one.
+func (m *Memory) PutPreview(_ context.Context, pv Preview) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, ok := m.previews[pv.ApprovalID]; ok {
+		return nil
+	}
+	m.previews[pv.ApprovalID] = copyPreviewOut(pv)
+	return nil
+}
+
+// GetPreview returns a copy of a preview that has not expired.
+func (m *Memory) GetPreview(_ context.Context, id string) (Preview, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	pv, ok := m.previews[id]
+	if !ok || !pv.ExpiresAt.After(m.now()) {
+		return Preview{}, fmt.Errorf("%w: preview %s", ErrNotFound, id)
+	}
+	return copyPreviewOut(pv), nil
+}
+
+// PurgePreviews drops the expired previews.
+func (m *Memory) PurgePreviews(_ context.Context) (int64, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var n int64
+	now := m.now()
+	for id, pv := range m.previews {
+		if !pv.ExpiresAt.After(now) {
+			delete(m.previews, id)
+			n++
+		}
+	}
+	return n, nil
+}
+
+// SetClock sets the clock a preview's expiry is read against. For tests.
+func (m *Memory) SetClock(now func() time.Time) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.now = now
+}
+
+// copyPreviewOut is a Preview that shares no memory with the one given.
+func copyPreviewOut(pv Preview) Preview {
+	pv.Sealed = append([]byte(nil), pv.Sealed...)
+	return pv
 }
 
 func (m *Memory) TryRedeem(_ context.Context, key string) (bool, error) {

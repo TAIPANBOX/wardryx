@@ -97,6 +97,42 @@ const (
 	PendingQueueFull
 )
 
+// Preview is what a person deciding a held tool call is shown of its arguments,
+// sealed to the console's preview key (internal/previewseal; CLAUDE.md
+// invariant 51). The store holds ciphertext only.
+type Preview struct {
+	// ApprovalID is the hold this preview belongs to.
+	ApprovalID string
+	// Org is the org of that hold, so a read can be scoped without the hold.
+	Org string
+	// Sealed is the HPKE encapsulated key followed by the ciphertext.
+	Sealed []byte
+	// Digest is the preview's digest (pvd), the value the hold records.
+	Digest string
+	// Ruleset is the preview rules it was built under.
+	Ruleset string
+	// Suite names the HPKE ciphersuite, as previewseal.Recipient.Suite.
+	Suite string
+	// ExpiresAt is when the preview stops being served.
+	ExpiresAt time.Time
+}
+
+// PreviewStore keeps sealed previews. Both Memory and Postgres implement it.
+// A Store that does not is one that keeps no preview, and a hold made under it
+// records the preview as unavailable.
+type PreviewStore interface {
+	// PutPreview writes p for its approval, and does nothing when that
+	// approval already has one: a repeated call is the same call, so its
+	// preview is the same.
+	PutPreview(ctx context.Context, p Preview) error
+	// GetPreview returns the preview of an approval, or ErrNotFound when there
+	// is none or it has expired. An expired row is never handed out, purged or
+	// not.
+	GetPreview(ctx context.Context, approvalID string) (Preview, error)
+	// PurgePreviews removes the expired rows and reports how many went.
+	PurgePreviews(ctx context.Context) (int64, error)
+}
+
 // PolicyRecord is one stored policy-as-code document: an operator-assigned
 // id (distinct from Policy.Name, which need not be unique or URL-safe),
 // the policy body itself, and when it was last written. Reusing
@@ -163,7 +199,10 @@ type Store interface {
 	// DecideApproval records decision ("grant" or "deny"), decidedBy and
 	// label against the approval with the given id, and returns the updated
 	// approval. It returns ErrNotFound if no such approval exists, or
-	// ErrAlreadyDecided if it was already decided.
+	// ErrAlreadyDecided if it was already decided. The approval's sealed
+	// preview, when it has one, is deleted in the same transaction: once a
+	// person has answered, nobody needs to read the arguments again
+	// (invariant 51).
 	DecideApproval(ctx context.Context, id, decision, decidedBy, label string, decidedAt time.Time) (Approval, error)
 
 	// TryRedeem atomically claims key if (and only if) it has not already

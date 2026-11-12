@@ -35,7 +35,7 @@ func testDB(t *testing.T) *Postgres {
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
-	if _, err := p.db.Exec(`TRUNCATE approvals, approval_redemptions, policies, agent_proof_replays`); err != nil {
+	if _, err := p.db.Exec(`TRUNCATE approvals, approval_redemptions, policies, agent_proof_replays, approval_previews`); err != nil {
 		t.Fatalf("truncate: %v", err)
 	}
 	t.Cleanup(func() { p.Close() })
@@ -756,4 +756,19 @@ func TestPgTheSchemaUpgradesATableThatAlreadyHoldsDuplicates(t *testing.T) {
 	if all, _ := p.ListPendingApprovals(ctx); len(all) != 2 {
 		t.Fatalf("%d rows after the upgrade", len(all))
 	}
+}
+
+func TestPgKeepsAPreviewUntilItIsDecidedOrExpires(t *testing.T) {
+	p := testDB(t)
+	// Postgres reads expiry by its own clock, so the test moves the rows, not
+	// the clock: setNow shifts every row's expires_at back by the difference.
+	var shifted time.Duration
+	base := time.Now().UTC()
+	previewStoreContract(t, p, func(at time.Time) {
+		d := at.Sub(base) - shifted
+		shifted += d
+		if _, err := p.db.Exec(`UPDATE approval_previews SET expires_at = expires_at - make_interval(secs => $1)`, d.Seconds()); err != nil {
+			t.Fatal(err)
+		}
+	})
 }

@@ -81,3 +81,19 @@ CREATE TABLE IF NOT EXISTS policies (
 );
 
 CREATE INDEX IF NOT EXISTS policies_updated_at ON policies (updated_at);
+
+-- What a person deciding a held tool call is shown of its arguments, sealed to
+-- the console's preview key (CLAUDE.md invariant 51): ciphertext only, never the
+-- arguments and never the preview in the clear. A row lives until the hold is
+-- decided, when DecideApproval deletes it in the same transaction, or until
+-- expires_at, after which it is never served and a purge removes it. The hold
+-- records only the preview's digest (pvd) and ruleset, in context_json.
+CREATE TABLE IF NOT EXISTS approval_previews (
+    approval_id TEXT PRIMARY KEY,
+    org         TEXT NOT NULL DEFAULT '',
+    sealed      BYTEA NOT NULL,
+    pvd         TEXT NOT NULL,
+    ruleset     TEXT NOT NULL,
+    suite       TEXT NOT NULL,
+    expires_at  TIMESTAMPTZ NOT NULL
+);

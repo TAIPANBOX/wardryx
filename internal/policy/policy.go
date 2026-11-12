@@ -240,6 +240,20 @@ type Policy struct {
 	// would read as a glob and match nothing. Unlike the floor it may be written
 	// through PUT: it is what ends a hold on a running box with no restart.
 	GrantTool []string `yaml:"grant_tool,omitempty" json:"grant_tool,omitempty"`
+	// RequirePreview says a held tool call of the agents this policy matches
+	// may be granted only by a person who was shown its arguments: a grant
+	// needs a version 2 approver statement naming the preview the hold
+	// records, and a hold with no preview (its arguments were too large, or no
+	// preview key is configured) can be denied but not granted one call at a
+	// time (CLAUDE.md invariant 51). It changes no verdict: Decide holds what
+	// it held, and only internal/api's grant reads it.
+	//
+	// File only, as when_no_grant is and for its reason: the store reads a
+	// policy with a decoder that drops what it does not know, so after a
+	// rollback the requirement would be gone and the policy would still read
+	// as in force. Omitted when false, so a policy without it keeps its
+	// PolicyVersion byte for byte.
+	RequirePreview bool `yaml:"require_preview,omitempty" json:"require_preview,omitempty"`
 }
 
 // NoGrantAction is the type of when_no_grant. A type of its own so that the JSON

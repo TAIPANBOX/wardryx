@@ -58,7 +58,21 @@ type Statement struct {
 	ApprovalID   string // aid
 	Decision     string // dec: "grant" or "deny"
 	JTI          string // jti: the statement's own id, for the audit record
+	// Version is the statement's v: 1, or 2 for a statement that also names
+	// what the person was shown (invariant 51).
+	Version int
+	// ToolCallDigest (tcd, version 2) is the digest of the call the person
+	// decided, or None for a hold that names no call.
+	ToolCallDigest string
+	// PreviewDigest (pvd, version 2) is the digest of the preview of the
+	// call's arguments the person was shown, or None when they were shown
+	// none.
+	PreviewDigest string
 }
+
+// None is the value tcd or pvd carries when there is no call, or no preview,
+// to name.
+const None = "none"
 
 // New builds a verifier from a set of EC P-256 keys. Each key's kid is its RFC
 // 7638 thumbprint, computed here and never taken from the input, so a key cannot
@@ -156,8 +170,27 @@ func (v *Verifier) Verify(token, approvalID, decision string, now time.Time) (St
 	if err != nil {
 		return refuse("the signature does not verify under the key the kid names")
 	}
-	if n, ok := claims["v"].(float64); !ok || n != 1 {
-		return refuse("v is not 1")
+	n, ok := claims["v"].(float64)
+	if !ok || (n != 1 && n != 2) {
+		return refuse("v is not 1 or 2")
+	}
+	version := int(n)
+	var tcd, pvd string
+	if version == 2 {
+		// A version 2 statement names the call and what was shown of it, each
+		// a digest or the word none, and nothing else is accepted there.
+		tcd, _ = claims["tcd"].(string)
+		pvd, _ = claims["pvd"].(string)
+		if !digestOrNone(tcd) {
+			return refuse("tcd is not a digest or none")
+		}
+		if !digestOrNone(pvd) {
+			return refuse("pvd is not a digest or none")
+		}
+	} else if _, has := claims["tcd"]; has {
+		return refuse("a version 1 statement carries tcd")
+	} else if _, has := claims["pvd"]; has {
+		return refuse("a version 1 statement carries pvd")
 	}
 	sub, _ := claims["sub"].(string)
 	if !labelOK(sub, maxSubjectBytes) {
@@ -195,7 +228,25 @@ func (v *Verifier) Verify(token, approvalID, decision string, now time.Time) (St
 	case now.After(expires.Add(Leeway)):
 		return refuse("the statement has expired")
 	}
-	return Statement{Approver: sub, CredentialID: cred, ApprovalID: aid, Decision: dec, JTI: jti}, nil
+	return Statement{Approver: sub, CredentialID: cred, ApprovalID: aid, Decision: dec, JTI: jti,
+		Version: version, ToolCallDigest: tcd, PreviewDigest: pvd}, nil
+}
+
+// digestOrNone reports a lower-case hex sha-256, or None.
+func digestOrNone(s string) bool {
+	if s == None {
+		return true
+	}
+	if len(s) != 64 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if !(c >= '0' && c <= '9' || c >= 'a' && c <= 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 // labelOK reports whether s is short, valid UTF-8, and free of control characters

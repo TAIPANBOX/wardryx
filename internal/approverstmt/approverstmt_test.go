@@ -111,7 +111,7 @@ func TestAStatementSignedByTheConsoleKeyVerifiesAndNamesTheApprover(t *testing.T
 	if err != nil {
 		t.Fatalf("a statement the console key signed was refused: %v", err)
 	}
-	want := Statement{Approver: sub, CredentialID: cred, ApprovalID: aid, Decision: dec, JTI: jti}
+	want := Statement{Approver: sub, CredentialID: cred, ApprovalID: aid, Decision: dec, JTI: jti, Version: 1}
 	if got != want {
 		t.Fatalf("the verified statement names %+v, want %+v", got, want)
 	}

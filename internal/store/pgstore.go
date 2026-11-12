@@ -207,9 +207,17 @@ func (p *Postgres) ListPendingApprovals(ctx context.Context) ([]Approval, error)
 }
 
 func (p *Postgres) DecideApproval(ctx context.Context, id, decision, decidedBy, label string, decidedAt time.Time) (Approval, error) {
+	// The decision and the deletion of the hold's sealed preview are one
+	// transaction, so no decided hold keeps a preview and no failed decision
+	// loses one (invariant 51).
+	tx, err := p.db.BeginTx(ctx, nil)
+	if err != nil {
+		return Approval{}, fmt.Errorf("store: decide approval %q: %w", id, err)
+	}
+	defer func() { _ = tx.Rollback() }()
 	// An empty label is stored as NULL, the value every row decided before
 	// the column existed holds, so "no label was sent" has one spelling.
-	res, err := p.db.ExecContext(ctx,
+	res, err := tx.ExecContext(ctx,
 		`UPDATE approvals SET decision = $2, decided_by = $3, decided_at = $4, decided_by_label = NULLIF($5, '')
 		 WHERE approval_id = $1 AND decision IS NULL`,
 		id, decision, decidedBy, decidedAt, label)
@@ -221,6 +229,7 @@ func (p *Postgres) DecideApproval(ctx context.Context, id, decision, decidedBy, 
 		return Approval{}, fmt.Errorf("store: decide approval %q: %w", id, err)
 	}
 	if n == 0 {
+		_ = tx.Rollback()
 		// Either the row does not exist, or it exists but was already
 		// decided; distinguish so the caller can respond precisely.
 		if _, getErr := p.GetApproval(ctx, id); errors.Is(getErr, ErrNotFound) {
@@ -228,7 +237,56 @@ func (p *Postgres) DecideApproval(ctx context.Context, id, decision, decidedBy, 
 		}
 		return Approval{}, fmt.Errorf("%w: %s", ErrAlreadyDecided, id)
 	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM approval_previews WHERE approval_id = $1`, id); err != nil {
+		return Approval{}, fmt.Errorf("store: decide approval %q: delete its preview: %w", id, err)
+	}
+	if err := tx.Commit(); err != nil {
+		return Approval{}, fmt.Errorf("store: decide approval %q: %w", id, err)
+	}
 	return p.GetApproval(ctx, id)
+}
+
+// PutPreview writes a sealed preview with ON CONFLICT DO NOTHING: a repeated
+// call already has its preview, and it is the same one.
+func (p *Postgres) PutPreview(ctx context.Context, pv Preview) error {
+	_, err := p.db.ExecContext(ctx,
+		`INSERT INTO approval_previews (approval_id, org, sealed, pvd, ruleset, suite, expires_at)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7) ON CONFLICT (approval_id) DO NOTHING`,
+		pv.ApprovalID, pv.Org, pv.Sealed, pv.Digest, pv.Ruleset, pv.Suite, pv.ExpiresAt)
+	if err != nil {
+		return fmt.Errorf("store: put preview %q: %w", pv.ApprovalID, err)
+	}
+	return nil
+}
+
+// GetPreview reads a preview that has not expired by the database's clock, so
+// every instance agrees on what has.
+func (p *Postgres) GetPreview(ctx context.Context, id string) (Preview, error) {
+	var pv Preview
+	err := p.db.QueryRowContext(ctx,
+		`SELECT approval_id, org, sealed, pvd, ruleset, suite, expires_at FROM approval_previews
+		 WHERE approval_id = $1 AND expires_at > now()`, id).
+		Scan(&pv.ApprovalID, &pv.Org, &pv.Sealed, &pv.Digest, &pv.Ruleset, &pv.Suite, &pv.ExpiresAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Preview{}, fmt.Errorf("%w: preview %s", ErrNotFound, id)
+	}
+	if err != nil {
+		return Preview{}, fmt.Errorf("store: get preview %q: %w", id, err)
+	}
+	return pv, nil
+}
+
+// PurgePreviews deletes the expired rows by the database's clock.
+func (p *Postgres) PurgePreviews(ctx context.Context) (int64, error) {
+	res, err := p.db.ExecContext(ctx, `DELETE FROM approval_previews WHERE expires_at <= now()`)
+	if err != nil {
+		return 0, fmt.Errorf("store: purge previews: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("store: purge previews: %w", err)
+	}
+	return n, nil
 }
 
 // TryRedeem claims key via an INSERT .. ON CONFLICT DO NOTHING against
