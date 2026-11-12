@@ -430,7 +430,8 @@ func isInvisible(r rune) bool {
 }
 
 // mixedScript reports a word that mixes Latin with Cyrillic or Greek, the shape
-// of a lookalike: "раypal" reads as a name it is not.
+// of a lookalike: "paypal" written with a Cyrillic \u0440 and \u0430 in place of
+// its first two letters reads as a name it is not.
 func mixedScript(t string) bool {
 	var latin, cyrillic, greek bool
 	check := func() bool {
