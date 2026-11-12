@@ -53,6 +53,8 @@ func codeDefaults(t *testing.T) map[string]string {
 	}
 	signalMaxAge, _ := sloburn.ParseMaxAge(cfg.SignalEventsMaxAge)
 	pendingPerAgent, _ := api.ParsePendingPerAgent(cfg.PendingPerAgent)
+	// What serve does with the two preview variables: buildPreview reads them.
+	_, previewTTL, _ := buildPreview(cfg)
 	return map[string]string{
 		"WARDRYX_ADDR":                              orDefault(cfg.Addr, serveAddrFallback(t)),
 		"WARDRYX_KEYS":                              cfg.Keys,
@@ -83,6 +85,8 @@ func codeDefaults(t *testing.T) map[string]string {
 		"WARDRYX_SIGNAL_EVENTS":                     cfg.SignalEvents,
 		"WARDRYX_SIGNAL_EVENTS_MAX_AGE":             signalMaxAge.String(),
 		"WARDRYX_PENDING_PER_AGENT":                 strconv.Itoa(pendingPerAgent),
+		"WARDRYX_PREVIEW_RECIPIENT":                 cfg.PreviewRecipient,
+		"WARDRYX_PREVIEW_TTL":                       previewTTL.String(),
 	}
 }
 

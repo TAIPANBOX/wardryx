@@ -216,6 +216,13 @@ type DecideResponse struct {
 	// hold internal/api substitutes. Empty for every other decision. It is not
 	// part of the wire response and no rule reads it.
 	HoldKind string
+	// RequirePreview is set when the request carries a tool call and a matched
+	// policy sets require_preview: a grant of this hold must come from a
+	// person who was shown the call's arguments (invariant 51). Computed once,
+	// before any rule runs, like Cacheable. No rule reads it and it changes no
+	// verdict; internal/api records it in the hold and reads it at the grant.
+	// It is not part of the wire response.
+	RequirePreview bool
 	// Cacheable reports whether this decision is a pure function of
 	// (agent_id, tool set), independent of any per-request value such as
 	// Steps, Domains, or EstCostUSD. True when no policy matched by
@@ -422,6 +429,7 @@ func (e *Engine) Decide(req DecideRequest) DecideResponse {
 	// field doc comment for why this depends on the matched policy set as
 	// a whole, not on which specific rule produced Decision.
 	resp.Cacheable = !requestSpecific(matched, req.ToolCall != nil)
+	resp.RequirePreview = req.ToolCall != nil && requiresPreview(matched)
 
 	// Rule 2 reads the same names as rule 3: the tool list and the tool call's
 	// name. The tool call is outside the (agent, tool set) key a cache uses, so
@@ -1038,4 +1046,14 @@ func chainUnproven(policies []policy.Policy, chain []string, proven bool) (polic
 		}
 	}
 	return policy.Policy{}, false
+}
+
+// requiresPreview reports whether any matched policy sets require_preview.
+func requiresPreview(matched []policy.Policy) bool {
+	for _, p := range matched {
+		if p.RequirePreview {
+			return true
+		}
+	}
+	return false
 }

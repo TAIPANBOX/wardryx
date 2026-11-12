@@ -57,6 +57,8 @@ func run(args []string) error {
 		return runApprovals(args[1:])
 	case "replay":
 		return runReplay(args[1:])
+	case "preview-key":
+		return runPreviewKey(args[1:])
 	case "version":
 		fmt.Println("wardryx", version)
 		return nil
@@ -75,6 +77,8 @@ commands:
   approvals  list pending/decided approvals from Postgres (-db)
   replay     put recorded decisions back to the PDP: what a candidate policy
              would have done to a history that already happened
+  preview-key  generate the console's preview key: the private key to -out,
+             the recipient for WARDRYX_PREVIEW_RECIPIENT printed
   version    print version
 
 Every serve flag (-addr, -policy, -db, -events, -otlp-endpoint) falls back
@@ -203,6 +207,10 @@ func runServe(args []string) error {
 	if err != nil {
 		return err
 	}
+	previewRecipient, previewTTL, err := buildPreview(cfg)
+	if err != nil {
+		return err
+	}
 
 	var st store.Store
 	// Set only with a database: an interface holding a nil *Postgres is not nil.
@@ -279,6 +287,10 @@ func runServe(args []string) error {
 	if approvers != nil {
 		srv.WithApprovers(approvers).WithAllowKeyApprovals(cfg.AllowKeyApprovals)
 		fmt.Fprintf(os.Stderr, "wardryx: approval statements are verified against the console keys in %s\n", cfg.ApproverJWKSFile)
+	}
+	if previewRecipient != nil {
+		srv.WithPreview(previewRecipient, previewTTL)
+		fmt.Fprintf(os.Stderr, "wardryx: held calls keep a preview of their arguments sealed to the console key (%s), for at most %s\n", previewRecipient.Suite(), previewTTL)
 	}
 	for _, w := range approverStartWarnings(cfg) {
 		fmt.Fprintln(os.Stderr, "wardryx: WARNING: "+w)
@@ -386,6 +398,12 @@ func runServe(args []string) error {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 		go srv.WatchUnansweredApprovals(ctx)
+	}
+
+	if previewRecipient != nil {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		go srv.WatchPreviews(ctx)
 	}
 
 	fmt.Fprintf(os.Stderr, "wardryx: serving on http://%s\n", displayAddr(*addr))

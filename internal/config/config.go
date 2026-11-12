@@ -138,6 +138,13 @@ type Config struct {
 	// api.DefaultPendingPerAgent; api.ParsePendingPerAgent reads the rest, and
 	// serve refuses to start on what it refuses.
 	PendingPerAgent string
+	// PreviewRecipient is WARDRYX_PREVIEW_RECIPIENT: the console's public preview
+	// key, "hpke:<kem id>:<base64url>" (invariant 51). Unset, no preview is kept.
+	PreviewRecipient string
+	// PreviewTTL is WARDRYX_PREVIEW_TTL: how long a sealed preview is kept for a
+	// hold nobody answers. Unset is api.DefaultPreviewTTL; api.ParsePreviewTTL
+	// reads the rest, and serve refuses to start on what it refuses.
+	PreviewTTL string
 }
 
 // FromEnv reads every WARDRYX_* variable once. Call it a single time per
@@ -174,6 +181,8 @@ func FromEnv() Config {
 		SignalEvents:                 os.Getenv("WARDRYX_SIGNAL_EVENTS"),
 		SignalEventsMaxAge:           os.Getenv("WARDRYX_SIGNAL_EVENTS_MAX_AGE"),
 		PendingPerAgent:              os.Getenv("WARDRYX_PENDING_PER_AGENT"),
+		PreviewRecipient:             os.Getenv("WARDRYX_PREVIEW_RECIPIENT"),
+		PreviewTTL:                   os.Getenv("WARDRYX_PREVIEW_TTL"),
 	}
 }
 

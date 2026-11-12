@@ -56,7 +56,7 @@ while IFS= read -r fn; do
 		inside && $0 == "}" { inside = 0 }
 	' "$f")
 	case "$body" in
-	*copyOut*|*copyPolicyOut*) ;;
+	*copyOut*|*copyPolicyOut*|*copyPreviewOut*) ;;
 	*) missing="$missing$fn\n" ;;
 	esac
 done <<EOF

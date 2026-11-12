@@ -26,7 +26,7 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-PURE_PKGS=(./internal/pdp ./internal/policy)
+PURE_PKGS=(./internal/pdp ./internal/policy ./internal/preview)
 
 # Forbidden as a DIRECT import of a decision-path package.
 FORBIDDEN=(

@@ -68,6 +68,7 @@ import (
 	wotel "github.com/TAIPANBOX/wardryx/internal/otel"
 	"github.com/TAIPANBOX/wardryx/internal/pdp"
 	"github.com/TAIPANBOX/wardryx/internal/policy"
+	"github.com/TAIPANBOX/wardryx/internal/previewseal"
 	"github.com/TAIPANBOX/wardryx/internal/sloburn"
 	"github.com/TAIPANBOX/wardryx/internal/store"
 )
@@ -152,7 +153,12 @@ type Server struct {
 	approvers *approverstmt.Verifier
 	// allowKeyApprovals accepts a key-kind decision while approvers is set
 	// (WARDRYX_ALLOW_KEY_APPROVALS=1; invariant 43).
-	allowKeyApprovals     bool
+	allowKeyApprovals bool
+	// previewRecipient is the console's preview key (WARDRYX_PREVIEW_RECIPIENT),
+	// and previewTTL how long a sealed preview is kept (invariant 51). A nil
+	// recipient keeps no preview.
+	previewRecipient      *previewseal.Recipient
+	previewTTL            time.Duration
 	agentTokenIgnoredOnce sync.Once
 	// sloBurn reads the quality plane's event file and supplies the standing
 	// slo_burn signal of a decision (invariant 45). Nil is the default: no file
@@ -268,6 +274,7 @@ func New(engine *pdp.Engine, st store.Store, events *event.ChainedWriter, otel *
 		pendingPerAgent:   DefaultPendingPerAgent,
 		queueFullSeen:     map[string]bool{},
 		storeTimeout:      DefaultStoreTimeout,
+		previewTTL:        DefaultPreviewTTL,
 	}
 	if events != nil {
 		s.records = events
@@ -521,6 +528,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/filter-tools", s.requireAuth(s.handleFilterTools))
 	mux.HandleFunc("POST /v1/approvals/{id}/decide", s.requireAdmin(s.handleApprovalDecide))
 	mux.HandleFunc("GET /v1/approvals", s.requireAuth(s.handleListApprovals))
+	mux.HandleFunc("GET /v1/approvals/{id}/preview", s.requireAdmin(s.handleApprovalPreview))
 	mux.HandleFunc("GET /v1/status", s.requireAuth(s.handleStatus))
 	mux.HandleFunc("GET /v1/policies", s.requireAdmin(s.handleListPolicies))
 	mux.HandleFunc("GET /v1/policies/{id}", s.requireAdmin(s.handleGetPolicy))
@@ -991,7 +999,11 @@ func (s *Server) handleDecide(w http.ResponseWriter, r *http.Request, principal 
 		// The call a person is asked to approve, by name and target and the
 		// digest the grant will bind the token to; never the arguments, which
 		// can carry customer data. Absent when the request carried no call, in
-		// which case the grant binds none, as it always did.
+		// which case the grant binds none, as it always did. What a person is
+		// shown of the arguments is a preview built from the same bytes, sealed
+		// to the console's key and kept apart; the hold records its state and
+		// digest only (invariant 51).
+		var plan previewPlan
 		if tc := req.ToolCall; tc != nil {
 			holdContext[approval.ContextKeyToolCall] = map[string]any{
 				"name":                    tc.Name,
@@ -999,11 +1011,19 @@ func (s *Server) handleDecide(w http.ResponseWriter, r *http.Request, principal 
 				"arguments_truncated":     tc.ArgumentsTruncated,
 				approval.ContextKeyDigest: tc.Digest(),
 			}
+			plan = s.planPreview(tc, principal.Org)
+			holdContext[ContextKeyPreview] = plan.contextValue()
+			if resp.RequirePreview {
+				holdContext[ContextKeyRequirePreview] = true
+			}
 		}
 		held, queueFull, err := s.requestApproval(r.Context(), req, resp, principal, holdContext)
 		if err != nil {
 			writeInternalError(w, "recording the approval hold", err)
 			return
+		}
+		if !queueFull {
+			s.keepPreview(r.Context(), held, principal.Org, plan)
 		}
 		resp.ApprovalID = held.ApprovalID
 		// A hold is a verdict like the other two, so it records the same
@@ -1015,6 +1035,10 @@ func (s *Server) handleDecide(w http.ResponseWriter, r *http.Request, principal 
 			heldInput["queue_full"] = true
 		} else {
 			heldInput["approval_id"] = held.ApprovalID
+		}
+		// The preview's state and digest, never the preview.
+		if plan.state != "" {
+			heldInput[ContextKeyPreview] = plan.contextValue()
 		}
 		// A refused hold leaves its approval pending in the queue: nobody was
 		// given its ID, so nobody waits on it (named in invariant 40).
@@ -1290,6 +1314,13 @@ func (s *Server) handleApprovalDecide(w http.ResponseWriter, r *http.Request, pr
 		writeError(w, http.StatusForbidden, "approver_statement_required")
 		return
 	}
+	// What the person was shown, against what the hold records, before anything
+	// is decided (invariant 51).
+	previewOutcome, refusal := previewAtDecide(existing.Context, dto.Decision, statement, approverKind == "person")
+	if refusal != "" {
+		writeError(w, http.StatusForbidden, refusal)
+		return
+	}
 
 	decided, token, err := approval.DecideWith(r.Context(), s.store, s.approvals, id, dto.Decision, approver, dto.DecidedBy, s.approvalTTL)
 	switch {
@@ -1327,6 +1358,16 @@ func (s *Server) handleApprovalDecide(w http.ResponseWriter, r *http.Request, pr
 		data["approver_id"] = statement.Approver
 		data["credential_id"] = statement.CredentialID
 		data["statement_jti"] = statement.JTI
+		if statement.Version == 2 {
+			data["tool_call_digest"] = statement.ToolCallDigest
+			data["preview_digest"] = statement.PreviewDigest
+		}
+	}
+	// Whether a person saw the arguments, and the state of the preview, so a
+	// decision made without seeing them is marked as such on the record.
+	data[ContextKeyPreview] = previewOutcome
+	if st := previewOf(existing.Context).state; st != "" {
+		data["preview_state"] = st
 	}
 	if dto.Decision == "grant" {
 		s.emit(evApprovalGranted, event.SeverityInfo, decided.AgentID, decided.RunID, nil, data)
@@ -1517,6 +1558,9 @@ func (s *Server) canWrite(p Principal, org string) bool {
 // org or to none, so it tells a caller only that the id is not theirs to use.
 const notYourPolicy = "an admin key writes the policies of its own org only; a policy of another org, or one that applies across orgs, needs a " + RoleCrossOrgAdmin + " key"
 
+// requirePreviewIsFileOnly is the refusal of a require_preview in a policy write.
+const requirePreviewIsFileOnly = "require_preview is refused here: it is set in the policy file and takes effect at start"
+
 // noGrantIsFileOnly is the refusal of a when_no_grant in a policy write.
 const noGrantIsFileOnly = "when_no_grant is refused here: the floor is set in the policy file and takes effect at start; to end a hold through this API, write a policy with grant_tool"
 
@@ -1588,6 +1632,12 @@ func (s *Server) handlePutPolicy(w http.ResponseWriter, r *http.Request, princip
 	// writer who believes it means something here.
 	if p.WhenNoGrant != "" {
 		writeError(w, http.StatusBadRequest, noGrantIsFileOnly)
+		return
+	}
+	// require_preview is the file's for the floor's reason: a rollback would drop
+	// it from a stored policy without a word (invariant 51).
+	if p.RequirePreview {
+		writeError(w, http.StatusBadRequest, requirePreviewIsFileOnly)
 		return
 	}
 	// The org a policy belongs to is the writer's. An org admin's policy is
