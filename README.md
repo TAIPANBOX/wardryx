@@ -249,7 +249,7 @@ The token is a compact `base64url(claims) + "." + hex(HMAC-SHA256)` string, wher
 
 ### What a person is shown of a held call
 
-A person approving a call sees its arguments, built from the bytes the grant is bound to and never from anything a model wrote about them (CLAUDE.md invariant 51).
+A person approving a call sees its arguments, built from the bytes the grant is bound to and never from anything a model wrote about them (CLAUDE.md invariant 51). Since 2.7.0; [the release notes](docs/releases/v2.7.0.md) give the order to turn it on in, console first.
 
 **Built from the bytes the digest is over.** When a hold carries a `tool_call` with arguments, wardryx builds a preview from `tool_call.arguments` exactly as received: the same bytes `arguments_sha256` hashes and the `digest` binds. The preview is a tree of typed nodes (object, array, string, number as written, bool, null, hidden, vault handle, blob, elided), never text or markup, with members in the order the bytes hold them and repeated keys shown and flagged.
 
