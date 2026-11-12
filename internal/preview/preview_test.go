@@ -269,10 +269,10 @@ func TestALongStringIsCutOnARuneBoundaryWithItsCountAndHash(t *testing.T) {
 
 func TestCharactersThatDoNotReadAsTheyLookAreFlagged(t *testing.T) {
 	cases := map[string]string{
-		"rm -rf /safe‮/etc": FlagBidi,
-		"pay​pal":           FlagInvisible,
-		"bell\u0007":        FlagControl,
-		"раypal":            FlagMixedScript,
+		"rm -rf /safe\u202e/etc": FlagBidi,
+		"pay\u200bpal":           FlagInvisible,
+		"bell\u0007":             FlagControl,
+		"раypal":                 FlagMixedScript,
 	}
 	for in, flag := range cases {
 		raw, _ := json.Marshal(map[string]string{"t": in})
@@ -355,7 +355,7 @@ func TestTheDocumentIsBoundedInSize(t *testing.T) {
 		if i > 0 {
 			b.WriteString(",")
 		}
-		b.WriteString(`"` + strings.Repeat("‮", 3) + `"`)
+		b.WriteString(`"` + strings.Repeat("\u202e", 3) + `"`)
 	}
 	b.WriteString("]")
 	_, canon := build(t, b.String())
@@ -481,7 +481,7 @@ func TestPlantedSecretsNeverAppearInTheDocument(t *testing.T) {
 
 func FuzzBuild(f *testing.F) {
 	for _, s := range []string{`{"a":1}`, `[1,"x",null,true]`, `"sk-ant-` + strings.Repeat("a", 30) + `"`,
-		`{"password":{"x":[1,2]}}`, `{"a":"‮"}`, `1e400`} {
+		`{"password":{"x":[1,2]}}`, `{"a":"\u202e"}`, `1e400`} {
 		f.Add([]byte(s))
 	}
 	f.Fuzz(func(t *testing.T, in []byte) {
