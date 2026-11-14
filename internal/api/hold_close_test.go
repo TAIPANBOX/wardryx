@@ -502,3 +502,65 @@ func mustCompile(t *testing.T, pols ...policy.Policy) *policy.Set {
 	}
 	return set
 }
+
+// --- the store failing under a withdraw or a check ---
+
+// decideFails is a memory store whose DecideApproval answers err: a person who
+// decided between the withdraw's read and its write, a row gone, or a store down.
+type decideFails struct {
+	*store.Memory
+	err error
+}
+
+func (d decideFails) DecideApproval(context.Context, string, string, string, string, time.Time) (store.Approval, error) {
+	return store.Approval{}, d.err
+}
+
+func TestAWithdrawThatLosesToAPersonOrTheStoreAnswersWhatHappened(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		err  error
+		want int
+	}{
+		{"a person decided first", store.ErrAlreadyDecided, http.StatusConflict},
+		{"the row went", store.ErrNotFound, http.StatusNotFound},
+		{"the store is down", errStoreIsDown, http.StatusInternalServerError},
+	} {
+		h := newOrgHarness(t, holdKeys, true, supportFloor())
+		id := h.heldRun(t, "gw", bot1, "r1")
+		h.srv.store = decideFails{h.st.(*store.Memory), c.err}
+		code, body := h.withdraw(t, "gw", id, approvalWithdrawRequestDTO{AgentID: bot1, RunID: "r1"})
+		if code != c.want || strings.Contains(body, "placeholder-not-a-password") {
+			t.Fatalf("%s: %d %s, want %d and no driver text", c.name, code, body, c.want)
+		}
+		if n := len(h.eventsOfType(t, "approval_withdrawn")); n != 0 {
+			t.Fatalf("%s: %d approval_withdrawn for a withdraw that did not happen", c.name, n)
+		}
+	}
+}
+
+func TestAWithdrawOnAStoreThatCannotBeReadAnswers500WithoutTheDriverText(t *testing.T) {
+	keys, _ := ParseKeys(holdKeys, false)
+	srv := New(pdp.New(mustCompile(t, supportFloor()), []byte(testHMAC)), brokenStore{}, nil, nil, keys, []byte(testHMAC), true, nil)
+	rec := doRequest(t, srv.Handler(), http.MethodPost, "/v1/approvals/ap-x/withdraw", "gw", approvalWithdrawRequestDTO{AgentID: bot1, RunID: "r1"})
+	if rec.Code != http.StatusInternalServerError || strings.Contains(rec.Body.String(), "placeholder-not-a-password") {
+		t.Fatalf("withdraw on a broken store: %d %s, want 500 with no driver text", rec.Code, rec.Body.String())
+	}
+}
+
+// A store that cannot expire (one written before invariant 52, or a test double)
+// keeps every hold until a person decides it, and the watcher returns at once.
+func TestAStoreThatCannotExpireKeepsItsHoldsAndTheWatcherReturns(t *testing.T) {
+	srv := New(pdp.New(mustCompile(t, supportFloor()), []byte(testHMAC)), brokenStore{}, nil, nil,
+		map[string]Principal{keyDigest(adminKey): {Org: "acme", Role: RoleAdmin}}, []byte(testHMAC), true, nil)
+	done := make(chan struct{})
+	go func() { srv.WatchHoldTTL(context.Background()); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the watcher did not return for a store that cannot expire")
+	}
+	if n := srv.expireHolds(context.Background(), time.Now()); n != 0 {
+		t.Fatalf("a store that cannot expire closed %d hold(s)", n)
+	}
+}

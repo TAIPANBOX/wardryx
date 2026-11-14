@@ -121,3 +121,16 @@ Feature: A hold is closed by a person, by its lifetime, or by its own agent
     Then every hold ends closed exactly once, and no check reports a hold a person or another check closed
     # -> internal/store:TestMemoryExpiryAndADecisionCloseEachHoldOnce
     # -> internal/store:TestPgTwoInstancesAndAPersonCloseEachHoldOnce
+
+  Scenario: A withdraw that loses to a person, or meets a broken store, says what happened
+    Given a hold a person decides between the withdraw's read and its write, a hold whose row went, and a store that is down
+    When the agent withdraws each
+    Then the answers are 409, 404 and a 500 that carries no driver text, and nothing is recorded as withdrawn
+    # -> internal/api:TestAWithdrawThatLosesToAPersonOrTheStoreAnswersWhatHappened
+    # -> internal/api:TestAWithdrawOnAStoreThatCannotBeReadAnswers500WithoutTheDriverText
+
+  Scenario: A store that cannot expire keeps its holds
+    Given a store with no way to expire a hold
+    When the check runs
+    Then it closes nothing and the watcher returns at once
+    # -> internal/api:TestAStoreThatCannotExpireKeepsItsHoldsAndTheWatcherReturns
