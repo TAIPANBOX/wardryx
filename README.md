@@ -279,7 +279,7 @@ One event per hold per process lifetime, so an approval nobody answers all after
 
 ### How a hold ends
 
-A hold ends in one of three ways, and no others:
+A hold ends in one of three ways, and no others. Since 2.8.0; [the release notes](docs/releases/v2.8.0.md) say what the first start closes.
 
 | `decision` | Who closes it | How | Token | Event |
 |---|---|---|---|---|
