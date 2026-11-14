@@ -33,7 +33,7 @@ if [ ! -f "$f" ]; then
 fi
 
 # Methods on *Memory that hand a stored value back to a caller.
-readers=$(grep -c '^func (m \*Memory) \(Get\|List\|Decide\|CreateApprovalOnce\)' "$f" || true)
+readers=$(grep -c '^func (m \*Memory) \(Get\|List\|Decide\|CreateApprovalOnce\|Expire\)' "$f" || true)
 if [ "$readers" -eq 0 ]; then
 	echo "FAIL: no read method found on *Memory, so this measured nothing."
 	exit 1
@@ -60,7 +60,7 @@ while IFS= read -r fn; do
 	*) missing="$missing$fn\n" ;;
 	esac
 done <<EOF
-$(grep '^func (m \*Memory) \(Get\|List\|Decide\|CreateApprovalOnce\)' "$f")
+$(grep '^func (m \*Memory) \(Get\|List\|Decide\|CreateApprovalOnce\|Expire\)' "$f")
 EOF
 
 if [ -n "$missing" ]; then

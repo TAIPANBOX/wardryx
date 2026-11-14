@@ -133,6 +133,9 @@
           },
           "WARDRYX_PREVIEW_TTL": {
             "required": false
+          },
+          "WARDRYX_HOLD_TTL": {
+            "required": false
           }
         },
         "starts_with_empty_environment": false,

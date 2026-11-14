@@ -91,7 +91,12 @@ const (
 	// and `approval_stale` would say the approval decayed when in fact
 	// nothing decayed: nobody answered.
 	evApprovalUnanswered = "approval_unanswered"
-	evPolicyUpdated      = "policy_updated"
+	// A hold nobody decided within WARDRYX_HOLD_TTL, closed by wardryx, and a
+	// hold the held agent withdrew itself (invariant 52). Neither is a person's
+	// decision, so neither is approval_denied.
+	evApprovalExpired   = "approval_expired"
+	evApprovalWithdrawn = "approval_withdrawn"
+	evPolicyUpdated     = "policy_updated"
 	// A request named an agent its key may not speak for, and was refused
 	// with no decision (F-001 of the 2026-10-17 review). Not a decision, so
 	// replay counts it as none.
@@ -200,6 +205,13 @@ type Server struct {
 	queueFullMu     sync.Mutex
 	queueFullSeen   map[string]bool
 
+	// holdTTL is how long a hold may wait for a person before wardryx closes it
+	// as expired (WARDRYX_HOLD_TTL, invariant 52), and holdTTLFailing whether the
+	// last check could not reach the store, so the log says so once per outage.
+	holdTTL        time.Duration
+	holdTTLMu      sync.Mutex
+	holdTTLFailing bool
+
 	// storeTimeout bounds every store call made on behalf of a policy write
 	// and the readiness ping. See DefaultStoreTimeout.
 	storeTimeout time.Duration
@@ -275,6 +287,7 @@ func New(engine *pdp.Engine, st store.Store, events *event.ChainedWriter, otel *
 		queueFullSeen:     map[string]bool{},
 		storeTimeout:      DefaultStoreTimeout,
 		previewTTL:        DefaultPreviewTTL,
+		holdTTL:           DefaultHoldTTL,
 	}
 	if events != nil {
 		s.records = events
@@ -527,6 +540,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/decide", s.requireAuth(s.handleDecide))
 	mux.HandleFunc("POST /v1/filter-tools", s.requireAuth(s.handleFilterTools))
 	mux.HandleFunc("POST /v1/approvals/{id}/decide", s.requireAdmin(s.handleApprovalDecide))
+	mux.HandleFunc("POST /v1/approvals/{id}/withdraw", s.requireAuth(s.handleApprovalWithdraw))
 	mux.HandleFunc("GET /v1/approvals", s.requireAuth(s.handleListApprovals))
 	mux.HandleFunc("GET /v1/approvals/{id}/preview", s.requireAdmin(s.handleApprovalPreview))
 	mux.HandleFunc("GET /v1/status", s.requireAuth(s.handleStatus))
@@ -883,7 +897,7 @@ func (s *Server) handleDecide(w http.ResponseWriter, r *http.Request, principal 
 	}
 	// The identity source is wardryx's own check when an agent token is verified
 	// (invariant 13), and the request's claim otherwise.
-	identitySource, ok := s.identitySourceFor(r.Context(), w, principal, dto.AgentID, dto.RunID, dto.AgentToken, dto.AgentDPoPProof, dto.IdentitySource)
+	identitySource, ok := s.identitySourceFor(r.Context(), w, principal, "/v1/decide", dto.AgentID, dto.RunID, dto.AgentToken, dto.AgentDPoPProof, dto.IdentitySource)
 	if !ok {
 		return
 	}
@@ -1231,14 +1245,22 @@ func isBidiControl(r rune) bool {
 func approverID(p Principal) string { return "key:" + p.KeyFP }
 
 // approverKindOf reads the kind of approver a decided_by names: "person" for a
-// verified statement's approver, "key" for a bearer key, and "" while pending or
-// for a row decided before the kinds existed (invariant 43).
+// verified statement's approver, "key" for a bearer key, "agent" for a hold its
+// agent withdrew and "system" for one wardryx closed as expired (invariant 52),
+// and "" while pending or for a row decided before the kinds existed (invariant
+// 43).
 func approverKindOf(decidedBy string) string {
 	switch {
 	case strings.HasPrefix(decidedBy, "approver:"):
 		return "person"
 	case strings.HasPrefix(decidedBy, "key:"):
 		return "key"
+	case strings.HasPrefix(decidedBy, withdrawnByPrefix):
+		// The held agent withdrew its own hold (invariant 52).
+		return "agent"
+	case decidedBy == holdTTLApprover:
+		// wardryx closed a hold nobody decided in time (invariant 52).
+		return "system"
 	}
 	return ""
 }

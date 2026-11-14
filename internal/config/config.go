@@ -145,6 +145,11 @@ type Config struct {
 	// hold nobody answers. Unset is api.DefaultPreviewTTL; api.ParsePreviewTTL
 	// reads the rest, and serve refuses to start on what it refuses.
 	PreviewTTL string
+	// HoldTTL is WARDRYX_HOLD_TTL: how long a hold waits for a person before
+	// wardryx closes it as expired (invariant 52). Unset is api.DefaultHoldTTL;
+	// api.ParseHoldTTL reads the rest, and serve refuses to start on what it
+	// refuses.
+	HoldTTL string
 }
 
 // FromEnv reads every WARDRYX_* variable once. Call it a single time per
@@ -183,6 +188,7 @@ func FromEnv() Config {
 		PendingPerAgent:              os.Getenv("WARDRYX_PENDING_PER_AGENT"),
 		PreviewRecipient:             os.Getenv("WARDRYX_PREVIEW_RECIPIENT"),
 		PreviewTTL:                   os.Getenv("WARDRYX_PREVIEW_TTL"),
+		HoldTTL:                      os.Getenv("WARDRYX_HOLD_TTL"),
 	}
 }
 

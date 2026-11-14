@@ -19,6 +19,8 @@
     "approval_denied": "high",
     "approval_timeout": "high",
     "approval_unanswered": "high",
+    "approval_expired": "medium",
+    "approval_withdrawn": "info",
     "policy_updated": "high",
     "agent_assertion_refused": "high",
     "identity_mismatch": "high"

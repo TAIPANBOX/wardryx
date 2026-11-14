@@ -84,6 +84,33 @@ type Approval struct {
 // Pending reports whether the approval has not yet been decided.
 func (a Approval) Pending() bool { return a.Decision == "" }
 
+// The two ways a hold is closed that are not a person's decision (CLAUDE.md
+// invariant 52). Neither mints a token, and neither is "deny": deny means a
+// person said no.
+const (
+	// DecisionExpired closes a hold that waited longer than WARDRYX_HOLD_TTL.
+	// Only ExpireApprovals writes it.
+	DecisionExpired = "expired"
+	// DecisionWithdrawn closes a hold the held agent withdrew itself, through
+	// POST /v1/approvals/{id}/withdraw.
+	DecisionWithdrawn = "withdrawn"
+)
+
+// HoldExpirer closes the holds nobody decided in time. Both Memory and
+// Postgres implement it; a Store that does not keeps every hold until a person
+// decides it, as every store did before invariant 52.
+type HoldExpirer interface {
+	// ExpireApprovals closes every pending approval requested at or before
+	// requestedBefore as DecisionExpired, decided by decidedBy at decidedAt, and
+	// returns the approvals it closed. A row decided by anybody else first is
+	// left alone, and of concurrent calls (on one process or many instances on
+	// one database) each row is closed and returned by exactly one, so nothing
+	// downstream reports a hold closed twice. The approval's sealed preview is
+	// deleted with it, atomically, as DecideApproval does. A closed approval
+	// leaves the pending count, so its place under the pending cap is free.
+	ExpireApprovals(ctx context.Context, requestedBefore time.Time, decidedBy string, decidedAt time.Time) ([]Approval, error)
+}
+
 // PendingOutcome says what CreateApprovalOnce did.
 type PendingOutcome int
 
@@ -196,7 +223,8 @@ type Store interface {
 	// the cost of a tick follows what is waiting and not everything ever decided.
 	ListPendingApprovals(ctx context.Context) ([]Approval, error)
 
-	// DecideApproval records decision ("grant" or "deny"), decidedBy and
+	// DecideApproval records decision ("grant" or "deny" for a person,
+	// DecisionWithdrawn for the held agent), decidedBy and
 	// label against the approval with the given id, and returns the updated
 	// approval. It returns ErrNotFound if no such approval exists, or
 	// ErrAlreadyDecided if it was already decided. The approval's sealed

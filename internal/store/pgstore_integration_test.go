@@ -772,3 +772,71 @@ func TestPgKeepsAPreviewUntilItIsDecidedOrExpires(t *testing.T) {
 		}
 	})
 }
+
+// Invariant 52 on a real Postgres: the same contracts Memory is held to, plus the
+// two that only a database can show, two instances checking at once and a backlog
+// larger than one statement.
+
+func TestPgExpiresOnlyPendingHoldsPastTheCutoff(t *testing.T) {
+	holdExpiryContract(t, testDB(t))
+}
+
+func TestPgAnExpiredHoldFreesItsPlaceUnderTheCap(t *testing.T) {
+	expiryFreesThePendingCap(t, testDB(t))
+}
+
+func TestPgAWithdrawnHoldLosesItsPreviewAndCannotBeDecided(t *testing.T) {
+	withdrawContract(t, testDB(t))
+}
+
+func TestPgTwoInstancesAndAPersonCloseEachHoldOnce(t *testing.T) {
+	p := testDB(t)
+	other, err := OpenPostgres(context.Background(), os.Getenv("DATABASE_URL"))
+	if err != nil {
+		t.Fatalf("open the second instance: %v", err)
+	}
+	t.Cleanup(func() { other.Close() })
+	expiryRacesDecisions(t, p, []HoldExpirer{p, other})
+}
+
+func TestPgABacklogLargerThanOneStatementIsClosedInOneCall(t *testing.T) {
+	p := testDB(t)
+	ctx := context.Background()
+	n := expireBatch*2 + 7
+	base := time.Now().UTC().Add(-72 * time.Hour)
+	for i := 0; i < n; i++ {
+		if err := p.CreateApproval(ctx, Approval{ApprovalID: fmt.Sprintf("ap-back-%04d", i), AgentID: "agent://a", RunID: "r", RequestedAt: base.Add(time.Duration(i) * time.Millisecond)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	closed, err := p.ExpireApprovals(ctx, base.Add(time.Hour), ttlApprover, time.Now().UTC())
+	if err != nil || len(closed) != n {
+		t.Fatalf("closed %d (%v), want %d", len(closed), err, n)
+	}
+	if pending, _ := p.ListPendingApprovals(ctx); len(pending) != 0 {
+		t.Fatalf("%d holds stayed pending", len(pending))
+	}
+}
+
+// A hold written before this build, as on a database that already holds them, is
+// closed by the first check of a store opened after the upgrade.
+func TestPgHoldsWrittenBeforeARestartAreClosedByTheFirstCheckAfterIt(t *testing.T) {
+	p := testDB(t)
+	ctx := context.Background()
+	at := time.Date(2026, 11, 14, 0, 9, 0, 0, time.UTC)
+	for i := 0; i < 3; i++ {
+		if err := p.CreateApproval(ctx, Approval{ApprovalID: fmt.Sprintf("ap-forge-%d", i), AgentID: "agent://a", RunID: "r", RequestedAt: at}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	p.Close()
+	reopened, err := OpenPostgres(ctx, os.Getenv("DATABASE_URL"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { reopened.Close() })
+	closed, err := reopened.ExpireApprovals(ctx, at.Add(24*time.Hour+time.Minute), ttlApprover, time.Now().UTC())
+	if err != nil || len(closed) != 3 {
+		t.Fatalf("the first check after a restart closed %v (%v), want the three holds", ids(closed), err)
+	}
+}
