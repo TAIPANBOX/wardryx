@@ -234,6 +234,37 @@ func (m *Memory) DecideApproval(_ context.Context, id, decision, decidedBy, labe
 	return copyOut(a)
 }
 
+// ExpireApprovals closes the pending approvals requested at or before
+// requestedBefore, under the same lock as every decision, so a hold a person
+// decided first is not pending here and is left alone, and two callers never
+// close one hold twice.
+func (m *Memory) ExpireApprovals(_ context.Context, requestedBefore time.Time, decidedBy string, decidedAt time.Time) ([]Approval, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var out []Approval
+	for _, id := range m.order {
+		a := m.byID[id]
+		if !a.Pending() || a.RequestedAt.After(requestedBefore) {
+			continue
+		}
+		a.Decision = DecisionExpired
+		a.DecidedBy = decidedBy
+		a.DecidedByLabel = ""
+		a.DecidedAt = decidedAt
+		m.byID[id] = a
+		delete(m.previews, id)
+		c, err := copyOut(a)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, c)
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		return out[i].RequestedAt.Before(out[j].RequestedAt)
+	})
+	return out, nil
+}
+
 // PutPreview keeps a copy of pv unless its approval already has one.
 func (m *Memory) PutPreview(_ context.Context, pv Preview) error {
 	m.mu.Lock()

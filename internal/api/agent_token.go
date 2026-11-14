@@ -31,8 +31,8 @@ func (s *Server) WithAgentTokens(v *agenttoken.Verifier) *Server {
 	return s
 }
 
-// identitySourceFor decides the identity source a decide request is made with.
-// It runs after the key is bound to the agent and before any rule is read. With
+// identitySourceFor decides the identity source a decide request is made with,
+// and checks the agent of a withdraw (invariant 52); route names which. It runs after the key is bound to the agent and before any rule is read. With
 // no verifier, the request's own claim stands and a token is ignored (logged
 // once per process). With a verifier:
 //   - a token that verifies, for the agent the request names, makes the source
@@ -44,7 +44,7 @@ func (s *Server) WithAgentTokens(v *agenttoken.Verifier) *Server {
 //
 // The refusals echo nothing of the request and reach no rule. It returns false
 // when it has answered the request.
-func (s *Server) identitySourceFor(ctx context.Context, w http.ResponseWriter, principal Principal, agentID, runID, token, proof, claim string) (string, bool) {
+func (s *Server) identitySourceFor(ctx context.Context, w http.ResponseWriter, principal Principal, route, agentID, runID, token, proof, claim string) (string, bool) {
 	claimed := policy.IdentitySourceOf(claim)
 	if s.agentTokens == nil {
 		if token != "" {
@@ -64,13 +64,13 @@ func (s *Server) identitySourceFor(ctx context.Context, w http.ResponseWriter, p
 	verified, err := s.agentTokens.Verify(token, time.Now())
 	if err != nil {
 		// The reason is for the operator's log. The token itself is never logged.
-		log.Printf("wardryx: agent token refused on /v1/decide for agent %q: %v", agentID, err)
+		log.Printf("wardryx: agent token refused on %s for agent %q: %v", route, agentID, err)
 		writeError(w, http.StatusForbidden, "agent_token_invalid")
 		return "", false
 	}
 	if verified.Subject != agentID {
 		s.emit(evIdentityMismatch, event.SeverityHigh, agentTokenAgentID, "", nil, map[string]any{
-			"route":             "/v1/decide",
+			"route":             route,
 			"asserted_agent_id": agentID,
 			"asserted_run_id":   runID,
 			"token_subject":     verified.Subject,
@@ -98,7 +98,7 @@ func (s *Server) identitySourceFor(ctx context.Context, w http.ResponseWriter, p
 			s.writeProofUnrecorded(w, err)
 			return "", false
 		}
-		log.Printf("wardryx: agent token proof refused on /v1/decide for agent %q: %v", agentID, err)
+		log.Printf("wardryx: agent token proof refused on %s for agent %q: %v", route, agentID, err)
 		writeError(w, http.StatusForbidden, "agent_token_proof_invalid")
 		return "", false
 	}

@@ -211,6 +211,10 @@ func runServe(args []string) error {
 	if err != nil {
 		return err
 	}
+	holdTTL, err := api.ParseHoldTTL(cfg.HoldTTL)
+	if err != nil {
+		return err
+	}
 
 	var st store.Store
 	// Set only with a database: an interface holding a nil *Postgres is not nil.
@@ -338,6 +342,7 @@ func runServe(args []string) error {
 		})
 	}
 	srv.SetPendingPerAgent(pendingPerAgent)
+	srv.SetHoldTTL(holdTTL)
 	srv.SetRecordFailOpen(cfg.RecordFailMode == "open")
 	if warn := recordFailModeWarning(cfg.RecordFailMode); warn != "" {
 		fmt.Fprintln(os.Stderr, warn)
@@ -404,6 +409,15 @@ func runServe(args []string) error {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 		go srv.WatchPreviews(ctx)
+	}
+
+	// A hold nobody decides is closed as expired once it has waited
+	// WARDRYX_HOLD_TTL, by a check at start and once a minute (invariant 52).
+	fmt.Fprintf(os.Stderr, "wardryx: a hold nobody decides is closed as expired after %s\n", holdTTL)
+	{
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		go srv.WatchHoldTTL(ctx)
 	}
 
 	fmt.Fprintf(os.Stderr, "wardryx: serving on http://%s\n", displayAddr(*addr))

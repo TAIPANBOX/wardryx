@@ -898,6 +898,47 @@ run_case "decision-path-purity: the preview reads the clock" fail \
 	"$(py 'edit("internal/preview/preview.go", "import (", "import (\n\t_ \"time\"")')" \
 	"imports 'time' directly"
 
+# Invariant 52: a hold is closed by a person's decision, by the TTL or by its own
+# agent, and an admin key closes nothing that is not a decision.
+run_case "hold-closes: the decide route takes expired" fail \
+	'./scripts/hold-closes-three-ways.sh' \
+	"$(py 'edit("internal/api/api.go", "if dto.Decision != \"grant\" && dto.Decision != \"deny\" {", "if dto.Decision != \"grant\" && dto.Decision != \"deny\" && dto.Decision != \"expired\" {")')" \
+	"no longer refuses every decision"
+
+run_case "hold-closes: a second place closes a hold" fail \
+	'./scripts/hold-closes-three-ways.sh' \
+	"$(py 'edit("internal/api/api.go", "func valueOf(p *string) string {", "func (s *Server) closeQuietly(id string) { _, _ = s.store.DecideApproval(context.Background(), id, \"deny\", \"x\", \"\", time.Now()) }\n\nfunc valueOf(p *string) string {")')" \
+	"none of the three ways a hold is closed"
+
+run_case "hold-closes: the withdraw route lets an admin key in" fail \
+	'./scripts/hold-closes-three-ways.sh' \
+	"$(py 'edit("internal/api/hold_close.go", "\tif principal.isAdmin() {\n", "\tif false {\n")')" \
+	"does not refuse an admin key"
+
+run_case "hold-closes: the withdraw stops comparing the run" fail \
+	'./scripts/hold-closes-three-ways.sh' \
+	"$(py 'edit("internal/api/hold_close.go", " || existing.RunID != dto.RunID", "")')" \
+	"compare the hold's run"
+
+run_case "hold-closes: the Postgres expiry rewrites a decided hold" fail \
+	'./scripts/hold-closes-three-ways.sh' \
+	"$(py 'edit("internal/store/pgstore.go", "WHERE a.approval_id = due.approval_id AND a.decision IS NULL", "WHERE a.approval_id = due.approval_id")')" \
+	"decision IS NULL both"
+
+run_case "hold-closes: the memory expiry keeps the preview" fail \
+	'./scripts/hold-closes-three-ways.sh' \
+	"$(py 'edit("internal/store/memory.go", "\t\tm.byID[id] = a\n\t\tdelete(m.previews, id)\n\t\tc, err := copyOut(a)", "\t\tm.byID[id] = a\n\t\tc, err := copyOut(a)")')" \
+	"does not delete the expired holds' previews"
+
+run_case "hold-closes: a comment that names DecideApproval" pass \
+	'./scripts/hold-closes-three-ways.sh' \
+	"$(py 'edit("internal/api/api.go", "func valueOf(p *string) string {", "// A hold is closed through s.store.DecideApproval( only in the three ways.\nfunc valueOf(p *string) string {")')"
+
+run_case "hold-closes: the withdraw handler is gone" fail \
+	'./scripts/hold-closes-three-ways.sh' \
+	"$(py 'import os; os.remove("internal/api/hold_close.go")')" \
+	"measured nothing"
+
 echo
 if [ -n "$(git status --porcelain)" ]; then
 	printf 'FAIL: this script left the tree dirty, so it cannot be trusted about anything above\n'

@@ -226,10 +226,25 @@ func TestEveryEventTheServerWritesIsInTheSpecRowAtItsSeverity(t *testing.T) {
 		`{"name":"grant-more","target":"`+floorAgentID+`","grant_tool":["fetch_url"]}`); rec.Code != http.StatusOK {
 		t.Fatalf("setup: PUT answered %d: %s", rec.Code, rec.Body.String())
 	}
-	if got := h.brokerDecide(t, "browse", `{}`, ""); got.ApprovalID == "" {
-		t.Fatalf("setup: the hold after the answers wrote no row (%s)", got.Reason)
+	browse := h.brokerDecide(t, "browse", `{}`, "")
+	if browse.ApprovalID == "" {
+		t.Fatalf("setup: the hold after the answers wrote no row (%s)", browse.Reason)
+	}
+	if got := h.brokerDecide(t, "search", `{}`, ""); got.ApprovalID == "" {
+		t.Fatalf("setup: the second hold after the answers wrote no row (%s)", got.Reason)
 	}
 	h.srv.sweepUnansweredApprovals(context.Background(), time.Now().Add(time.Hour))
+	// The held agent withdraws one hold through an enforcement point's key, and the
+	// other is closed by the TTL (invariant 52).
+	const busPEPKey = "bus-pep-key"
+	h.srv.keys[keyDigest(busPEPKey)] = Principal{Org: "acme", Role: RolePEP}
+	if rec := doRequest(t, h.srv.Handler(), http.MethodPost, "/v1/approvals/"+browse.ApprovalID+"/withdraw", busPEPKey,
+		approvalWithdrawRequestDTO{AgentID: floorAgentID, RunID: "mcp:run"}); rec.Code != http.StatusOK {
+		t.Fatalf("setup: the withdraw answered %d: %s", rec.Code, rec.Body.String())
+	}
+	if n := h.srv.expireHolds(context.Background(), time.Now().Add(DefaultHoldTTL+time.Minute)); n != 1 {
+		t.Fatalf("setup: the TTL closed %d hold(s), want the one left", n)
+	}
 
 	seen := map[string]int{}
 	for _, ev := range h.read(t) {
@@ -244,13 +259,13 @@ func TestEveryEventTheServerWritesIsInTheSpecRowAtItsSeverity(t *testing.T) {
 			t.Errorf("the bus carries %q at %q, and SPEC 6.2 gives it %q", ev.Type, ev.Severity, want)
 		}
 	}
-	// Seven types reached the bus, so the comparison above read something.
+	// Nine types reached the bus, so the comparison above read something.
 	var types []string
 	for k := range seen {
 		types = append(types, k)
 	}
 	sort.Strings(types)
-	if len(types) < 7 {
+	if len(types) < 9 || seen["approval_expired"] != 1 || seen["approval_withdrawn"] != 1 {
 		t.Fatalf("only %v reached the bus, so this compared too little to say anything", types)
 	}
 }

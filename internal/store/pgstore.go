@@ -246,6 +246,68 @@ func (p *Postgres) DecideApproval(ctx context.Context, id, decision, decidedBy, 
 	return p.GetApproval(ctx, id)
 }
 
+// expireBatch is how many holds one statement of ExpireApprovals closes. The
+// method repeats until a statement closes fewer, so a backlog (a database that
+// has held holds since before the TTL existed) is closed in one call without one
+// statement locking all of it.
+const expireBatch = 500
+
+// ExpireApprovals closes the pending approvals requested at or before
+// requestedBefore. Each batch is one statement: the rows are locked FOR UPDATE
+// SKIP LOCKED, updated only while decision IS NULL, and their previews deleted,
+// all in that statement, so it commits whole or not at all. A row a person is
+// deciding at that moment is locked by their UPDATE and skipped; a row they
+// decided first no longer matches decision IS NULL on the recheck Postgres makes
+// for a locked row; and of two instances running this at once, the second skips
+// or rechecks every row the first took. So each hold is returned once.
+func (p *Postgres) ExpireApprovals(ctx context.Context, requestedBefore time.Time, decidedBy string, decidedAt time.Time) ([]Approval, error) {
+	var out []Approval
+	for {
+		rows, err := p.db.QueryContext(ctx,
+			`WITH due AS (
+			     SELECT approval_id FROM approvals
+			     WHERE decision IS NULL AND requested_at <= $1
+			     ORDER BY requested_at
+			     LIMIT $5
+			     FOR UPDATE SKIP LOCKED
+			 ), closed AS (
+			     UPDATE approvals a
+			     SET decision = $2, decided_by = $3, decided_at = $4, decided_by_label = NULL
+			     FROM due
+			     WHERE a.approval_id = due.approval_id AND a.decision IS NULL
+			     RETURNING a.approval_id, a.agent_id, a.run_id, a.requested_at, a.decided_at,
+			               a.decided_by, a.decided_by_label, a.decision, a.context_json
+			 ), previews AS (
+			     DELETE FROM approval_previews pv USING closed
+			     WHERE pv.approval_id = closed.approval_id
+			 )
+			 SELECT approval_id, agent_id, run_id, requested_at, decided_at, decided_by, decided_by_label, decision, context_json
+			 FROM closed ORDER BY requested_at ASC`,
+			requestedBefore, DecisionExpired, decidedBy, decidedAt, expireBatch)
+		if err != nil {
+			return out, fmt.Errorf("store: expire approvals: %w", err)
+		}
+		n := 0
+		for rows.Next() {
+			a, err := scanApproval(rows)
+			if err != nil {
+				_ = rows.Close()
+				return out, fmt.Errorf("store: scan expired approval: %w", err)
+			}
+			out = append(out, a)
+			n++
+		}
+		if err := rows.Err(); err != nil {
+			_ = rows.Close()
+			return out, fmt.Errorf("store: expire approvals: %w", err)
+		}
+		_ = rows.Close()
+		if n < expireBatch {
+			return out, nil
+		}
+	}
+}
+
 // PutPreview writes a sealed preview with ON CONFLICT DO NOTHING: a repeated
 // call already has its preview, and it is the same one.
 func (p *Postgres) PutPreview(ctx context.Context, pv Preview) error {
