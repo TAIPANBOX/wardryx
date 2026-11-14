@@ -301,6 +301,16 @@ func TestAnAdminKeyCannotWithdrawAHold(t *testing.T) {
 	if !h.approval(t, id).Pending() {
 		t.Fatal("an admin key closed the hold")
 	}
+	// With one org the admin speaks for every agent of it (invariant 36), so the
+	// refusal is the withdraw route's own and not the agent binding's.
+	one := newOrgHarness(t, "gw:acme:pep,adm:acme:admin", true, supportFloor())
+	held := one.heldRun(t, "gw", bot1, "r1")
+	if code, body := one.withdraw(t, "adm", held, approvalWithdrawRequestDTO{AgentID: bot1, RunID: "r1"}); code != http.StatusForbidden || !strings.Contains(body, "admin key does not withdraw") {
+		t.Fatalf("the admin of the only org withdrew a hold: %d %s, want 403", code, body)
+	}
+	if !one.approval(t, held).Pending() {
+		t.Fatal("the admin of the only org closed the hold")
+	}
 }
 
 func TestAnotherAgentOrRunCannotWithdrawAndLearnsNothing(t *testing.T) {
