@@ -733,7 +733,7 @@ Every `WARDRYX_*` variable is read once at process startup (`internal/config`), 
 
 | Variable | Flag | Default | Meaning |
 | --- | --- | --- | --- |
-| `WARDRYX_ADDR` | `-addr` | `:8090` | Listen address |
+| `WARDRYX_ADDR` | `-addr` | `:8090` | Listen address; the default is every interface, and `make serve` passes `127.0.0.1:8090` |
 | `WARDRYX_KEYS` | (none) | (empty) | `key:org[:role[:agents]],...` bearer keys; with no valid entry, `serve` refuses to start unless `WARDRYX_ALLOW_DEVKEY` is set (see below) |
 | `WARDRYX_ALLOW_DEVKEY` | (none) | `false` | Explicit opt-in to the insecure dev key `devkey` -> `default`/`admin` when `WARDRYX_KEYS` has no valid entry; refused outright (not merely warned about) together with a non-loopback `-addr` |
 | `WARDRYX_DB` | `-db` | (empty) | Postgres DSN; empty uses the in-memory store, and then approval state and the record of accepted DPoP proofs live in this process only, so a restart forgets them and a second instance does not share them |
