@@ -23,6 +23,8 @@ permissions:
 
 jobs:
   gremlins:
+    # Free only while the repository is public; a private one would meter.
+    if: github.event.repository.private == false
     runs-on: ubuntu-latest
     timeout-minutes: 345
     steps:
@@ -54,10 +56,11 @@ jobs:
               printf '%s\n' "$rel" >> "$out/not-reached"
               continue
             fi
+            rc=0
             timeout "$left" "$(go env GOPATH)/bin/gremlins" unleash \
               --threshold-efficacy 0 --output "$out/$name.json" "$rel" \
-              > "$out/$name.txt" 2>&1
-            printf '%s %s\n' "$?" "$rel" >> "$out/exit-codes"
+              > "$out/$name.txt" 2>&1 || rc=$?
+            printf '%s %s\n' "$rc" "$rel" >> "$out/exit-codes"
           done < "$out/packages"
       - name: put the kill count on the run page
         if: always()
