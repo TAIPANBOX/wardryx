@@ -6,17 +6,12 @@
 # score is required yet. The tool is gremlins, pinned to the exact release the
 # estate already runs in rollcall (v0.6.0), installed only here, in CI.
 #
-# Sharded: the plan job lists the packages that have tests and splits them into
-# up to 8 buckets of similar size (by lines of Go source). The shards run side by
-# side, each in its own job with its own report. The summary job adds the shards
-# into one kill count and names every package that was not measured, so a
-# partial run says it is partial.
+# One job: packages run one after another until the 300 minute budget is spent.
+# A package still running at the deadline is stopped and keeps no report, and
+# every package not reached is listed in the summary, so a partial run says it
+# is partial. The summary puts the kill score on the run page.
 #
-# Time-bounded: the 300 minute budget is shared out between the shards. Each
-# shard gets its even share plus a 15 minute margin for uneven buckets. A shard
-# stopped at its deadline keeps every package it finished.
-#
-# Public repository, standard runners: it costs nothing.
+# Public repository, standard runner: it costs nothing.
 name: mutation
 
 on:
@@ -28,78 +23,12 @@ permissions:
   contents: read
 
 jobs:
-  plan:
-    name: plan the shards
-    # Free only while the repository is public; a private one would meter.
-    if: github.event.repository.private == false
-    runs-on: ubuntu-24.04
-    timeout-minutes: 15
-    outputs:
-      count: ${{ steps.split.outputs.count }}
-      shards: ${{ steps.split.outputs.shards }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version: "1.27.4"
-          cache: true
-      - name: split the tested packages into buckets of similar size
-        id: split
-        env:
-          MAX_SHARDS: "8"
-          TOTAL_MINUTES: "300"
-        run: |
-          set -eu
-          mod="$(go list -m)"
-          go list -f '{{if or .TestGoFiles .XTestGoFiles}}{{.ImportPath}} {{.Dir}}{{end}}' ./... > "$RUNNER_TEMP/tested.txt"
-          python3 - "$mod" "$RUNNER_TEMP/tested.txt" <<'PY'
-          import json, os, sys
-          mod, listing = sys.argv[1], sys.argv[2]
-          max_shards = int(os.environ["MAX_SHARDS"])
-          total = int(os.environ["TOTAL_MINUTES"])
-          pkgs = []
-          for line in open(listing):
-              line = line.strip()
-              if not line:
-                  continue
-              imp, d = line.split(" ", 1)
-              lines = 0
-              for f in os.listdir(d):
-                  if f.endswith(".go"):
-                      with open(os.path.join(d, f), encoding="utf-8", errors="replace") as fh:
-                          lines += sum(1 for _ in fh)
-              pkgs.append((lines, "." + imp[len(mod):]))
-          if not pkgs:
-              sys.exit("no package has tests: nothing to mutate")
-          n = min(max_shards, len(pkgs))
-          buckets = [{"load": 0, "pkgs": []} for _ in range(n)]
-          for lines, rel in sorted(pkgs, key=lambda p: (-p[0], p[1])):
-              b = min(buckets, key=lambda b: (b["load"], len(b["pkgs"])))
-              b["load"] += lines
-              b["pkgs"].append(rel)
-          budget = -(-total // n) + 15
-          shards = [{"index": i, "label": f"{i + 1} of {n}", "budget": budget,
-                     "pkgs": "\n".join(b["pkgs"])} for i, b in enumerate(buckets)]
-          for s, b in zip(shards, buckets):
-              print(f"shard {s['index']}: {len(b['pkgs'])} packages, {b['load']} lines, budget {budget} min", file=sys.stderr)
-          with open(os.environ["GITHUB_OUTPUT"], "a") as out:
-              out.write(f"count={n}\n")
-              out.write("shards=" + json.dumps(shards) + "\n")
-          PY
-
   gremlins:
-    name: gremlins shard ${{ matrix.shard.label }}
-    needs: plan
+    name: gremlins, every tested package
     # Free only while the repository is public; a private one would meter.
     if: github.event.repository.private == false
     runs-on: ubuntu-24.04
     timeout-minutes: 345
-    strategy:
-      fail-fast: false
-      matrix:
-        shard: ${{ fromJSON(needs.plan.outputs.shards) }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -110,21 +39,21 @@ jobs:
           cache: true
       - name: install gremlins v0.6.0
         run: go install github.com/go-gremlins/gremlins/cmd/gremlins@v0.6.0
-      - name: mutate this shard's packages within its share of the budget
+      - name: mutate every tested package within the time budget
         env:
-          BUDGET_MINUTES: ${{ matrix.shard.budget }}
-          SHARD: ${{ matrix.shard.index }}
-          SHARD_PACKAGES: ${{ matrix.shard.pkgs }}
+          BUDGET_MINUTES: "300"
         run: |
           set -u
           out="$RUNNER_TEMP/mutation"
           mkdir -p "$out"
-          printf '%s\n' "$SHARD_PACKAGES" > "$out/packages"
           : > "$out/not-reached"
           : > "$out/exit-codes"
           deadline=$(( $(date +%s) + BUDGET_MINUTES * 60 ))
-          while read -r rel; do
-            [ -n "$rel" ] || continue
+          mod="$(go list -m)"
+          go list -f '{{if or .TestGoFiles .XTestGoFiles}}{{.ImportPath}}{{end}}' ./... > "$out/packages"
+          while read -r pkg; do
+            [ -n "$pkg" ] || continue
+            rel=".${pkg#"$mod"}"
             name="$(printf '%s' "$rel" | tr '/.' '__')"
             left=$(( deadline - $(date +%s) ))
             if [ "$left" -le 60 ]; then
@@ -137,98 +66,63 @@ jobs:
               > "$out/$name.txt" 2>&1 < /dev/null || rc=$?
             printf '%s %s\n' "$rc" "$rel" >> "$out/exit-codes"
           done < "$out/packages"
-          echo "shard $SHARD: $(wc -l < "$out/exit-codes" | tr -d ' ') package(s) run, $(wc -l < "$out/not-reached" | tr -d ' ') not reached"
-      - name: keep this shard's reports
-        if: always()
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: mutation-shard-${{ matrix.shard.index }}
-          path: ${{ runner.temp }}/mutation/
-          if-no-files-found: warn
-
-  summary:
-    name: kill count across the shards
-    needs: [plan, gremlins]
-    if: always() && needs.plan.result == 'success' && github.event.repository.private == false
-    runs-on: ubuntu-24.04
-    timeout-minutes: 10
-    steps:
-      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-        with:
-          pattern: mutation-shard-*
-          path: shards
+          echo "$(wc -l < "$out/exit-codes" | tr -d ' ') package(s) run, $(wc -l < "$out/not-reached" | tr -d ' ') not reached"
       - name: put the kill count on the run page
-        env:
-          EXPECTED_SHARDS: ${{ needs.plan.outputs.count }}
+        if: always()
         run: |
-          python3 - shards >> "$GITHUB_STEP_SUMMARY" <<'PY'
+          python3 - "$RUNNER_TEMP/mutation" >> "$GITHUB_STEP_SUMMARY" <<'PY'
           import collections, glob, json, os, sys
-          root = sys.argv[1]
-          expected = int(os.environ["EXPECTED_SHARDS"])
+          d = sys.argv[1]
 
-          def read(d, name):
+          def read(name):
               p = os.path.join(d, name)
               return [l.strip() for l in open(p) if l.strip()] if os.path.exists(p) else []
 
+          names, stopped = {}, []
+          for l in read("exit-codes"):
+              code, rel = l.split(" ", 1)
+              names[rel.replace("/", "_").replace(".", "_")] = rel
+              if code == "124":
+                  stopped.append(rel)
           tot = collections.Counter()
-          rows, shard_rows, missing = [], [], []
-          reported = 0
-          for d in sorted(glob.glob(os.path.join(root, "mutation-shard-*"))):
-              label = os.path.basename(d).rsplit("-", 1)[1]
-              if not os.path.exists(os.path.join(d, "packages")):
-                  shard_rows.append((label, "no report", 0, 0, 0, 0))
+          rows = []
+          for p in sorted(glob.glob(os.path.join(d, "*.json"))):
+              try:
+                  r = json.load(open(p))
+              except ValueError:
                   continue
-              reported += 1
-              packages = read(d, "packages")
-              ran = {}
-              for l in read(d, "exit-codes"):
-                  code, rel = l.split(" ", 1)
-                  ran[rel] = code
-              not_reached = read(d, "not-reached")
-              names = {rel.replace("/", "_").replace(".", "_"): rel for rel in packages}
-              measured = set()
-              for p in sorted(glob.glob(os.path.join(d, "*.json"))):
-                  rel = names.get(os.path.basename(p)[:-5], os.path.basename(p))
-                  try:
-                      r = json.load(open(p))
-                  except ValueError:
-                      continue
-                  c = collections.Counter()
-                  for f in r.get("files") or []:
-                      for m in f.get("mutations") or []:
-                          c[m.get("status", "?")] += 1
-                  if not c:
-                      c.update({"KILLED": r.get("mutants_killed", 0), "LIVED": r.get("mutants_lived", 0),
-                                "NOT COVERED": r.get("mutants_not_covered", 0),
-                                "NOT VIABLE": r.get("mutants_not_viable", 0)})
-                  tot.update(c)
-                  rows.append((rel, label, c))
-                  measured.add(rel)
-              unmeasured = [rel for rel in packages if rel not in measured]
-              missing += unmeasured
-              stopped_rels = [rel for rel, code in ran.items() if code == "124" and rel not in measured]
-              no_report = [rel for rel in unmeasured if rel not in not_reached and rel not in stopped_rels]
-              shard_rows.append((label, len(packages), len(measured), len(not_reached), len(stopped_rels), len(no_report)))
+              c = collections.Counter()
+              for f in r.get("files") or []:
+                  for m in f.get("mutations") or []:
+                      c[m.get("status", "?")] += 1
+              if not c:
+                  c.update({"KILLED": r.get("mutants_killed", 0), "LIVED": r.get("mutants_lived", 0),
+                            "NOT COVERED": r.get("mutants_not_covered", 0),
+                            "NOT VIABLE": r.get("mutants_not_viable", 0)})
+              tot.update(c)
+              rows.append((names.get(os.path.basename(p)[:-5], os.path.basename(p)), c))
           n = tot["KILLED"] + tot["LIVED"] + tot["TIMED OUT"] + tot["NOT COVERED"]
           score = f"{100 * tot['KILLED'] / n:.1f}%" if n else "n/a"
           print("### Mutation testing (gremlins v0.6.0, measured, not gated)\n")
           print(f"**Kill score {score}: killed {tot['KILLED']} of {n}** viable mutants "
                 f"(lived {tot['LIVED']}, timed out {tot['TIMED OUT']}, not covered {tot['NOT COVERED']}, "
                 f"not viable {tot['NOT VIABLE']}).\n")
-          print(f"{reported} of {expected} shards reported.\n")
-          print("| shard | packages | measured | not reached | stopped at budget | no report |")
+          print("| package | killed | lived | timed out | not covered | not viable |")
           print("|---|---|---|---|---|---|")
-          for label, assigned, ran, nr, stopped, lost in sorted(shard_rows, key=lambda r: str(r[0])):
-              print(f"| {label} | {assigned} | {ran} | {nr} | {stopped} | {lost} |")
-          print("\n| package | shard | killed | lived | timed out | not covered | not viable |")
-          print("|---|---|---|---|---|---|---|")
-          for rel, label, c in sorted(rows, key=lambda r: r[0]):
-              print(f"| {rel} | {label} | {c['KILLED']} | {c['LIVED']} | {c['TIMED OUT']} | {c['NOT COVERED']} | {c['NOT VIABLE']} |")
-          if reported < expected:
-              print(f"\n{expected - reported} shard(s) left no report at all, so their packages are not in the tables above.")
-          if missing:
-              print("\nPARTIAL RUN: these packages were not measured, because the time budget ran out or their shard did not report:")
-              print("\n" + ", ".join(sorted(set(missing))))
+          for name, c in sorted(rows, key=lambda r: r[0]):
+              print(f"| {name} | {c['KILLED']} | {c['LIVED']} | {c['TIMED OUT']} | {c['NOT COVERED']} | {c['NOT VIABLE']} |")
+          nr = read("not-reached")
+          if nr:
+              print(f"\nNot reached within the time budget ({len(nr)}): " + ", ".join(nr))
+          if stopped:
+              print("\nStopped at the deadline, no report: " + ", ".join(stopped))
           if not rows:
               print("\nMEASURED NOTHING: no gremlins report was written.")
           PY
+      - name: keep the reports
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: mutation
+          path: ${{ runner.temp }}/mutation/
+          if-no-files-found: warn
