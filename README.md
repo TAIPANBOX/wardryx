@@ -800,6 +800,12 @@ CI runs two more gates that have no local `make` target: `govulncheck ./...` (kn
 scanning against the Go vulnerability database) and `gosec ./...` (static analysis for common Go security
 mistakes), both in the `security` job in `.github/workflows/ci.yml`.
 
+CI also measures statement coverage on every run and holds it against `.coverage-floor`, a ratchet
+that only rises (the target is 90%; the check is `scripts/coverage-floor.sh`). Two scheduled workflows
+run weekly on standard GitHub runners: `vulnscan.yml` (`govulncheck`, so a new advisory is caught
+without a push) and `mutation.yml` (gremlins mutation testing of the product code, measured and not
+gated).
+
 The decision engine's table tests (`internal/pdp/pdp_test.go`) cover every rule and its boundary: allow; deny on a denied tool, on an unattested agent, at and over `max_steps`, and on a domain outside `allow_domains`; the empty-`domains` no-op; hold over `require_human_above_usd`; allow with a valid approval token; deny with an expired or wrong-binding one; and `deny_above_usd` as a hard ceiling that a cleanly-verifying token still cannot cross and that fires before the hold. Separate suites pin the normalization traps (a `deny_tool` entry matched whatever the case or trailing whitespace, an `attestation_method` of `none`, `NONE`, `n/a` or a bare space treated as unattested), the `cacheable` rule field by field, `PolicyVersion` stability, and the offline `check` path. The typed-signal suites (`internal/pdp/signal_test.go`, `internal/policy/signal_test.go`, `internal/replay/signals_test.go`, `internal/api/signals_test.go`) hold a signal to adding a hold and nothing else, over two hundred seeded random policies as well as by case, and hold the record and the replay to what a decision actually read. The floor suites (`internal/pdp/no_grant_test.go`, `internal/policy/no_grant_test.go`, `internal/replay/no_grant_test.go`, `internal/api/no_grant_test.go`) hold a restriction to never lifting a hold, over two hundred seeded random policies as well as by case, hold every reason sentence word for word, and hold the queue to one row per call. The allow-list suites (`internal/pdp/allow_tool_test.go`, `internal/policy/allow_tool_test.go`, `internal/replay/allow_tool_test.go`, `internal/api/allow_tool_test.go`) hold `allow_tool` to its one-sided failures: a renamed tool, an empty or blank list, two lists that must intersect, and a tool call that names a tool the list leaves out.
 
 ---
